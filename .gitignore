@@ -1,0 +1,4 @@
+.venv/
+.env
+AGENTS.md
+IMPLEMENTATION_PLAN.md
