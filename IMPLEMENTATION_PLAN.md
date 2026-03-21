@@ -204,7 +204,7 @@ OpenSpiel is a reference for the compact interface shape: current player, legal 
 A recommended starting structure is:
 
 ```text
-arena/
+AgentsArena/
   pyproject.toml
   AGENTS.md
   IMPLEMENTATION_PLAN.md

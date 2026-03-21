@@ -1,0 +1,10 @@
+README.md
+pyproject.toml
+src/agents_arena.egg-info/PKG-INFO
+src/agents_arena.egg-info/SOURCES.txt
+src/agents_arena.egg-info/dependency_links.txt
+src/agents_arena.egg-info/requires.txt
+src/agents_arena.egg-info/top_level.txt
+src/arena/__init__.py
+src/arena/core/__init__.py
+tests/test_import_smoke.py

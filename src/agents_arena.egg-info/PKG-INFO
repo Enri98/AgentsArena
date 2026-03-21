@@ -1,0 +1,21 @@
+Metadata-Version: 2.4
+Name: agents-arena
+Version: 0.1.0
+Summary: Pure simulation package for deterministic turn-based games.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: pydantic>=2
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: ruff>=0.11; extra == "dev"
+
+# AgentsArena
+
+AgentsArena is a Python 3.11 library for pure, turn-based game simulation.
+
+The current implementation focus is the simulation package only:
+- sequential games
+- deterministic games
+- perfect-information games
+
+Phase 0 bootstraps the repository layout, packaging, and baseline tooling.
