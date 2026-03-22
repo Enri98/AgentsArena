@@ -753,6 +753,95 @@ Implement:
 - domain events are typed and immutable
 - no game-specific logic leaks into this layer
 
+### Ordered slices
+
+#### Slice 1 - Exception foundation `[done]`
+
+Objective:
+- freeze the shared exception hierarchy and payload contract for the simulation core
+
+Scope:
+- `arena.core.exceptions`
+- focused exception tests
+
+Status:
+- completed
+
+#### Slice 2 - Seat aliases and validation `[done]`
+
+Objective:
+- establish `Seat` as the canonical internal seat alias and add one narrow, non-coercing validation helper
+
+Scope:
+- `arena.core.types`
+- `arena.core.seats`
+- focused tests for seat alias and validation behavior
+
+Constraints to preserve:
+- keep `Seat = int`
+- keep seat helpers narrowly about seat validity only
+- reject `bool` explicitly even though it is an `int` subclass
+- do not introduce seat-specific exceptions yet
+- do not expand into player identity, labels, assignment, or turn logic
+
+Acceptance criteria:
+- `Seat` is defined as the canonical internal seat alias
+- seat helpers remain minimal, explicit, and game-agnostic
+- seat validation behavior is documented by tests
+- valid non-negative integer seats are accepted without coercion
+- invalid seat inputs such as `bool`, negative integers, floats, strings, and `None` are rejected predictably
+
+Status:
+- completed
+
+Implementation note:
+- implemented as `Seat = int` plus one narrow, non-coercing predicate helper; `arena.core` re-exports were intentionally left unchanged to avoid expanding the public API surface early
+
+#### Slice 3 - Domain event foundation `[done]`
+
+Objective:
+- define the shared immutable event abstraction after seat identity is frozen
+
+Scope:
+- `arena.core.events`
+- focused event tests
+
+Acceptance criteria:
+- the base domain event abstraction is importable and documented
+- event objects are frozen, typed, and value-comparable
+- the base event contract remains pure and game-agnostic
+- subclasses can add typed event fields without requiring transport-oriented payload structures
+
+Status:
+- completed
+
+Implementation note:
+- implemented as a minimal frozen `DomainEvent` base with a derived `event_type` property so future game events can add strongly typed fields without inheriting transport-oriented payload requirements
+
+#### Slice 4 - Base result abstraction if needed `[done]`
+
+Objective:
+- add a minimal shared result abstraction only if a concrete dependency appears before Phase 3
+
+Scope:
+- `arena.core.results` only if required
+- focused result tests only if the slice is activated
+
+Acceptance criteria:
+- the shared result abstraction is importable and documented
+- result objects are frozen, typed, and game-agnostic
+- shared result types support at least generic win and draw outcomes without leaking Connect 4 specifics
+
+Status:
+- completed
+
+Implementation note:
+- activated this slice and implemented a minimal frozen `RuleResult` base plus generic `Win` and `Draw` value objects, keeping the contract game-agnostic and detached from Connect 4 specifics
+
+### Phase 1 status
+
+- completed
+
 ## Phase 2 — Base config and serializer interfaces
 
 ### Objective
