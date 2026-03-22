@@ -861,6 +861,75 @@ Implement:
 - serializer contracts are stable and documented
 - schema-generation path is demonstrable with a trivial model
 
+### Ordered slices
+
+#### Slice 1 - Base config model `[done]`
+
+Objective:
+- freeze the shared Pydantic config behavior before serializer interfaces depend on it
+
+Scope:
+- `arena.core.config`
+- focused config validation and schema tests
+
+Acceptance criteria:
+- the base config model is importable and documented
+- unknown fields are rejected
+- strict validation avoids unwanted coercion for trivial subclasses
+- a trivial subclass can generate JSON Schema successfully
+
+Status:
+- completed
+
+Implementation note:
+- implemented as a minimal `BaseGameConfig` Pydantic base with `extra="forbid"` and `strict=True`, leaving game-specific defaults and extra metadata out of the shared contract
+
+#### Slice 2 - Serializer contract `[done]`
+
+Objective:
+- define the shared serializer interface for config, state, action, and observation boundaries
+
+Scope:
+- `arena.core.serializer`
+- focused serializer contract tests
+
+Acceptance criteria:
+- the serializer contract is importable and documented
+- the contract clearly supports config, state, action, and observation dump/load operations
+- the interface remains game-agnostic and free of Connect 4-specific assumptions
+- a trivial implementation can satisfy the contract in tests
+
+Status:
+- completed
+
+Implementation note:
+- implemented as a runtime-checkable `Serializer` protocol plus shared JSON-safe payload type aliases, keeping the contract interface-only and deferring snapshot-envelope structure to the next slice
+
+#### Slice 3 - Snapshot envelope `[done]`
+
+Objective:
+- define a stable, JSON-friendly snapshot envelope with schema version support
+
+Scope:
+- snapshot envelope model(s) in `arena.core.serializer`
+- focused snapshot envelope tests
+
+Acceptance criteria:
+- the snapshot envelope is importable and documented
+- it includes schema version support and stable metadata fields
+- it is JSON-friendly and round-trips cleanly with a trivial payload
+- malformed or incomplete envelope payloads fail clearly
+
+Status:
+- completed
+
+Implementation note:
+- implemented `SnapshotEnvelope` as a strict Pydantic boundary model with stable metadata plus serialized state, and switched the shared JSON payload alias to Pydantic's named recursive `JsonValue` for reliable envelope validation
+
+### Phase 2 status
+
+- completed
+
 ## Phase 3 — Base game abstractions
 
 ### Objective
