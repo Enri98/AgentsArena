@@ -1128,6 +1128,79 @@ Implement:
 - state objects are minimal and pure
 - action and event models are explicit and typed
 
+### Ordered slices
+
+#### Slice 1 - Connect 4 package scaffold and config `[done]`
+
+Objective:
+- introduce the Connect 4 package boundary and freeze the validated config model before state and rules logic depend on it
+
+Scope:
+- `arena.games.connect4.__init__`
+- `arena.games.connect4.config`
+- focused package/import and config validation tests
+
+Acceptance criteria:
+- the Connect 4 package is importable without pulling in rule or serializer wiring from later phases
+- `Connect4Config` inherits the shared config behavior and validates the supported board dimensions and connect length
+- unknown fields and invalid numeric combinations fail clearly
+- tests lock the accepted defaults and validation edge cases for later phases
+
+Status:
+- completed
+
+Implementation note:
+- added the initial `arena.games.connect4` package and kept `Connect4Config` limited to validated board-shape parameters so later state and rules slices can stay pure and derive runtime behavior from state alone
+
+#### Slice 2 - Connect 4 state and action models `[done]`
+
+Objective:
+- introduce the immutable state and move domain objects with explicit board conventions and no derived runtime caches
+
+Scope:
+- `arena.games.connect4.state`
+- `arena.games.connect4.actions`
+- package exports needed for the static model surface
+- focused state/action tests
+
+Acceptance criteria:
+- `Connect4State` is a frozen dataclass with only authoritative state fields
+- the board representation is a tuple of tuples and its orientation and cell encoding are documented in code
+- `DropDisc` is a frozen seat-agnostic action type with explicit column data only
+- tests cover importability, immutability, equality semantics, and representative board construction
+
+Status:
+- completed
+
+Implementation note:
+- kept `Connect4State` limited to `board` plus `current_seat`, added lightweight invariants for rectangular boards and valid disc values, and exposed small board-value helpers that later rules logic can reuse without caching derived state
+
+#### Slice 3 - Connect 4 events and result surface `[done]`
+
+Objective:
+- define the pure Connect 4 domain events and lock whether Phase 5 needs any game-specific result wrappers beyond the shared core results
+
+Scope:
+- `arena.games.connect4.events`
+- `arena.games.connect4.__init__`
+- focused event/result-surface tests
+
+Acceptance criteria:
+- Connect 4 exposes explicit typed events for disc drops, wins, and draws
+- event payloads carry only simulation-domain data needed by later rule transitions
+- any result surface decision remains compatible with the shared `Win` and `Draw` abstractions
+- tests cover immutability, stable event typing, and public exports
+
+Status:
+- completed
+
+Implementation note:
+- kept Connect 4 on the shared `Win` and `Draw` result surface, added explicit public-export coverage for `DiscDropped`, `WinnerDetected`, and `GameDrawn`, and left event payload validation intentionally minimal so Phase 6 can emit events from validated rule transitions
+
+### Phase 5 status
+
+- completed
+
 ## Phase 6 — Connect 4 rules engine
 
 ### Objective
@@ -1153,6 +1226,80 @@ Implement:
 - wins are detected in all four relevant directions
 - draws are detected correctly
 - emitted events match the applied transition
+
+### Ordered slices
+
+#### Slice 1 - Rules engine scaffold, initial state, and move validation `[done]`
+
+Objective:
+- implement the core rules-engine scaffold plus the non-terminal mechanics that define whose turn it is and which actions are legal
+
+Scope:
+- `arena.games.connect4.observation`
+- `arena.games.connect4.rules`
+- focused rules tests for initial state, current seat, legal actions, and validation failures
+
+Acceptance criteria:
+- `initial_state` builds an empty immutable board from `Connect4Config`
+- `current_seat` returns the seat stored in state without hidden runtime context
+- `legal_actions` returns left-to-right `DropDisc` actions only for playable columns and no actions for terminal states
+- `validate_action` raises the expected domain exceptions for finished games, wrong seats, wrong action types, out-of-bounds columns, and full columns
+
+Status:
+- completed
+
+Implementation note:
+- introduced a minimal `Connect4RulesEngine` plus typed `Connect4Observation`, locking initial-state creation, turn lookup, left-to-right legal action generation, and defensive validation now while intentionally deferring move application and win detection to the next slice
+
+#### Slice 2 - Apply-action transitions, win detection, and terminal results `[done]`
+
+Objective:
+- implement pure state transitions, last-move win detection, and terminal result derivation for Connect 4
+
+Scope:
+- `arena.games.connect4.rules`
+- focused transition tests for gravity placement, seat switching, win detection, draw detection, and emitted event order
+
+Acceptance criteria:
+- `apply_action` validates defensively, places a disc in the lowest available row, and returns a new immutable state
+- win detection covers vertical, horizontal, and both diagonal directions based on the latest move
+- terminal states produce the expected shared result objects and stop turn switching
+- emitted events match the applied transition for ongoing, winning, and drawn moves
+
+Status:
+- completed
+
+Implementation note:
+- implemented immutable drop transitions with ordered domain events, covered all four win directions plus draw detection, and bound the active `Connect4Config` to the rules engine so non-default `connect_length` values remain coherent without expanding `Connect4State`
+
+#### Slice 3 - Observation building and rules regression coverage `[done]`
+
+Objective:
+- complete the player-facing observation path and lock the Connect 4 rules behavior with focused regression tests around edge cases
+
+Scope:
+- `arena.games.connect4.observation`
+- `arena.games.connect4.rules`
+- focused observation and regression tests for near-full boards, terminal observations, and repeated legality checks
+
+Acceptance criteria:
+- `observation` returns a typed Connect 4 observation with public board state, active seat, and structured legal actions
+- observations stay deterministic and coherent with `legal_actions` for the requested seat
+- focused regression tests cover edge cases called out in the implementation plan for Phase 6 scope
+- the rules module exports remain stable for later serializer, definition, and contract-suite work
+
+Status:
+- completed
+
+Implementation note:
+- tightened the public observation type to use the shared `Seat` alias, added regression coverage for non-active-seat views, terminal and near-full observations, repeated-call stability, and locked `Connect4Observation` / `Connect4RulesEngine` package exports for later phases
+
+### Phase 6 status
+
+- completed
+
+Verification note:
+- final full-suite verification exposed pytest import-name collisions between core and Connect 4 test modules, so the `tests/` tree was turned into explicit packages with `__init__.py` files as the smallest corrective change needed to keep repository-wide test collection stable
 
 ## Phase 7 — Connect 4 serializer and snapshot rehydration
 
