@@ -703,6 +703,16 @@ The implementation should proceed in small, verifiable slices.
 
 ## Phase 0 — Repository bootstrap
 
+### Phase 3 status
+
+- completed
+
+Corrective note:
+- tightened the completed Phase 3 contracts by removing derived terminal logic from `TransitionResult`, making `GameDefinition.result_type` explicit, and extending registry coverage to reject duplicate `game_id` values across distinct definitions
+
+Implementation note:
+- applied one bounded corrective pass after review: `TransitionResult` was tightened back to a pure carrier without derived terminal logic, `GameDefinition.result_type` was made explicit instead of defaulting to the broad base result type, and registry coverage now locks duplicate `game_id` handling across distinct definitions
+
 ### Objective
 
 Create the repository skeleton and baseline tooling without implementing game logic yet.
@@ -754,6 +764,7 @@ Implement:
 - no game-specific logic leaks into this layer
 
 ### Ordered slices
+
 
 #### Slice 1 - Exception foundation `[done]`
 
@@ -952,6 +963,60 @@ Implement:
 - duplicate registration fails cleanly
 - all public interfaces are typed and documented
 
+### Ordered slices
+
+#### Slice 1 - Action, observation, and transition primitives `[done]`
+
+Objective:
+- introduce the shared action and observation abstractions plus the reusable transition result container
+
+Acceptance criteria:
+- base action and observation abstractions are explicit, typed, and game-agnostic
+- `TransitionResult` captures the post-action state, emitted events, and optional terminal result
+- focused tests cover importability, immutability, and core field semantics
+
+Status:
+- completed
+
+Implementation note:
+- introduced minimal frozen `Action` and `Observation` bases with stable type identifiers, and added a generic immutable `TransitionResult` container that normalizes emitted events to a tuple for predictable downstream handling
+
+#### Slice 2 - Rules engine and game definition contracts `[done]`
+
+Objective:
+- define the reusable rules-engine and game-definition interfaces that concrete games will implement
+
+Acceptance criteria:
+- rules-engine and game-definition contracts are fully typed and documented
+- contracts compose cleanly with the existing config, serializer, event, and result abstractions
+- focused tests cover the expected interface surface with a trivial fake game
+
+Status:
+- completed
+
+Implementation note:
+- implemented `RulesEngine` as a runtime-checkable protocol and `GameDefinition` as a registry-facing wiring object so later phases can compose concrete games without coupling the simulation core to orchestration concerns
+
+#### Slice 3 - Manual registry implementation `[done]`
+
+Objective:
+- implement the shared game registry and validate registration and lookup behavior end to end
+
+Acceptance criteria:
+- a fake test game can be registered and resolved by stable id
+- duplicate registration fails cleanly with the shared domain exception
+- listing and lookup behavior are deterministic and covered by tests
+
+Status:
+- completed
+
+Implementation note:
+- added a minimal in-memory `GameRegistry` with deterministic insertion-order listing and shared duplicate and unknown-game errors, deferring any default-population helpers to the later registration phase
+
+### Phase 3 status
+
+- completed
+
 ## Phase 4 — Shared test contract harness
 
 ### Objective
@@ -970,6 +1035,76 @@ Implement:
 - contract harness can be reused by multiple games
 - failure messages are understandable
 - Connect 4 can plug into the harness later without redesign
+
+### Ordered slices
+
+#### Slice 1 - Testing package skeleton and fake-game factory conventions `[done]`
+
+Objective:
+- create the shared testing-layer package and freeze one minimal fake-game factory convention before writing reusable contract assertions
+
+Scope:
+- `arena.testing.__init__`
+- `arena.testing.factories`
+- focused unit tests for fake-game bundle construction and shared testing imports
+
+Acceptance criteria:
+- a minimal fake game stack exists in the testing layer with config, state, action, observation, rules engine, serializer, and `GameDefinition`
+- the fake-game helpers stay game-agnostic and do not import Connect 4 symbols
+- the fake bundle exposes coherent typed Python objects rather than JSON-first payloads
+- the fake-game definition sets `result_type` explicitly and composes with the current core contracts
+
+Status:
+- completed
+
+Implementation note:
+- added an `arena.testing` package plus a minimal fake-game bundle with explicit `result_type`, near-terminal and terminal fixture states, predictable illegal-action coverage, and serializer round-trip checks so later contract assertions can stay game-agnostic
+
+#### Slice 2 - Reusable contract assertion helpers `[done]`
+
+Objective:
+- implement the generic contract assertions as reusable helpers that validate only shared simulation guarantees
+
+Scope:
+- `arena.testing.contracts`
+- focused unit tests for positive cases, negative cases, and readable assertion messages
+
+Acceptance criteria:
+- the harness checks valid initial state, legal action generation, illegal action rejection, state transition behavior, terminal/result consistency, and serializer round-trip / rehydration
+- serializer checks go through the shared serializer contract instead of direct object equality alone
+- helpers remain game-agnostic and rely only on shared core contracts and the fake-game factory convention
+- failure messages identify which contract failed and why
+
+Status:
+- completed
+
+Implementation note:
+- added reusable contract assertions over the shared fake-game bundle, tightened legal-action type checking against `GameDefinition.action_type`, and switched serializer round-trip verification to compare public state semantics rather than relying on direct state equality alone
+
+#### Slice 3 - Placeholder contract suite against the fake game `[done]`
+
+Objective:
+- prove the shared harness works end to end through a pytest-discoverable contract test module
+
+Scope:
+- `tests/contract/test_game_contract.py`
+- any focused harness smoke tests needed to prove repeated execution remains deterministic
+
+Acceptance criteria:
+- a reusable contract test entry point exists and runs against the fake game without Connect 4-specific assumptions
+- the contract suite is clearly separated from focused unit tests
+- repeated runs against fresh fake-game fixtures are deterministic
+- the harness can be reused by Connect 4 in Phase 9 without redesign
+
+Status:
+- completed
+
+Implementation note:
+- added a dedicated `tests/contract/` entry point that runs the shared contract suite against fresh fake-game bundles and locks deterministic repeated execution without introducing Connect 4-specific assumptions
+
+### Phase 4 status
+
+- completed
 
 ## Phase 5 — Connect 4 config, state, actions, results, and events
 
