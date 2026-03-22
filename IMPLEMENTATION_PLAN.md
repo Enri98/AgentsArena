@@ -1322,6 +1322,101 @@ Implement:
 - malformed payloads fail clearly
 - rehydrated state behaves identically to original state
 
+### Ordered slices
+
+#### Slice 1 - Connect 4 serializer happy-path payloads `[done]`
+
+Objective:
+- introduce the concrete Connect 4 serializer boundary and lock the stable payload shape for config, action, and observation round-trips
+
+Scope:
+- `arena.games.connect4.serializer`
+- `arena.games.connect4.__init__`
+- focused serializer tests for config, action, and observation round-trips
+
+Acceptance criteria:
+- `Connect4Serializer` implements the shared serializer contract for config, action, and observation payloads
+- serialized config, action, and observation payloads are JSON-friendly and round-trip to the original typed objects
+- the payload shape stays explicit and boundary-facing without leaking serializer concerns into the rules engine
+- the public Connect 4 package surface exports the serializer type if Phase 7 introduces it
+
+Status:
+- completed
+
+Implementation note:
+- introduced a dedicated `arena.games.connect4.serializer` module with strict Pydantic payload models for config, action, and observation boundaries, exported `Connect4Serializer` from the package surface, and intentionally left state snapshot methods as explicit `NotImplementedError` placeholders to keep the slice bounded for follow-up work
+
+#### Slice 2 - State snapshot dump/load and behavioral rehydration `[done]`
+
+Objective:
+- add state snapshot serialization and rehydration that preserves Connect 4 gameplay semantics across fresh and reused rules-engine instances
+
+Scope:
+- `arena.games.connect4.serializer`
+- focused serializer and regression tests for initial, mid-game, and terminal state snapshots
+
+Acceptance criteria:
+- `dump_state` and `load_state` round-trip initial, mid-game, and terminal `Connect4State` values
+- rehydrated states preserve tuple-based board structure, active seat, terminal status, result, legal actions, and observations
+- snapshot payloads remain compatible with the shared `SnapshotEnvelope`
+- regression coverage proves rehydrated state behavior does not depend on hidden runtime context beyond the authoritative snapshot data
+
+Status:
+- completed
+
+Implementation note:
+- implemented `Connect4State` dump/load via a dedicated snapshot payload model, expanded the shared `SnapshotEnvelope` to carry serialized config alongside state as the smallest corrective change needed for behavior-preserving rehydration, and added regression checks that rebuild Connect 4 semantics from snapshot data on both fresh and reused rules-engine setup paths
+
+#### Slice 3 - Strict malformed payload rejection `[done]`
+
+Objective:
+- make Connect 4 boundary payload validation fail clearly and deterministically for malformed config, state, action, and observation inputs
+
+Scope:
+- `arena.games.connect4.serializer`
+- focused negative serializer tests
+
+Acceptance criteria:
+- missing required fields, wrong primitive types, and unexpected extra fields fail clearly across all Connect 4 loader entry points
+- invalid board payload shapes, invalid disc values, and invalid seats are rejected during state rehydration
+- malformed payloads are rejected by strict boundary validation instead of silent coercion
+- negative tests lock the expected failure surface without broadening shared core contracts unnecessarily
+
+Status:
+- completed
+
+Implementation note:
+- tightened the Connect 4 serializer boundary with strict seat constraints plus shared board-shape and disc-value validation for state and observation payloads, then locked the negative surface with focused malformed-payload tests across config, action, state, and observation loaders
+
+#### Slice 4 - JSON Schema coverage and serializer surface stabilization `[done]`
+
+Objective:
+- expose JSON Schema generation for Connect 4 boundary-facing serializer models and lock the serializer module surface for later definition and contract work
+
+Scope:
+- `arena.games.connect4.serializer`
+- `arena.games.connect4.__init__`
+- focused schema and export tests
+
+Acceptance criteria:
+- boundary-facing Connect 4 serializer models can emit JSON Schema successfully
+- schema assertions cover expected required fields and core primitive shapes for config, state snapshot, action, and observation payloads
+- serializer exports remain stable for later `GameDefinition` wiring
+- the completed Phase 7 test suite demonstrates round-trips, strict failures, and schema generation coherently
+
+Status:
+- completed
+
+Implementation note:
+- added JSON Schema assertions for the shared snapshot envelope and the Connect 4 config, action, state, and observation payload models, keeping schema generation anchored at the serializer boundary while confirming the package-level serializer export remains stable for later definition wiring
+
+### Phase 7 status
+
+- completed
+
+Verification note:
+- Phase 7 final verification passed with `.\\.venv\\Scripts\\python.exe -m pytest -q` covering the full repository, including the new Connect 4 serializer, snapshot, malformed-payload, and schema checks
+
 ## Phase 8 — Connect 4 definition and manual registration
 
 ### Objective

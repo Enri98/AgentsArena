@@ -21,6 +21,7 @@ class SnapshotEnvelope(BaseModel):
 
     game_id: str
     schema_version: Annotated[int, Field(ge=1)]
+    config: JSONMapping
     state: JSONMapping
 
 

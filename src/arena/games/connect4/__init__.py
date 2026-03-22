@@ -5,6 +5,7 @@ from arena.games.connect4.config import Connect4Config
 from arena.games.connect4.events import DiscDropped, GameDrawn, WinnerDetected
 from arena.games.connect4.observation import Connect4Observation
 from arena.games.connect4.rules import Connect4RulesEngine
+from arena.games.connect4.serializer import Connect4Serializer
 from arena.games.connect4.state import (
     EMPTY_CELL,
     SEAT0_DISC,
@@ -22,6 +23,7 @@ __all__ = [
     "Connect4Config",
     "Connect4Observation",
     "Connect4RulesEngine",
+    "Connect4Serializer",
     "Connect4State",
     "DiscDropped",
     "DropDisc",
