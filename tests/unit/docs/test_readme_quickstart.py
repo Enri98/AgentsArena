@@ -8,6 +8,7 @@ from arena.games.connect4 import (
     Connect4Config,
     DropDisc,
 )
+from arena.match import apply_match_action, start_match
 
 
 def test_readme_quickstart_flow_matches_the_public_connect4_api() -> None:
@@ -37,3 +38,22 @@ def test_readme_quickstart_flow_matches_the_public_connect4_api() -> None:
     config_payload = definition.serializer.dump_config(config)
     rehydrated_config = definition.serializer.load_config(config_payload)
     assert rehydrated_config == config
+
+
+def test_readme_local_match_flow_matches_the_public_match_api() -> None:
+    registry = build_default_registry()
+
+    definition = registry.get(CONNECT4_GAME_ID)
+    config = Connect4Config()
+
+    match = start_match(definition, config)
+    seat = match.rules_engine.current_seat(match.state)
+    next_match = apply_match_action(match, seat, DropDisc(column=0))
+
+    assert next_match is not match
+    assert match.turns == ()
+    assert len(next_match.turns) == 1
+    assert next_match.turns[0].seat == seat
+    assert next_match.turns[0].action == DropDisc(column=0)
+    assert next_match.turns[0].post_snapshot.game_id == CONNECT4_GAME_ID
+    assert next_match.turns[0].post_state == next_match.state

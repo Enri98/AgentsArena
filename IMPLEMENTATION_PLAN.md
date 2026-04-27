@@ -1808,3 +1808,197 @@ A productive implementation cycle for the coding agent is:
 - update this document with status notes if the plan changes materially
 
 The plan should evolve only when there is a concrete architectural reason, not because of incidental implementation drift.
+
+## 20. Post-baseline roadmap
+
+The Connect 4 simulation baseline is complete. The next phase should move toward an arena product without contaminating the pure simulation layer.
+
+The guiding boundary for this roadmap is:
+- `arena.core` and `arena.games` remain pure simulation code
+- local match execution belongs in a separate package area
+- networking, persistence, deadlines, auth, and real agent connectivity remain deferred until a pure local runner is stable
+
+### Phase 11 - Pure local match execution
+
+Objective:
+- provide a deterministic local runner that executes a game definition with submitted actions and records the authoritative transition history
+
+Scope:
+- local match/session models outside `arena.core` and `arena.games`
+- runner initialization from a `GameDefinition` and config
+- action submission through `rules_engine.apply_action(...)`
+- serialized pre/post snapshots through the game serializer
+- emitted domain events and terminal result capture
+
+Out of scope:
+- agent processes
+- matchmaking
+- state-version conflict handling
+- clocks, timeouts, deadlines
+- persistence
+- web APIs or UI payloads
+
+Acceptance criteria:
+- a match can be started from a registered game definition
+- each accepted action produces an immutable turn record containing seat, action, events, result, and a full post-move serialized snapshot
+- the initial state is recorded as a serialized snapshot
+- illegal actions continue to raise the underlying simulation-layer domain exceptions
+- terminal games reject further actions through the rules engine
+- tests cover a complete Connect 4 local match flow
+
+#### Slice 1 - Local match session execution `[done]`
+
+Objective:
+- add a pure local match package that stores typed state alongside serialized snapshots and appends immutable turn records for each accepted move
+
+Scope:
+- `arena.match`
+- focused unit tests for match initialization, transition recording, winning flow, and domain-exception propagation
+
+Acceptance criteria:
+- a match can be started from a `GameDefinition` and config
+- the initial match state stores the typed current game state and a serialized initial snapshot envelope
+- each accepted action appends an immutable turn record with seat, action, events, result, post-state, and post-move snapshot
+- illegal and post-terminal actions surface the underlying simulation-layer domain exceptions
+
+Status:
+- completed
+
+Implementation note:
+- added a frozen `arena.match` package with `LocalMatch` and `TurnRecord` dataclasses plus pure `start_match(...)` / `apply_match_action(...)` helpers that delegate legality and terminal checks to the game definition's rules engine and use the existing serializer for snapshot envelopes
+
+#### Slice 2 - Per-match rules-engine isolation `[done]`
+
+Objective:
+- ensure each local match owns its own rules engine instance so game-specific config state cannot leak across concurrently running matches
+
+Scope:
+- `arena.match`
+- focused regression coverage for multiple Connect 4 matches started from the same definition with different configs
+
+Acceptance criteria:
+- a local match stores a per-match rules engine copy instead of reusing the shared definition singleton
+- one match's config does not affect another match started from the same definition
+- the match layer still preserves `match.definition` for metadata and serializer access
+
+Status:
+- completed
+
+Implementation note:
+- copied the game definition's rules engine when starting a local match, stored that isolated engine on `LocalMatch`, and added a regression that starts two Connect 4 matches from the same singleton definition with different configs to prove they no longer interfere
+
+#### Slice 3 - README-backed local match usage `[done]`
+
+Objective:
+- document the public local match helpers in the README and cover the example with a focused docs test
+
+Scope:
+- `README.md`
+- `tests/unit/docs/test_readme_quickstart.py`
+
+Acceptance criteria:
+- the README shows a concise local match flow using `build_default_registry()`, `Connect4Config`, `DropDisc`, `start_match(...)`, and `apply_match_action(...)`
+- the README example is backed by a unit test that exercises the same public API path
+
+Status:
+- completed
+
+Implementation note:
+- added a compact local match example immediately after the existing simulation quickstart and anchored it with a matching docs test that verifies the immutable turn history and serialized post-move snapshot
+
+### Phase 12 - Rehydratable match transcripts
+
+Objective:
+- make local match history exportable and rehydratable without adding storage infrastructure
+
+Scope:
+- transcript payload models
+- JSON-safe dump/load of match records and snapshots
+- deterministic replay validation against the game definition
+
+Out of scope:
+- databases
+- event buses
+- distributed replay feeds
+
+Acceptance criteria:
+- a completed local match transcript can be serialized to JSON-safe data
+- rehydrating the transcript reconstructs the latest game state
+- replay validation catches action/state mismatches
+
+Status:
+- Slice 1 completed
+- Slice 2 completed
+
+Implementation note:
+- added JSON-safe transcript payload models and local match dump/load helpers under `arena.match`, then added deterministic replay validation that replays loaded actions against a fresh local match and checks snapshots, event payloads, and result metadata for mismatches
+
+### Phase 13 - Minimal agent-facing local protocol
+
+Objective:
+- define the smallest local Python protocol needed for automated players to choose actions
+
+Scope:
+- typed protocol for an in-process player policy
+- runner utility that asks the active policy for an action and applies it
+- tests with deterministic fake policies
+
+Out of scope:
+- remote agents
+- subprocess management
+- network protocols
+- LLM provider integration
+- timeouts
+
+Acceptance criteria:
+- two in-process policies can complete a Connect 4 match through the local runner
+- policy inputs use observations, not mutable internal state
+- illegal policy actions surface as domain errors without being normalized into transport-specific failures
+
+#### Slice 1 - In-process policy protocol and local auto-play `[done]`
+
+Objective:
+- add the smallest typed in-process policy protocol plus pure local helpers for applying one policy-selected turn or running a match to terminal
+
+Scope:
+- `arena.match`
+- focused unit tests for observation-based policy selection, terminal auto-play, illegal-action propagation, and missing-policy failure
+
+Acceptance criteria:
+- the active seat's policy is selected from a seat-to-policy mapping
+- policy input is built from the rules engine observation, not mutable state access
+- a supplied seat-to-policy mapping can run a Connect 4 match to terminal
+- illegal policy actions continue to raise the underlying domain exception
+- missing active-seat policies fail clearly with a simple lookup error
+
+Status:
+- completed
+
+Implementation note:
+- added a local `Policy` protocol plus `apply_policy_turn(...)` and `run_local_match(...)` helpers under `arena.match`, then covered them with deterministic fake Connect 4 policies that assert observation delivery, full-match auto-play, domain-error propagation, and clear missing-seat lookup failures
+
+### Phase 14 - Arena orchestration design checkpoint
+
+Objective:
+- decide whether to introduce real arena infrastructure or add another game first
+
+Decision inputs:
+- how reusable the local runner is after Connect 4
+- whether a second game is needed to validate abstractions
+- whether agent process boundaries are now worth designing
+
+Potential next branches:
+- add a second deterministic perfect-information game to stress the simulation contracts
+- introduce process/network adapters around the local policy protocol
+- introduce persistence for transcripts and snapshots
+
+Checkpoint status:
+- reached
+
+Recommended next branch:
+- add a second small deterministic perfect-information game before introducing remote/process infrastructure
+
+Rationale:
+- the pure simulation baseline, local match runner, transcript replay validation, and in-process policy protocol are now implemented against Connect 4 only
+- a second game will reveal whether the shared contracts and match/transcript layers are actually reusable before adapter, process, or network concerns make changes more expensive
+- remote agents, timeouts, storage, and APIs should remain deferred until the reusable local abstractions survive at least one more game implementation
