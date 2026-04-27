@@ -1436,6 +1436,49 @@ Implement:
 - rule and serializer wiring is correct
 - duplicate registration protections still hold
 
+### Ordered slices
+
+#### Slice 1 - Connect 4 definition wiring `[done]`
+
+Objective:
+- add the registry-facing Connect 4 definition that binds the concrete config, state, action, observation, rules, serializer, and shared result surface
+
+Scope:
+- `arena.games.connect4.definition`
+- `arena.games.connect4.__init__`
+- focused definition wiring tests
+
+Acceptance criteria:
+- a stable Connect 4 game id is exposed for registry lookup
+- the definition wires `Connect4Config`, `Connect4State`, `DropDisc`, `Connect4Observation`, `Connect4RulesEngine`, `Connect4Serializer`, and the shared `RuleResult` surface coherently
+- the public Connect 4 package surface exports the definition entry point
+
+Status:
+- completed
+
+Implementation note:
+- introduced a dedicated registry-facing definition module with a stable `connect4` id and exported the resolved definition from the package surface so the registry can resolve the game without adding any transport or orchestration concerns
+
+#### Slice 2 - Manual registration helper and registry coverage `[done]`
+
+Objective:
+- add a small helper that registers Connect 4 into a supplied registry and lock duplicate registration behavior with focused tests
+
+Scope:
+- `arena.games.connect4.definition`
+- focused registry-resolution tests
+
+Acceptance criteria:
+- a registration helper adds Connect 4 to a `GameRegistry`
+- duplicate registration still raises the shared duplicate-registration error
+- tests prove registry lookup, initial-state creation, legal-action exposure, and serializer round-trip behavior through the resolved definition
+
+Status:
+- completed
+
+Implementation note:
+- kept registration as a thin helper around the shared `GameRegistry`, reused the single Connect 4 definition instance for registry discovery, and verified the resolved definition still drives the rules engine and serializer correctly from the registry boundary
+
 ## Phase 9 — Contract tests against Connect 4
 
 ### Objective
@@ -1453,6 +1496,48 @@ Implement:
 - generic contract suite passes
 - game-specific unit suite passes
 - regression coverage exists for common edge cases
+
+### Ordered slices
+
+#### Slice 1 - Registry-facing Connect 4 contract bundle `[done]`
+
+Objective:
+- adapt the shared contract-suite fixture shape to the real Connect 4 implementation using the registry-facing definition from Phase 8
+
+Scope:
+- `tests/contract/test_connect4_contract.py`
+- shared contract-bundle fixture assembly
+
+Acceptance criteria:
+- the bundle uses `Connect4GameDefinition` directly rather than reconstructing an alternate definition
+- the bundle supplies a legal action that works from both the initial state and the near-terminal state
+- the bundle supplies a terminal state that exactly matches the rules-engine transition from the near-terminal state
+- the bundle supplies an illegal action that is rejected from the initial state
+
+Status:
+- completed
+
+Implementation note:
+- built a test-local Connect 4 contract bundle around the registry-facing `Connect4GameDefinition`, using `DropDisc(column=0)` as the shared legal action and `DropDisc(column=config.columns)` as the deliberately illegal action so the shared contract can exercise the real rules engine without adding production-only adapter code
+
+#### Slice 2 - Shared contract-suite coverage and fixture regressions `[done]`
+
+Objective:
+- run the reusable generic contract suite against the real Connect 4 implementation and lock the near-terminal / illegal-action fixtures with focused regression checks
+
+Scope:
+- `tests/contract/test_connect4_contract.py`
+
+Acceptance criteria:
+- `assert_game_contract` passes for real Connect 4
+- the near-terminal fixture reaches the expected winning terminal state
+- the illegal-action fixture is rejected from the initial state
+
+Status:
+- completed
+
+Implementation note:
+- added contract coverage that executes the shared assertion bundle against the real Connect 4 definition and pinned the fixture-specific win and rejection cases with narrow unit checks so the generic suite remains the main source of behavioral coverage
 
 ## Phase 10 — Documentation and example usage
 
@@ -1473,6 +1558,52 @@ Provide:
 
 - examples run or are test-backed
 - examples do not expose internals that should remain private
+
+### Ordered slices
+
+#### Slice 1 - README quickstart and scope rewrite `[done]`
+
+Objective:
+- replace the bootstrap placeholder README with a concise human-facing quickstart for the simulation package
+
+Scope:
+- `README.md`
+
+Acceptance criteria:
+- the README states the current simulation-only scope clearly
+- the README shows the intended usage path through registry, rules engine, and serializer
+- the README examples use public Connect 4 entry points rather than private internals
+
+Status:
+- completed
+
+Implementation note:
+- rewrote the README as a short quickstart centered on `GameRegistry`, `register_connect4(...)`, `definition.rules_engine`, and `definition.serializer`, with one compact Connect 4 example that covers registration, state creation, legal actions, move application, and config/state round-tripping
+
+#### Slice 2 - Test-backed README example coverage `[done]`
+
+Objective:
+- add a focused regression test that exercises the README quickstart flow through the real public API
+
+Scope:
+- `tests/unit/docs/test_readme_quickstart.py`
+
+Acceptance criteria:
+- the example flow is covered by a test that registers Connect 4, creates initial state, lists legal actions, applies a move, and round-trips state and config serialization
+- the coverage remains small and stable without relying on brittle markdown parsing
+
+Status:
+- completed
+
+Implementation note:
+- added a narrow end-to-end example test that follows the README path exactly through the registry-facing Connect 4 surface and verifies the serialized payloads rehydrate to the original typed objects
+
+### Phase 10 status
+
+- completed
+
+Verification note:
+- the example flow is now anchored by a unit test, and the repository-wide test suite will be run after the doc and test updates to confirm nothing drifted
 
 ## 13. Testing strategy in detail
 

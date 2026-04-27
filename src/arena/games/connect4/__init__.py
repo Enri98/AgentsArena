@@ -2,6 +2,12 @@
 
 from arena.games.connect4.actions import DropDisc
 from arena.games.connect4.config import Connect4Config
+from arena.games.connect4.definition import (
+    CONNECT4_GAME_ID,
+    Connect4GameDefinition,
+    build_connect4_game_definition,
+    register_connect4,
+)
 from arena.games.connect4.events import DiscDropped, GameDrawn, WinnerDetected
 from arena.games.connect4.observation import Connect4Observation
 from arena.games.connect4.rules import Connect4RulesEngine
@@ -21,6 +27,8 @@ __all__ = [
     "SEAT1_DISC",
     "Connect4Board",
     "Connect4Config",
+    "CONNECT4_GAME_ID",
+    "Connect4GameDefinition",
     "Connect4Observation",
     "Connect4RulesEngine",
     "Connect4Serializer",
@@ -29,5 +37,7 @@ __all__ = [
     "DropDisc",
     "GameDrawn",
     "WinnerDetected",
+    "build_connect4_game_definition",
     "disc_for_seat",
+    "register_connect4",
 ]
