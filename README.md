@@ -48,19 +48,84 @@ For a pure local match, use the dedicated match helpers to keep an immutable tur
 ```python
 from arena.games import build_default_registry
 from arena.games.connect4 import CONNECT4_GAME_ID, Connect4Config, DropDisc
-from arena.match import apply_match_action, start_match
+from arena.match import (
+    apply_match_action,
+    dump_match_transcript,
+    start_match,
+    validate_match_transcript,
+)
 
 registry = build_default_registry()
 definition = registry.get(CONNECT4_GAME_ID)
-match = start_match(definition, Connect4Config())
+match = start_match(definition, Connect4Config(rows=4, columns=4, connect_length=4))
 
-seat = match.rules_engine.current_seat(match.state)
-match = apply_match_action(match, seat, DropDisc(column=0))
+for column in (0, 1, 0, 1, 0, 1, 0):
+    seat = match.rules_engine.current_seat(match.state)
+    match = apply_match_action(match, seat, DropDisc(column=column))
 
 turn = match.turns[-1]
-assert turn.seat == seat
 assert turn.action == DropDisc(column=0)
 assert turn.post_snapshot.game_id == CONNECT4_GAME_ID
+
+payload = dump_match_transcript(match)
+loaded = validate_match_transcript(definition, payload)
+assert loaded.latest_state == match.state
+assert loaded.turns[-1].result == turn.result
+```
+
+For deterministic in-process players, use local policies. Policies receive observations, not mutable internal state:
+
+```python
+from dataclasses import dataclass
+
+from arena.games import build_default_registry
+from arena.games.connect4 import (
+    CONNECT4_GAME_ID,
+    Connect4Config,
+    Connect4Observation,
+    DropDisc,
+)
+from arena.match import run_local_match, start_match
+
+
+@dataclass
+class ScriptedPolicy:
+    actions: tuple[DropDisc, ...]
+    index: int = 0
+
+    def select_action(self, observation: Connect4Observation) -> DropDisc:
+        action = self.actions[self.index]
+        self.index += 1
+        assert action in observation.legal_actions
+        return action
+
+
+registry = build_default_registry()
+definition = registry.get(CONNECT4_GAME_ID)
+match = start_match(definition, Connect4Config(rows=4, columns=4, connect_length=4))
+
+final_match = run_local_match(
+    match,
+    {
+        0: ScriptedPolicy(
+            actions=(
+                DropDisc(column=0),
+                DropDisc(column=0),
+                DropDisc(column=0),
+                DropDisc(column=0),
+            )
+        ),
+        1: ScriptedPolicy(
+            actions=(
+                DropDisc(column=1),
+                DropDisc(column=1),
+                DropDisc(column=1),
+            )
+        ),
+    },
+)
+
+assert final_match.rules_engine.is_terminal(final_match.state)
 ```
 
 The public path stays intentionally small:
@@ -69,3 +134,5 @@ The public path stays intentionally small:
 - `definition.rules_engine` creates state, lists legal actions, and applies moves
 - `definition.serializer` converts config and state snapshots at the boundary
 - `arena.match` records immutable local match turns and serialized snapshots
+- `dump_match_transcript(...)` and `validate_match_transcript(...)` export and replay-check local transcripts
+- `run_local_match(...)` drives in-process observation-based policies to terminal state

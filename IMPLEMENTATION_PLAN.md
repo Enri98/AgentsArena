@@ -2056,3 +2056,81 @@ Status:
 
 Implementation note:
 - added the package marker, a focused match integration test, a concise handoff prompt, and a small README scope update without changing the Tic-Tac-Toe rules implementation
+
+### Phase 16 - README-backed local match examples
+
+Objective:
+- document the completed local transcript and in-process policy APIs before introducing any adapter, persistence, or orchestration boundary
+
+Scope:
+- `README.md`
+- `tests/unit/docs/test_readme_quickstart.py`
+
+Out of scope:
+- remote agents
+- process management
+- network protocols
+- persistence
+- timeouts
+- UI payloads
+
+Acceptance criteria:
+- the README shows transcript export and deterministic replay validation through `dump_match_transcript(...)` and `validate_match_transcript(...)`
+- the README shows deterministic in-process policy auto-play through `run_local_match(...)`
+- the examples are covered by focused docs tests using the public API
+- `arena.core` and `arena.games` remain unchanged
+
+#### Slice 1 - Transcript and policy docs examples `[done]`
+
+Objective:
+- add test-backed README examples for the already-implemented local transcript and policy helpers
+
+Status:
+- completed
+
+Implementation note:
+- expanded the local match README path to include JSON-safe transcript dumping and replay validation, added a deterministic observation-based policy example, and backed both examples with focused docs tests without changing runtime behavior
+
+### Phase 17 - Adapter boundary design checkpoint
+
+Objective:
+- define adapter-layer guardrails before adding any process, network, persistence, or orchestration code
+
+Decision inputs:
+- Connect 4 and Tic-Tac-Toe now validate that the core game abstractions generalize across two deterministic perfect-information games
+- local match execution, transcript validation, and observation-based in-process policies are stable enough to describe as adapter inputs
+- adding infrastructure without a boundary document would risk leaking transport or orchestration concerns into `arena.core`, `arena.games`, or `arena.match`
+
+Scope:
+- `docs/ADAPTER_BOUNDARIES.md`
+- `tests/unit/architecture/test_adapter_boundaries.py`
+- `docs/NEXT_SESSION_PROMPT.md`
+- `IMPLEMENTATION_PLAN.md`
+
+Out of scope:
+- adapter implementation packages
+- server code
+- process management
+- remote agent protocols
+- persistence
+- deadlines and timeout outcomes
+- matchmaking
+- UI payloads
+
+Acceptance criteria:
+- the design document states the allowed dependency direction between future adapters and existing pure packages
+- the design document identifies stable adapter inputs and outputs using existing serializers, observations, transcripts, and domain exceptions
+- deferred infrastructure concerns remain explicitly out of scope
+- architecture tests enforce that `arena.core`, `arena.games`, and `arena.match` do not import future adapter packages
+- the next-session handoff points to the boundary checkpoint before implementation work
+
+#### Slice 1 - Adapter boundary design document `[done]`
+
+Objective:
+- capture the future adapter seam without adding runtime adapter code
+
+Status:
+- completed
+
+Implementation note:
+- added `docs/ADAPTER_BOUNDARIES.md` to define dependency direction, allowed inputs/outputs, forbidden infrastructure concerns, and the first safe future adapter slice, then added import-boundary tests to keep existing pure packages independent from future adapters while leaving runtime packages unchanged
