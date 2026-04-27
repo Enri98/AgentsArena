@@ -6,7 +6,7 @@ Current scope:
 - simulation package only
 - sequential, deterministic, perfect-information games
 - typed domain objects, registry, rules, serializers, and tests
-- first concrete game: Connect 4
+- built-in games: Connect 4 and Tic-Tac-Toe
 
 ## Quickstart
 

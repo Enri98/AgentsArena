@@ -2002,3 +2002,57 @@ Rationale:
 - the pure simulation baseline, local match runner, transcript replay validation, and in-process policy protocol are now implemented against Connect 4 only
 - a second game will reveal whether the shared contracts and match/transcript layers are actually reusable before adapter, process, or network concerns make changes more expensive
 - remote agents, timeouts, storage, and APIs should remain deferred until the reusable local abstractions survive at least one more game implementation
+
+### Phase 15 - Second deterministic perfect-information game
+
+Objective:
+- add Tic-Tac-Toe as a simpler second vertical slice to validate that the simulation core, registry, serialization, and contract suite generalize cleanly beyond Connect 4
+
+Scope:
+- `arena.games.tictactoe`
+- built-in registry wiring
+- focused unit tests for action, config, state, rules, events, serializer, and definition behavior
+- shared contract coverage for the real Tic-Tac-Toe implementation
+- registry helper coverage for the default built-in game set
+
+Acceptance criteria:
+- Tic-Tac-Toe is available through the built-in registry alongside Connect 4
+- the shared contract suite passes for the real Tic-Tac-Toe implementation
+- the Tic-Tac-Toe serializer round-trips config, state, action, and observation payloads
+- legal actions are generated in row-major order and terminal state/result logic is consistent
+- invalid payloads and illegal actions are rejected with domain-appropriate errors
+
+#### Slice 1 - Full Tic-Tac-Toe vertical slice `[done]`
+
+Objective:
+- implement the full deterministic perfect-information Tic-Tac-Toe package as a compact second game slice
+
+Status:
+- completed
+
+Implementation note:
+- added a new `arena.games.tictactoe` package with frozen domain models, pure rules, strict serializers, registry wiring, shared-contract coverage, and focused unit tests, then wired the game into the built-in registry so the default game set now contains both Connect 4 and Tic-Tac-Toe
+
+#### Slice 2 - Docs / integration / handoff completion `[done]`
+
+Objective:
+- close the remaining documentation and cross-layer coverage for the Tic-Tac-Toe slice
+
+Scope:
+- `README.md`
+- `docs/NEXT_SESSION_PROMPT.md`
+- `tests/unit/games/tictactoe/__init__.py`
+- `tests/unit/match/test_tictactoe_integration.py`
+
+Acceptance criteria:
+- the README states that Connect 4 and Tic-Tac-Toe are built-in games
+- default registry coverage proves Tic-Tac-Toe resolves through the public game registry
+- local match helpers work end-to-end for Tic-Tac-Toe
+- transcript dump and validation cover a completed Tic-Tac-Toe match
+- a concise next-session prompt exists for handoff
+
+Status:
+- completed
+
+Implementation note:
+- added the package marker, a focused match integration test, a concise handoff prompt, and a small README scope update without changing the Tic-Tac-Toe rules implementation
