@@ -110,7 +110,10 @@ class Connect4Serializer:
             seat=connect4_observation.seat,
             board=_board_to_payload(connect4_observation.board),
             current_seat=connect4_observation.current_seat,
-            legal_actions=[DropDiscPayload(column=action.column) for action in connect4_observation.legal_actions],
+            legal_actions=[
+                DropDiscPayload(column=action.column)
+                for action in connect4_observation.legal_actions
+            ],
         )
         return payload.model_dump(mode="json")
 

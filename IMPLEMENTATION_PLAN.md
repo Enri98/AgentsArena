@@ -1479,6 +1479,31 @@ Status:
 Implementation note:
 - kept registration as a thin helper around the shared `GameRegistry`, reused the single Connect 4 definition instance for registry discovery, and verified the resolved definition still drives the rules engine and serializer correctly from the registry boundary
 
+#### Slice 3 - Built-in registry convenience helpers `[done]`
+
+Objective:
+- expose a small public helper for registering built-in games and a default-registry constructor for callers that do not want to wire each game manually
+
+Scope:
+- `arena.games.__init__`
+- README quickstart
+- focused registry-helper tests
+
+Acceptance criteria:
+- `register_builtin_games(registry)` registers the built-in games into an existing registry
+- `build_default_registry()` returns a fresh registry with the built-in games already registered
+- duplicate registration behavior continues to come from `GameRegistry`
+
+Status:
+- completed
+
+Implementation note:
+- added package-level convenience wrappers around the existing Connect 4 registration helper so the registry stays generic while callers get a one-line built-in registry path
+
+### Phase 8 status
+
+- completed
+
 ## Phase 9 — Contract tests against Connect 4
 
 ### Objective
@@ -1601,6 +1626,9 @@ Implementation note:
 ### Phase 10 status
 
 - completed
+
+Baseline hardening note:
+- repository-wide Ruff cleanup was completed without behavior changes; this slice only touched import ordering, line wrapping, and plan status bookkeeping
 
 Verification note:
 - the example flow is now anchored by a unit test, and the repository-wide test suite will be run after the doc and test updates to confirm nothing drifted
@@ -1761,6 +1789,13 @@ The first milestone is complete when all of the following are true:
 - JSON Schema generation is available for boundary-facing models
 - Connect 4 passes the shared generic contract suite
 - game-specific regression tests exist for key edge cases
+
+### First milestone status
+
+- completed
+
+Verification note:
+- the Connect 4 simulation baseline now has registry discovery, rules, events, serialization, schema coverage, shared contract coverage, README-backed usage examples, and clean repository-wide `pytest` / `ruff` verification
 
 ## 19. Suggested iteration policy
 

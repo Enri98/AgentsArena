@@ -10,17 +10,19 @@ from arena.core.actions import Action
 from arena.core.exceptions import GameFinished, IllegalAction, WrongPlayer
 from arena.core.results import Draw, Win
 from arena.games.connect4 import (
+    EMPTY_CELL,
+    SEAT0_DISC,
+    SEAT1_DISC,
     Connect4Config,
     Connect4Observation,
     Connect4RulesEngine,
     Connect4State,
     DiscDropped,
     DropDisc,
-    EMPTY_CELL,
     GameDrawn,
-    SEAT0_DISC,
-    SEAT1_DISC,
     WinnerDetected,
+)
+from arena.games.connect4 import (
     __all__ as connect4_exports,
 )
 

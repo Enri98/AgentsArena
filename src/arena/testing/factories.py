@@ -12,7 +12,7 @@ from arena.core.game_definition import GameDefinition
 from arena.core.observations import Observation
 from arena.core.results import Draw
 from arena.core.rules_engine import TransitionResult
-from arena.core.serializer import JSONMapping, Serializer
+from arena.core.serializer import JSONMapping
 from arena.core.types import Seat
 
 

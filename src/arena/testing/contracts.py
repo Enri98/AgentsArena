@@ -54,10 +54,12 @@ def assert_legal_action_generation(bundle: GameContractBundle) -> None:
     action_type = bundle.definition.action_type
 
     assert legal_actions, (
-        "legal action generation contract failed: ongoing states must expose at least one legal action"
+        "legal action generation contract failed: ongoing states must expose "
+        "at least one legal action"
     )
     assert bundle.legal_action in legal_actions, (
-        "legal action generation contract failed: bundle.legal_action must be present in legal_actions"
+        "legal action generation contract failed: bundle.legal_action must be "
+        "present in legal_actions"
     )
 
     for action in legal_actions:
@@ -86,8 +88,8 @@ def assert_illegal_action_rejection(bundle: GameContractBundle) -> None:
         pass
     else:  # pragma: no cover - exercised by negative tests
         raise AssertionError(
-            "illegal action rejection contract failed: bundle.illegal_action must raise a domain error "
-            "during validate_action"
+            "illegal action rejection contract failed: bundle.illegal_action "
+            "must raise a domain error during validate_action"
         )
 
     try:
@@ -116,7 +118,8 @@ def assert_state_transition_behavior(bundle: GameContractBundle) -> None:
         "state transition contract failed: emitted events must be exposed as an immutable tuple"
     )
     assert transition.result == rules_engine.result(transition.state), (
-        "state transition contract failed: transition.result must match rules_engine.result(next_state)"
+        "state transition contract failed: transition.result must match "
+        "rules_engine.result(next_state)"
     )
 
 
@@ -139,7 +142,8 @@ def assert_terminal_result_consistency(bundle: GameContractBundle) -> None:
         "terminal/result contract failed: terminal_state must be terminal"
     )
     assert transition.result == rules_engine.result(bundle.terminal_state), (
-        "terminal/result contract failed: transition.result must match rules_engine.result(terminal_state)"
+        "terminal/result contract failed: transition.result must match "
+        "rules_engine.result(terminal_state)"
     )
     assert not rules_engine.legal_actions(
         bundle.terminal_state,
@@ -159,7 +163,8 @@ def assert_serialization_round_trip(bundle: GameContractBundle) -> None:
 
     rehydrated_config = serializer.load_config(serializer.dump_config(bundle.config))
     assert rehydrated_config == bundle.config, (
-        "serialization round-trip contract failed: config round-trip must preserve the validated config"
+        "serialization round-trip contract failed: config round-trip must "
+        "preserve the validated config"
     )
 
     rehydrated_state = serializer.load_state(serializer.dump_state(bundle.near_terminal_state))
@@ -168,7 +173,8 @@ def assert_serialization_round_trip(bundle: GameContractBundle) -> None:
         bundle.near_terminal_state,
         rehydrated_state,
     ), (
-        "serialization round-trip contract failed: rehydrated state must behave like the original state"
+        "serialization round-trip contract failed: rehydrated state must "
+        "behave like the original state"
     )
 
     rehydrated_action = serializer.load_action(serializer.dump_action(bundle.legal_action))
@@ -182,7 +188,8 @@ def assert_serialization_round_trip(bundle: GameContractBundle) -> None:
     )
     rehydrated_observation = serializer.load_observation(serializer.dump_observation(observation))
     assert rehydrated_observation == observation, (
-        "serialization round-trip contract failed: observation round-trip must preserve observation data"
+        "serialization round-trip contract failed: observation round-trip "
+        "must preserve observation data"
     )
 
 
@@ -197,7 +204,11 @@ def assert_game_contract(bundle: GameContractBundle) -> None:
     assert_serialization_round_trip(bundle)
 
 
-def _state_semantics_match(rules_engine: object, original_state: object, rehydrated_state: object) -> bool:
+def _state_semantics_match(
+    rules_engine: object,
+    original_state: object,
+    rehydrated_state: object,
+) -> bool:
     """Compare public state semantics through the shared rules-engine contract."""
 
     original_is_terminal = rules_engine.is_terminal(original_state)

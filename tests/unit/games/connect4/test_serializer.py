@@ -7,18 +7,19 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from arena.core.serializer import SnapshotEnvelope
-from arena.core.serializer import Serializer
+from arena.core.serializer import Serializer, SnapshotEnvelope
 from arena.games.connect4 import (
-    Connect4Config,
-    Connect4Observation,
-    Connect4Serializer,
-    Connect4State,
-    Connect4RulesEngine,
-    DropDisc,
     EMPTY_CELL,
     SEAT0_DISC,
     SEAT1_DISC,
+    Connect4Config,
+    Connect4Observation,
+    Connect4RulesEngine,
+    Connect4Serializer,
+    Connect4State,
+    DropDisc,
+)
+from arena.games.connect4 import (
     __all__ as connect4_exports,
 )
 from arena.games.connect4.serializer import (
@@ -96,7 +97,10 @@ def test_connect4_serializer_round_trips_active_and_non_active_observations() ->
         legal_actions=(),
     )
 
-    assert serializer.load_observation(serializer.dump_observation(active_observation)) == active_observation
+    assert (
+        serializer.load_observation(serializer.dump_observation(active_observation))
+        == active_observation
+    )
     assert (
         serializer.load_observation(serializer.dump_observation(non_active_observation))
         == non_active_observation

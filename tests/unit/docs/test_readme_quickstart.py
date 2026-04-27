@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-from arena.core import GameRegistry
+from arena.games import build_default_registry
 from arena.games.connect4 import (
     CONNECT4_GAME_ID,
     Connect4Config,
     DropDisc,
-    register_connect4,
 )
 
 
 def test_readme_quickstart_flow_matches_the_public_connect4_api() -> None:
-    registry = GameRegistry()
-    register_connect4(registry)
+    registry = build_default_registry()
 
     definition = registry.get(CONNECT4_GAME_ID)
     config = Connect4Config()

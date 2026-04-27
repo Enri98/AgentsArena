@@ -12,7 +12,7 @@ from arena.games.connect4.actions import DropDisc
 from arena.games.connect4.config import Connect4Config
 from arena.games.connect4.events import DiscDropped, GameDrawn, WinnerDetected
 from arena.games.connect4.observation import Connect4Observation
-from arena.games.connect4.state import Connect4State, EMPTY_CELL, disc_for_seat
+from arena.games.connect4.state import EMPTY_CELL, Connect4State, disc_for_seat
 
 
 class Connect4RulesEngine:
@@ -176,8 +176,22 @@ class Connect4RulesEngine:
         directions = ((1, 0), (0, 1), (1, 1), (1, -1))
         for row_step, column_step in directions:
             contiguous = 1
-            contiguous += self._count_direction(board, row, column, row_step, column_step, disc_value)
-            contiguous += self._count_direction(board, row, column, -row_step, -column_step, disc_value)
+            contiguous += self._count_direction(
+                board,
+                row,
+                column,
+                row_step,
+                column_step,
+                disc_value,
+            )
+            contiguous += self._count_direction(
+                board,
+                row,
+                column,
+                -row_step,
+                -column_step,
+                disc_value,
+            )
             if contiguous >= self._connect_length():
                 return disc_value - 1
         return None
@@ -195,7 +209,11 @@ class Connect4RulesEngine:
         row += row_step
         column += column_step
 
-        while 0 <= row < len(board) and 0 <= column < len(board[0]) and board[row][column] == disc_value:
+        while (
+            0 <= row < len(board)
+            and 0 <= column < len(board[0])
+            and board[row][column] == disc_value
+        ):
             count += 1
             row += row_step
             column += column_step

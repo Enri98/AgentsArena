@@ -84,9 +84,18 @@ def test_fake_game_bundle_serializer_round_trips_core_objects() -> None:
     bundle = build_fake_game_bundle()
     serializer = bundle.definition.serializer
 
-    assert serializer.load_config(serializer.dump_config(bundle.config)) == bundle.config
-    assert serializer.load_state(serializer.dump_state(bundle.near_terminal_state)) == bundle.near_terminal_state
-    assert serializer.load_action(serializer.dump_action(bundle.legal_action)) == bundle.legal_action
+    assert (
+        serializer.load_config(serializer.dump_config(bundle.config))
+        == bundle.config
+    )
+    assert (
+        serializer.load_state(serializer.dump_state(bundle.near_terminal_state))
+        == bundle.near_terminal_state
+    )
+    assert (
+        serializer.load_action(serializer.dump_action(bundle.legal_action))
+        == bundle.legal_action
+    )
     assert serializer.load_observation(
         serializer.dump_observation(FakeObservation(seat=1, turn=1, remaining_turns=1))
     ) == FakeObservation(seat=1, turn=1, remaining_turns=1)

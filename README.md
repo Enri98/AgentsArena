@@ -13,16 +13,14 @@ Current scope:
 The intended flow is: register a game, resolve its definition, create initial state, ask for legal actions, apply a move, then serialize and rehydrate the resulting snapshot.
 
 ```python
-from arena.core import GameRegistry
+from arena.games import build_default_registry
 from arena.games.connect4 import (
     CONNECT4_GAME_ID,
     Connect4Config,
     DropDisc,
-    register_connect4,
 )
 
-registry = GameRegistry()
-register_connect4(registry)
+registry = build_default_registry()
 
 definition = registry.get(CONNECT4_GAME_ID)
 config = Connect4Config()
@@ -46,7 +44,7 @@ assert rehydrated_config == config
 ```
 
 The public path stays intentionally small:
-- `GameRegistry` stores game definitions
-- `register_connect4(...)` adds the Connect 4 definition
+- `build_default_registry()` returns a registry preloaded with the built-in games
+- `register_builtin_games(...)` adds the built-in games to an existing registry
 - `definition.rules_engine` creates state, lists legal actions, and applies moves
 - `definition.serializer` converts config and state snapshots at the boundary
