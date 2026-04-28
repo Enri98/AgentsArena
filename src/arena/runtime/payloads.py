@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import fields, is_dataclass
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -38,6 +38,7 @@ ActionT = TypeVar("ActionT", bound=Action)
 ObservationT = TypeVar("ObservationT", bound=Observation)
 ResultT = TypeVar("ResultT", bound=RuleResult)
 
+RUNTIME_STATUS_SCHEMA_VERSION = 1
 RUNTIME_TRANSCRIPT_SCHEMA_VERSION = 1
 
 
@@ -67,6 +68,7 @@ class RuntimeEventPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
+    event_scope: Literal["runtime"]
     event_type: str = Field(min_length=1)
     payload: JSONMapping = Field(default_factory=dict)
 
@@ -85,6 +87,7 @@ class RuntimeSessionStatusPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
+    schema_version: Literal[1]
     match_id: str = Field(min_length=1)
     game_id: str = Field(min_length=1)
     lifecycle: str = Field(min_length=1)
@@ -103,7 +106,7 @@ class RuntimeTranscriptPayload(BaseModel):
 
     match_id: str = Field(min_length=1)
     game_id: str = Field(min_length=1)
-    schema_version: int = Field(ge=1)
+    schema_version: Literal[1]
     lifecycle: str = Field(min_length=1)
     players: list[RuntimePlayerPayload]
     events: list[RuntimeEventPayload]
@@ -134,6 +137,7 @@ def dump_session_status(
         result = _dump_rule_result(local_match.rules_engine.result(local_match.state))
 
     payload = RuntimeSessionStatusPayload(
+        schema_version=RUNTIME_STATUS_SCHEMA_VERSION,
         match_id=session.match_id,
         game_id=session.definition.game_id,
         lifecycle=session.lifecycle.value,
@@ -169,19 +173,30 @@ def dump_runtime_transcript(
     return payload.model_dump(mode="json")
 
 
+def validate_session_status(payload: JSONMapping) -> RuntimeSessionStatusPayload:
+    """Validate a dumped session status payload against the stable runtime contract."""
+
+    _ensure_supported_schema_version(
+        payload=payload,
+        expected=RUNTIME_STATUS_SCHEMA_VERSION,
+        context="Runtime session status",
+    )
+    status_payload = RuntimeSessionStatusPayload.model_validate(payload)
+    return status_payload
+
+
 def validate_runtime_transcript(
     definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT],
     payload: JSONMapping,
 ) -> LoadedMatchTranscript[ConfigT, StateT, ActionT, ObservationT, ResultT] | None:
     """Validate the wrapped local match transcript when one is present."""
 
+    _ensure_supported_schema_version(
+        payload=payload,
+        expected=RUNTIME_TRANSCRIPT_SCHEMA_VERSION,
+        context="Runtime transcript",
+    )
     runtime_payload = RuntimeTranscriptPayload.model_validate(payload)
-    if runtime_payload.schema_version != RUNTIME_TRANSCRIPT_SCHEMA_VERSION:
-        raise ValueError(
-            "Runtime transcript schema_version "
-            f"{runtime_payload.schema_version!r} does not match "
-            f"{RUNTIME_TRANSCRIPT_SCHEMA_VERSION!r}."
-        )
     if runtime_payload.game_id != definition.game_id:
         raise ValueError(
             f"Runtime transcript game_id {runtime_payload.game_id!r} "
@@ -230,7 +245,26 @@ def _dump_runtime_event(event: RuntimeEvent) -> RuntimeEventPayload:
     else:
         payload = {}
 
-    return RuntimeEventPayload(event_type=event.event_type, payload=payload)
+    return RuntimeEventPayload(
+        event_scope="runtime",
+        event_type=event.event_type,
+        payload=payload,
+    )
+
+
+def _ensure_supported_schema_version(
+    *,
+    payload: JSONMapping,
+    expected: int,
+    context: str,
+) -> None:
+    actual = payload.get("schema_version")
+    if actual is None:
+        return
+    if actual != expected:
+        raise ValueError(
+            f"{context} schema_version {actual!r} does not match {expected!r}."
+        )
 
 
 def _dump_rule_result(result: RuleResult | None) -> RuntimeResultPayload | None:
@@ -245,6 +279,7 @@ def _dump_rule_result(result: RuleResult | None) -> RuntimeResultPayload | None:
 
 
 __all__: Sequence[str] = [
+    "RUNTIME_STATUS_SCHEMA_VERSION",
     "RUNTIME_TRANSCRIPT_SCHEMA_VERSION",
     "RuntimeAbortPayload",
     "RuntimeEventPayload",
@@ -254,5 +289,6 @@ __all__: Sequence[str] = [
     "RuntimeTranscriptPayload",
     "dump_runtime_transcript",
     "dump_session_status",
+    "validate_session_status",
     "validate_runtime_transcript",
 ]

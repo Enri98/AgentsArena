@@ -35,6 +35,17 @@ Candidate Phase 21 responsibilities:
 - define schema/version expectations for runtime payload compatibility
 - add tests for payload shape stability and UI-facing edge cases
 
+## Phase 21 Decision Checkpoint
+
+Decisions for the first runtime/UI contract slice:
+- the first UI status contract should expose `schema_version`, `match_id`, `game_id`, `lifecycle`, `players`, `current_seat`, `turn_count`, `result`, `latest_snapshot`, and `abort`
+- `latest_snapshot` is the authoritative rendering input for the current deterministic perfect-information scope; runtime should not add a game-neutral board/view payload yet
+- session status should not include runtime event lists; status stays lightweight and current-state oriented, while event history stays in runtime transcripts
+- UI distinguishes runtime events from game-domain events by envelope location first: runtime events are top-level `events` in the runtime transcript, while game-domain events remain inside `match_transcript.turns[*].events`
+- runtime event payloads should self-identify with `event_scope="runtime"` for stable downstream consumption
+- runtime status and transcript payload schemas both pin `schema_version` to the fixed supported value `1`; future incompatible changes should bump the version explicitly
+- payload stability should be enforced with explicit full-payload tests for representative session states plus version checks, rather than introducing JSON Schema as the compatibility gate in this slice
+
 Responsibilities still deferred unless explicitly planned:
 - remote agents
 - APIs

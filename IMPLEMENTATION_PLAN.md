@@ -2398,6 +2398,21 @@ Acceptance criteria:
 Status:
 - ready for next-session planning and implementation
 
+#### Slice 1 - Status/transcript contract checkpoint `[done]`
+
+Objective:
+- lock the first pure runtime payload contract for UI and CLI consumers without introducing rendering helpers or board-specific view models
+
+Status:
+- completed
+
+Implementation note:
+- stabilized `dump_session_status(...)` with an explicit runtime status schema version and a matching validation helper
+- kept `latest_snapshot` as the authoritative rendering-agnostic state payload instead of adding a game-neutral derived board view
+- kept runtime events out of session status while making runtime transcript events self-identify with `event_scope="runtime"`
+- tightened the payload models so runtime status and transcript schemas encode the fixed supported `schema_version` value `1`
+- added full-payload stability tests for running, finished, and aborted session status payloads plus explicit version validation for both status and transcript envelopes
+
 Handoff note:
 - see `docs/MATCH_ARENA_HANDOFF.md`
 

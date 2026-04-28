@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from arena.adapters import TypedPayloadPolicyAdapter
 from arena.core.results import Win
 from arena.games import build_default_registry
 from arena.games.connect4 import (
     CONNECT4_GAME_ID,
     Connect4Config,
+    Connect4GameDefinition,
     Connect4Observation,
     DropDisc,
 )
@@ -19,6 +21,15 @@ from arena.match import (
     run_local_match,
     start_match,
     validate_match_transcript,
+)
+from arena.runtime import (
+    Arena,
+    MatchId,
+    PlayerRecord,
+    dump_runtime_transcript,
+    dump_session_status,
+    validate_runtime_transcript,
+    validate_session_status,
 )
 
 
@@ -134,3 +145,59 @@ def test_readme_policy_flow_matches_the_public_match_api() -> None:
     assert final_match.rules_engine.is_terminal(final_match.state)
     assert final_match.rules_engine.result(final_match.state) == Win(seat=0)
     assert [turn.seat for turn in final_match.turns] == [0, 1, 0, 1, 0, 1, 0]
+
+
+def test_readme_runtime_flow_matches_the_public_runtime_api() -> None:
+    arena = Arena(id_factory=lambda: MatchId("runtime-demo"))
+    session = arena.run_session(
+        arena.create_session(
+            Connect4GameDefinition,
+            Connect4Config(rows=4, columns=4, connect_length=4),
+            players=(
+                PlayerRecord(player_id="player-0", label="Red", seat=0),
+                PlayerRecord(player_id="player-1", label="Yellow", seat=1),
+            ),
+            policy_bindings={
+                0: TypedPayloadPolicyAdapter(
+                    Connect4GameDefinition,
+                    ScriptedPolicy(
+                        actions=(
+                            DropDisc(column=0),
+                            DropDisc(column=0),
+                            DropDisc(column=0),
+                            DropDisc(column=0),
+                        )
+                    ),
+                ),
+                1: TypedPayloadPolicyAdapter(
+                    Connect4GameDefinition,
+                    ScriptedPolicy(
+                        actions=(
+                            DropDisc(column=1),
+                            DropDisc(column=1),
+                            DropDisc(column=1),
+                        )
+                    ),
+                ),
+            },
+        )
+    )
+
+    assert session.local_match is not None
+
+    status = dump_session_status(session)
+    validated_status = validate_session_status(status)
+
+    assert json.dumps(status)
+    assert validated_status.lifecycle == "finished"
+    assert status["current_seat"] is None
+    assert status["latest_snapshot"]["game_id"] == CONNECT4_GAME_ID
+
+    runtime_transcript = dump_runtime_transcript(session)
+    loaded = validate_runtime_transcript(Connect4GameDefinition, runtime_transcript)
+
+    assert json.dumps(runtime_transcript)
+    assert all(event["event_scope"] == "runtime" for event in runtime_transcript["events"])
+    assert runtime_transcript["match_transcript"]["game_id"] == CONNECT4_GAME_ID
+    assert loaded is not None
+    assert loaded.latest_state == session.local_match.state

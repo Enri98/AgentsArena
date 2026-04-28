@@ -22,6 +22,7 @@ from arena.runtime.models import (
     TurnRequested,
 )
 from arena.runtime.payloads import (
+    RUNTIME_STATUS_SCHEMA_VERSION,
     RUNTIME_TRANSCRIPT_SCHEMA_VERSION,
     RuntimeAbortPayload,
     RuntimeEventPayload,
@@ -32,6 +33,7 @@ from arena.runtime.payloads import (
     dump_runtime_transcript,
     dump_session_status,
     validate_runtime_transcript,
+    validate_session_status,
 )
 from arena.runtime.session import Arena, MatchSession
 
@@ -49,6 +51,7 @@ __all__ = [
     "MatchSession",
     "MatchStarted",
     "PlayerRecord",
+    "RUNTIME_STATUS_SCHEMA_VERSION",
     "RUNTIME_TRANSCRIPT_SCHEMA_VERSION",
     "RuntimeAbortPayload",
     "RuntimeAbortedError",
@@ -65,5 +68,6 @@ __all__ = [
     "dump_runtime_transcript",
     "dump_session_status",
     "generate_match_id",
+    "validate_session_status",
     "validate_runtime_transcript",
 ]

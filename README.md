@@ -128,6 +128,95 @@ final_match = run_local_match(
 assert final_match.rules_engine.is_terminal(final_match.state)
 ```
 
+For pure local runtime sessions, use `arena.runtime` to add match ids, player metadata, lifecycle, and UI-safe payload envelopes around the existing local match flow:
+
+The runtime envelopes are versioned with a fixed `schema_version` in the payload schema itself.
+For the current contract, both status and transcript payloads require `schema_version == 1`.
+Any incompatible runtime payload change should bump that value intentionally rather than widening validation.
+
+```python
+from dataclasses import dataclass
+
+from arena.games.connect4 import (
+    Connect4Config,
+    Connect4GameDefinition,
+    Connect4Observation,
+    DropDisc,
+)
+from arena.runtime import (
+    Arena,
+    MatchId,
+    PlayerRecord,
+    dump_runtime_transcript,
+    dump_session_status,
+    validate_runtime_transcript,
+    validate_session_status,
+)
+from arena.adapters import TypedPayloadPolicyAdapter
+
+
+@dataclass
+class ScriptedAgent:
+    actions: tuple[DropDisc, ...]
+    index: int = 0
+
+    def select_action(self, observation: Connect4Observation) -> DropDisc:
+        action = self.actions[self.index]
+        self.index += 1
+        assert action in observation.legal_actions
+        return action
+
+
+arena = Arena(id_factory=lambda: MatchId("runtime-demo"))
+session = arena.run_session(
+    arena.create_session(
+        Connect4GameDefinition,
+        Connect4Config(rows=4, columns=4, connect_length=4),
+        players=(
+            PlayerRecord(player_id="player-0", label="Red", seat=0),
+            PlayerRecord(player_id="player-1", label="Yellow", seat=1),
+        ),
+        policy_bindings={
+            0: TypedPayloadPolicyAdapter(
+                Connect4GameDefinition,
+                ScriptedAgent(
+                    actions=(
+                        DropDisc(column=0),
+                        DropDisc(column=0),
+                        DropDisc(column=0),
+                        DropDisc(column=0),
+                    )
+                ),
+            ),
+            1: TypedPayloadPolicyAdapter(
+                Connect4GameDefinition,
+                ScriptedAgent(
+                    actions=(
+                        DropDisc(column=1),
+                        DropDisc(column=1),
+                        DropDisc(column=1),
+                    )
+                ),
+            ),
+        },
+    )
+)
+
+status = dump_session_status(session)
+validated_status = validate_session_status(status)
+assert status["schema_version"] == 1
+assert validated_status.lifecycle == "finished"
+assert status["current_seat"] is None
+assert status["latest_snapshot"]["game_id"] == "connect4"
+
+runtime_transcript = dump_runtime_transcript(session)
+loaded = validate_runtime_transcript(Connect4GameDefinition, runtime_transcript)
+assert runtime_transcript["schema_version"] == 1
+assert all(event["event_scope"] == "runtime" for event in runtime_transcript["events"])
+assert loaded is not None
+assert loaded.latest_state == session.local_match.state
+```
+
 The public path stays intentionally small:
 - `build_default_registry()` returns a registry preloaded with the built-in games
 - `register_builtin_games(...)` adds the built-in games to an existing registry
@@ -136,3 +225,4 @@ The public path stays intentionally small:
 - `arena.match` records immutable local match turns and serialized snapshots
 - `dump_match_transcript(...)` and `validate_match_transcript(...)` export and replay-check local transcripts
 - `run_local_match(...)` drives in-process observation-based policies to terminal state
+- `arena.runtime` adds pure in-memory session lifecycle, player metadata, match ids, status payloads, and wrapped runtime transcripts
