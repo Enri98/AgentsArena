@@ -2211,3 +2211,261 @@ Status:
 
 Implementation note:
 - added `InProcessAgent` and `TypedPayloadPolicyAdapter`, which validate payload metadata, load observations through the game serializer, call the typed agent, dump typed actions through the serializer, and then remain compatible with `apply_payload_policy_turn(...)`
+
+### Phase 20 - Match / arena layer design checkpoint
+
+Objective:
+- decide what belongs in the match / arena layer before adding orchestration code
+
+Decision inputs:
+- the simulation layer is complete enough for the current deterministic perfect-information scope
+- `arena.match` already provides immutable single-match execution and transcript validation
+- `arena.adapters.in_process` provides a pure in-process adapter boundary without remote infrastructure
+- the next layer must not leak transport, persistence, timeout, auth, matchmaking, or rendering concerns into simulation code
+
+Decisions:
+- name the next package `arena.runtime`
+- introduce a small higher-level `Arena` object as the pure in-memory coordinator for local runtime sessions
+- keep `LocalMatch` as the authoritative deterministic single-match execution primitive
+- add opaque runtime match ids in the first runtime slice
+- allow caller-provided match ids for reproducibility and expose a small default id generator for demos and convenience
+- represent players with runtime-owned records containing `player_id`, optional `label`, and assigned integer `seat`
+- keep player records separate from policy bindings so identity metadata is not coupled to in-process execution machinery
+- use an explicit runtime lifecycle with `created`, `running`, `finished`, and `aborted`
+- treat all non-game-result failures as runtime aborts while preserving the original exception as the cause where possible
+- let `arena.core` remain the authority for rule validation; runtime may catch `ArenaCoreError` at the boundary and convert it into an aborted runtime outcome
+- keep transcript validation explicit instead of running it automatically after every local run
+- wrap existing `arena.match` transcript payloads with runtime/session metadata instead of extending `MatchTranscriptPayload`
+- add runtime events distinct from game-domain events
+- consider UI-facing payloads now, but keep them as stable data envelopes derived from runtime/session state rather than UI rendering logic
+
+Runtime owns:
+- match identity
+- player and seat assignment records
+- local runtime lifecycle state
+- runtime abort reasons and error boundaries
+- runtime event records
+- ownership of session-level transcript envelopes
+- adapter/policy binding for local in-process execution
+- UI-ready session status and transcript payloads that do not contain presentation or rendering decisions
+
+Runtime must not own yet:
+- FastAPI or WebSocket APIs
+- remote agents
+- subprocess management
+- persistence
+- stale-version handling
+- deadlines and timeout outcomes
+- authentication and authorization
+- matchmaking queues
+- tournaments
+- concrete UI rendering logic
+
+#### Slice 1 - Runtime package boundary and architecture tests
+
+Objective:
+- create the `arena.runtime` package boundary without broad orchestration code
+
+Scope:
+- `src/arena/runtime`
+- architecture tests
+- import smoke tests if needed
+
+Acceptance criteria:
+- `arena.core` and `arena.games` do not import `arena.runtime`, `arena.match`, or `arena.adapters`
+- `arena.match` does not import `arena.runtime` or `arena.adapters`
+- `arena.adapters` does not import `arena.runtime`
+- `arena.runtime` may depend on `arena.core`, `arena.match`, and `arena.adapters.in_process`
+- no API, persistence, subprocess, timeout, auth, matchmaking, tournament, or rendering dependencies are introduced
+
+#### Slice 2 - Runtime domain models
+
+Objective:
+- define the pure runtime data model before implementing execution behavior
+
+Scope:
+- match ids
+- player records
+- lifecycle states
+- runtime events
+- abort metadata
+- runtime exceptions
+
+Acceptance criteria:
+- match ids are opaque string values
+- caller-provided ids are supported
+- default id generation is available as a convenience helper
+- player records include `player_id`, optional `label`, and `seat`
+- lifecycle can distinguish `created`, `running`, `finished`, and `aborted`
+- abort metadata can capture a stable reason code, message, and optional cause type/message
+- runtime exceptions do not modify or replace `arena.core` domain exceptions
+- runtime events describe orchestration facts and do not duplicate game-domain events
+
+#### Slice 3 - Arena and local session execution
+
+Objective:
+- add a small pure in-memory `Arena` coordinator for local runtime sessions
+
+Scope:
+- create local sessions from a game definition, config, players, and optional match id
+- bind in-process payload policies separately from player identity
+- start, step, and run local sessions by delegating to `arena.match` and `arena.adapters.in_process`
+
+Acceptance criteria:
+- `Arena` can create a session in `created` state
+- a session can transition to `running` and own a `LocalMatch`
+- a session can advance one turn by requesting an action from the bound policy for the current seat
+- a session can run until the underlying game reaches a rule result
+- missing policy, adapter failure, bad payload, and illegal returned action become runtime aborts
+- core exceptions are preserved as causes rather than hidden by generic errors
+- no networking, persistence, subprocesses, deadlines, auth, matchmaking, tournaments, or rendering logic are added
+
+#### Slice 4 - Runtime transcript and UI-ready payload envelopes
+
+Objective:
+- expose stable runtime-level data envelopes for CLI demos, human-readable transcript formatting, and future UI work
+
+Scope:
+- runtime transcript envelope
+- session status payload
+- player/seat payloads
+- runtime event payloads
+- explicit transcript validation helper
+
+Acceptance criteria:
+- runtime transcript wraps the existing `dump_match_transcript(...)` output instead of changing the match transcript schema
+- runtime transcript includes match id, game id, lifecycle, players, runtime events, abort metadata when present, and the inner match transcript when available
+- session status payload exposes enough information for a UI to show match id, game id, lifecycle, current seat, players, turn count, result, and latest snapshot without needing direct access to `LocalMatch`
+- payloads are JSON-safe and stable
+- no UI rendering, component state, transport, or persistence assumptions are introduced
+- validation of the wrapped match transcript remains explicit
+
+Status:
+- completed through Slice 4
+
+Implementation note:
+- added `arena.runtime` with opaque match ids, player records, lifecycle states, runtime events, abort metadata, runtime exceptions, a pure in-memory `Arena` coordinator, local `MatchSession` execution, explicit runtime abort boundaries, wrapped runtime transcripts, and UI-ready session status payloads
+- updated architecture tests to preserve dependency direction: core/games cannot import match/adapters/runtime, match cannot import adapters/runtime, adapters cannot import runtime, and runtime may depend downward on core/match/adapters
+- added focused runtime unit tests covering session creation, start/step/run, missing-policy aborts, illegal-action aborts preserving core causes, adapter failures, lifecycle errors, status payloads, and explicit runtime transcript validation
+
+Handoff note:
+- see `docs/MATCH_ARENA_HANDOFF.md`
+
+### Phase 21 - Runtime / UI contract stabilization
+
+Objective:
+- stabilize the pure runtime payload contract before building UI code
+
+Decision inputs:
+- `arena.runtime` now owns match ids, player records, lifecycle, runtime events, abort metadata, local session execution, wrapped transcripts, and session status payloads
+- the upcoming UI should consume stable JSON-safe data, not direct `LocalMatch` internals
+- UI rendering decisions must not leak into `arena.core`, `arena.games`, `arena.match`, or rule engines
+
+Scope:
+- `arena.runtime` payload contracts
+- payload shape tests
+- docs and examples for runtime status/transcript usage
+- compatibility/version validation for runtime envelopes
+
+Out of scope:
+- FastAPI or WebSocket APIs
+- remote agents
+- subprocess management
+- persistence
+- stale-version handling
+- deadlines and timeout outcomes
+- authentication and authorization
+- matchmaking queues
+- tournaments
+- concrete UI components or rendering logic
+
+Questions to answer first:
+- what exact fields does the first UI need for the match screen?
+- is `latest_snapshot` sufficient for board rendering, or should runtime expose an additional game-neutral view model?
+- should runtime status include the latest runtime event list, or should events stay transcript-only?
+- should payload shape stability be asserted through full-dictionary tests, JSON Schema emission, or both?
+- how should UI distinguish game-domain events from runtime events?
+- should README include runtime examples before any UI package exists?
+
+Acceptance criteria:
+- `dump_session_status(...)` exposes a stable, JSON-safe status contract for UI and CLI consumers
+- `dump_runtime_transcript(...)` remains a wrapper around the existing match transcript and includes runtime metadata
+- runtime payload schema versions are validated explicitly
+- tests cover running, finished, and aborted session payloads
+- tests cover player labels, current seat, turn count, result, latest snapshot, abort metadata, and event payloads
+- no rendering, transport, persistence, or remote-agent assumptions are introduced
+
+Status:
+- ready for next-session planning and implementation
+
+Handoff note:
+- see `docs/MATCH_ARENA_HANDOFF.md`
+
+### Phase 22 - Human-readable transcript and CLI demo helpers
+
+Objective:
+- validate the runtime/UI contract through simple human-readable local output before adding a UI
+
+Scope:
+- pure formatting helpers or demo-facing utilities for runtime status and transcript payloads
+- README or docs examples showing local runtime execution
+- focused tests for deterministic human-readable output
+
+Out of scope:
+- command-line argument parsing unless explicitly planned
+- network APIs
+- persistence
+- subprocess agents
+- UI rendering
+- remote agents
+- matchmaking or tournaments
+
+Candidate responsibilities:
+- format player/seat assignments
+- format lifecycle, current turn, result, and abort status
+- format turn history from the wrapped runtime transcript
+- include runtime events without duplicating game-domain events
+- keep all authoritative data in runtime payloads, with human-readable output derived from them
+
+Acceptance criteria:
+- a completed local Connect 4 runtime session can be rendered as deterministic readable text
+- an aborted session can be rendered with abort reason and cause metadata
+- formatting helpers consume payloads or runtime transcript data rather than direct mutable internals
+- tests assert representative output without overfitting to cosmetic wording
+
+Status:
+- planned after Phase 21
+
+### Phase 23 - UI adapter boundary
+
+Objective:
+- define the first thin boundary between pure runtime payloads and the upcoming UI
+
+Scope:
+- UI-facing adapter models or helpers that reshape runtime payloads without changing simulation/runtime authority
+- docs describing what a UI may consume and what remains internal
+- architecture tests if a new package is introduced
+
+Out of scope:
+- FastAPI or WebSocket APIs unless a later phase explicitly adds transport
+- persistence
+- remote agents
+- auth
+- matchmaking
+- tournaments
+- embedding UI rendering logic inside simulation, match, or runtime rules
+
+Candidate responsibilities:
+- map runtime status payloads into screen-level data structures
+- preserve stable identifiers for match, players, seats, turns, and lifecycle
+- keep board rendering data derived from snapshots or a documented view payload
+- prepare for eventual UI work without committing to a transport or framework
+
+Acceptance criteria:
+- the UI adapter depends downward on `arena.runtime`
+- `arena.runtime`, `arena.match`, `arena.core`, and `arena.games` do not depend on the UI adapter
+- adapter outputs remain JSON-safe and deterministic
+- no web server, database, subprocess, auth, or matchmaking code is introduced
+
+Status:
+- planned after Phase 22
