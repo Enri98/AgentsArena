@@ -41,6 +41,27 @@ def _cell(value: int) -> str:
     return _EMPTY_CELL
 
 
+_SEPARATOR_PLAIN = "---+---+---"
+
+
+def render_board_plain(state_payload: Mapping[str, Any]) -> str:
+    board: list[list[int]] = state_payload["board"]
+    rendered_rows = [_row_plain(row) for row in board]
+    return f"\n{_SEPARATOR_PLAIN}\n".join(rendered_rows)
+
+
+def _row_plain(row: list[int]) -> str:
+    return " | ".join(_cell_plain(v) for v in row)
+
+
+def _cell_plain(value: int) -> str:
+    if value == _SEAT0:
+        return "X"
+    if value == _SEAT1:
+        return "O"
+    return "."
+
+
 _NUMPAD_MAP: dict[int, tuple[int, int]] = {
     1: (0, 0),
     2: (0, 1),
@@ -83,4 +104,4 @@ def parse_input(line: str, observation: Any) -> PlaceMark | None:
     return None
 
 
-__all__: tuple[str, ...] = ("numpad_action", "parse_input", "render_board")
+__all__: tuple[str, ...] = ("numpad_action", "parse_input", "render_board", "render_board_plain")

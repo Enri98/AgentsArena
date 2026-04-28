@@ -69,16 +69,45 @@ def test_user_message_contains_legal_keys() -> None:
     obs = _make_observation()
     messages = builder.build_messages(obs)
     user = messages[1]["content"]
-    assert "Legal keys:" in user
+    assert "Legal keys" in user
 
 
-def test_user_message_contains_snapshot() -> None:
+def test_user_message_contains_symbol_grid() -> None:
     builder = TicTacToePromptBuilder()
     obs = _make_observation()
     messages = builder.build_messages(obs)
     user = messages[1]["content"]
-    assert "Snapshot:" in user
-    assert "current_seat" in user
+    assert "Board as nested rows of symbols" in user
+
+
+def test_user_message_contains_seat_identity() -> None:
+    builder = TicTacToePromptBuilder()
+    obs = _make_observation()
+    messages = builder.build_messages(obs)
+    user = messages[1]["content"]
+    seat = obs.current_seat
+    assert f"seat {seat}" in user
+    assert "X" in user
+    assert "O" in user
+
+
+def test_user_message_contains_thought_instruction() -> None:
+    builder = TicTacToePromptBuilder()
+    obs = _make_observation()
+    messages = builder.build_messages(obs)
+    user = messages[1]["content"]
+    assert "thought" in user
+    assert "key" in user
+
+
+def test_system_message_contains_strategy_hints() -> None:
+    builder = TicTacToePromptBuilder()
+    obs = _make_observation()
+    messages = builder.build_messages(obs)
+    system = messages[0]["content"]
+    assert "center" in system
+    assert "block" in system
+    assert "fork" in system.lower()
 
 
 def test_retry_feedback_injected_when_present() -> None:
@@ -98,7 +127,15 @@ def test_no_feedback_section_without_feedback() -> None:
     assert "Previous attempts were rejected" not in user
 
 
-def test_parse_response_legal_key() -> None:
+def test_parse_response_legal_key_with_thought() -> None:
+    builder = TicTacToePromptBuilder()
+    obs = _make_observation()
+    result = builder.parse_response(json.dumps({"thought": "take corner", "key": 1}), obs)
+    assert isinstance(result, PlaceMark)
+    assert result == PlaceMark(row=0, column=0)
+
+
+def test_parse_response_legal_key_without_thought() -> None:
     builder = TicTacToePromptBuilder()
     obs = _make_observation()
     result = builder.parse_response(json.dumps({"key": 1}), obs)
@@ -109,7 +146,7 @@ def test_parse_response_legal_key() -> None:
 def test_parse_response_out_of_range_key_returns_none() -> None:
     builder = TicTacToePromptBuilder()
     obs = _make_observation()
-    result = builder.parse_response(json.dumps({"key": 99}), obs)
+    result = builder.parse_response(json.dumps({"thought": "x", "key": 99}), obs)
     assert result is None
 
 
@@ -123,20 +160,20 @@ def test_parse_response_malformed_returns_none() -> None:
 def test_parse_response_missing_key_returns_none() -> None:
     builder = TicTacToePromptBuilder()
     obs = _make_observation()
-    result = builder.parse_response(json.dumps({}), obs)
+    result = builder.parse_response(json.dumps({"thought": "thinking"}), obs)
     assert result is None
 
 
 def test_parse_response_non_int_key_returns_none() -> None:
     builder = TicTacToePromptBuilder()
     obs = _make_observation()
-    result = builder.parse_response(json.dumps({"key": "1"}), obs)
+    result = builder.parse_response(json.dumps({"thought": "x", "key": "1"}), obs)
     assert result is None
 
 
 def test_integration_stub_client_returns_legal_action() -> None:
     obs = _make_observation()
-    client = _StubClient([json.dumps({"key": 1})])
+    client = _StubClient([json.dumps({"thought": "take corner", "key": 1})])
     builder = TicTacToePromptBuilder()
     agent = OllamaAgent(client=client, model="x", prompt_builder=builder)
     result = agent.select_action(obs)
@@ -148,5 +185,16 @@ def test_format_spec_has_key_with_range() -> None:
     spec = builder.format_spec()
     assert spec["type"] == "object"
     assert "key" in spec["properties"]
+    assert "thought" in spec["properties"]
     assert spec["properties"]["key"]["minimum"] == 1
     assert spec["properties"]["key"]["maximum"] == 9
+    assert "thought" in spec["required"]
+    assert "key" in spec["required"]
+
+
+def test_board_in_prompt_has_no_ansi_escapes() -> None:
+    builder = TicTacToePromptBuilder()
+    obs = _make_observation()
+    messages = builder.build_messages(obs)
+    user = messages[1]["content"]
+    assert "\x1b[" not in user

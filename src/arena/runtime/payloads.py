@@ -26,6 +26,7 @@ from arena.runtime.models import (
     MatchFinished,
     MatchStarted,
     PlayerRecord,
+    PolicyDecided,
     PolicyRetried,
     RuntimeEvent,
     TurnAccepted,
@@ -248,6 +249,12 @@ def _dump_runtime_event(event: RuntimeEvent) -> RuntimeEventPayload:
             "seat": event.seat,
             "attempt": event.attempt,
             "reason_summary": event.reason_summary,
+        }
+    elif isinstance(event, PolicyDecided):
+        payload = {
+            "seat": event.seat,
+            "attempt": event.attempt,
+            "thought": event.thought,
         }
     else:
         payload = {}

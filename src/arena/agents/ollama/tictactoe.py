@@ -1,28 +1,32 @@
-"""Tic-Tac-Toe prompt builder and response parser for OllamaAgent."""
-
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from arena.cli.games.tictactoe import numpad_action, render_board
+from arena.cli.games.tictactoe import numpad_action, render_board_plain
 from arena.games.tictactoe.actions import PlaceMark
+
+_SEAT_SYMBOLS = ("X", "O")
 
 
 class TicTacToePromptBuilder:
     """Build Ollama chat messages and parse responses for Tic-Tac-Toe."""
 
     SYSTEM_PROMPT = (
-        "You are playing Tic-Tac-Toe on a 3x3 board. "
-        "Players alternate placing marks. "
-        "The first player to place three marks in a row "
-        "(horizontally, vertically, or diagonally) wins. "
+        "You are an expert Tic-Tac-Toe player. "
+        "The game is played on a 3x3 grid. "
+        "The first player to make three in a row horizontally, vertically, or diagonally wins. "
+        "With perfect play the game is a draw.\n\n"
+        "Strategy:\n"
+        "- The center cell (key 5) is strongest. Take it if available on the first move.\n"
+        "- If you can make three in a row this turn, do it.\n"
+        "- If your opponent has two in a row that can extend to three, you MUST block.\n"
+        "- Create forks: positions where you have two open winning lines simultaneously.\n\n"
         "Positions are identified by numpad keys 1-9 "
         "(1=top-left, 2=top-center, 3=top-right, "
         "4=mid-left, 5=center, 6=mid-right, "
-        "7=bottom-left, 8=bottom-center, 9=bottom-right). "
-        'Respond ONLY with a JSON object {"key": <integer>} '
-        "where key is in range 1-9."
+        "7=bottom-left, 8=bottom-center, 9=bottom-right).\n\n"
+        "Before answering, briefly think about the board. Then return your move as JSON."
     )
 
     def build_messages(
@@ -30,21 +34,26 @@ class TicTacToePromptBuilder:
         observation: Any,
         retry_feedback: tuple[str, ...] = (),
     ) -> list[dict[str, str]]:
+        seat = observation.current_seat
+        opponent_seat = 1 - seat
+        my_symbol = _SEAT_SYMBOLS[seat]
+        opp_symbol = _SEAT_SYMBOLS[opponent_seat]
         board_payload = [list(row) for row in observation.board]
-        board_str = render_board({"board": board_payload})
+        board_str = render_board_plain({"board": board_payload})
         legal_keys = _legal_keys(observation.legal_actions)
-        snapshot = {
-            "current_seat": observation.current_seat,
-            "board": board_payload,
-            "legal_actions": [
-                {"row": a.row, "column": a.column} for a in observation.legal_actions
-            ],
-        }
+        symbol_grid = [
+            [_cell_symbol(v, my_symbol, opp_symbol, seat) for v in row]
+            for row in board_payload
+        ]
         user_lines = [
-            f"Current player: seat {observation.current_seat}",
+            f"YOU ARE {my_symbol}. Your opponent is {opp_symbol}.",
+            f"You play seat {seat}; opponent plays seat {opponent_seat}.",
             f"Board:\n{board_str}",
-            f"Snapshot: {json.dumps(snapshot)}",
-            f"Legal keys: {legal_keys}",
+            f"Board as nested rows of symbols: {json.dumps(symbol_grid)}",
+            f"Legal keys you may play: {legal_keys}",
+            f"Reminder: your move places an {my_symbol} at the chosen key.",
+            'Respond with a JSON object: {"thought": "<one short sentence about your '
+            'move>", "key": <integer 1-9>}',
         ]
         if retry_feedback:
             feedback_items = "\n".join(f" - {f}" for f in retry_feedback)
@@ -74,8 +83,11 @@ class TicTacToePromptBuilder:
     def format_spec(self) -> dict[str, Any]:
         return {
             "type": "object",
-            "properties": {"key": {"type": "integer", "minimum": 1, "maximum": 9}},
-            "required": ["key"],
+            "properties": {
+                "thought": {"type": "string"},
+                "key": {"type": "integer", "minimum": 1, "maximum": 9},
+            },
+            "required": ["thought", "key"],
         }
 
     def describe_invalid(self, raw_content: str) -> str:
@@ -93,6 +105,14 @@ _REVERSE_NUMPAD: dict[tuple[int, int], int] = {
     (2, 1): 8,
     (2, 2): 9,
 }
+
+
+def _cell_symbol(value: int, my_symbol: str, opp_symbol: str, seat: int) -> str:
+    if value == 0:
+        return "."
+    if value == seat + 1:
+        return my_symbol
+    return opp_symbol
 
 
 def _legal_keys(legal_actions: tuple[PlaceMark, ...]) -> list[int]:

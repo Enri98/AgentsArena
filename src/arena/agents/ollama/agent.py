@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Generic, Protocol, TypeVar
@@ -40,6 +41,7 @@ class OllamaAgent(Generic[ObservationT, ActionT]):
     seed: int = 0
     temperature: float = 0.0
     retry_callback: Callable[[int, str], None] | None = None
+    decision_callback: Callable[[int, str], None] | None = None
     use_format_spec: bool = True
 
     def select_action(self, observation: Any) -> Any:
@@ -60,6 +62,8 @@ class OllamaAgent(Generic[ObservationT, ActionT]):
             parsed = self.prompt_builder.parse_response(content, observation)
 
             if parsed is not None and parsed in observation.legal_actions:
+                if self.decision_callback is not None:
+                    self.decision_callback(attempt + 1, _extract_thought(content))
                 return parsed
 
             if parsed is None:
@@ -82,6 +86,17 @@ class OllamaAgent(Generic[ObservationT, ActionT]):
             last_attempt=last_attempt,
             attempts=self.max_retries + 1,
         )
+
+
+def _extract_thought(content: str) -> str:
+    try:
+        parsed = json.loads(content)
+    except (ValueError, TypeError):
+        return ""
+    if not isinstance(parsed, dict):
+        return ""
+    thought = parsed.get("thought", "")
+    return thought if isinstance(thought, str) else ""
 
 
 __all__: tuple[str, ...] = ("OllamaAgent", "PromptBuilder")

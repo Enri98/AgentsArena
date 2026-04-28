@@ -62,6 +62,7 @@ def _build_seat(
     ollama_use_format: bool,
     ollama_timeout: float,
     retry_sink: dict[int, list[tuple[int, str]]],
+    decision_sink: dict[int, list[tuple[int, str]]],
 ) -> tuple[PlayerRecord, Any]:
     player = PlayerRecord(player_id=f"player-{seat}", seat=seat, label=label)
     if spec == "human":
@@ -86,6 +87,7 @@ def _build_seat(
             use_format_spec=ollama_use_format,
             timeout=ollama_timeout,
             retry_sink=retry_sink,
+            decision_sink=decision_sink,
         )
     raise ValueError(
         f"Unknown seat spec {spec!r}. "
@@ -105,6 +107,7 @@ def _build_ollama_agent(
     use_format_spec: bool,
     timeout: float,
     retry_sink: dict[int, list[tuple[int, str]]],
+    decision_sink: dict[int, list[tuple[int, str]]],
 ) -> Any:
     from arena.agents.ollama import OllamaAgent, OllamaClient
     from arena.agents.ollama.connect4 import Connect4PromptBuilder
@@ -119,9 +122,14 @@ def _build_ollama_agent(
 
     seat_entries: list[tuple[int, str]] = []
     retry_sink[seat] = seat_entries
+    decision_entries: list[tuple[int, str]] = []
+    decision_sink[seat] = decision_entries
 
     def _callback(attempt: int, reason: str) -> None:
         seat_entries.append((attempt, reason))
+
+    def _decision(attempt: int, thought: str) -> None:
+        decision_entries.append((attempt, thought))
 
     return OllamaAgent(
         client=client,
@@ -131,6 +139,7 @@ def _build_ollama_agent(
         seed=seed,
         temperature=temperature,
         retry_callback=_callback,
+        decision_callback=_decision,
         use_format_spec=use_format_spec,
     )
 
@@ -146,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--connect-length", type=int, default=4, dest="connect_length")
     parser.add_argument("--ollama-host", default="http://localhost:11434", dest="ollama_host")
     parser.add_argument(
-        "--ollama-temperature", type=float, default=0.0, dest="ollama_temperature"
+        "--ollama-temperature", type=float, default=0.3, dest="ollama_temperature"
     )
     parser.add_argument("--ollama-seed", type=int, default=0, dest="ollama_seed")
     parser.add_argument(
@@ -190,18 +199,19 @@ def main(argv: list[str] | None = None) -> int:
         return "Scripted"
 
     retry_sink: dict[int, list[tuple[int, str]]] = {}
+    decision_sink: dict[int, list[tuple[int, str]]] = {}
 
     player0, raw_policy0 = _build_seat(
         args.seat_0, 0, args.game, _seat_label(args.seat_0),
         args.ollama_host, args.ollama_temperature, args.ollama_seed,
         args.ollama_max_retries, not args.ollama_no_format,
-        args.ollama_timeout, retry_sink,
+        args.ollama_timeout, retry_sink, decision_sink,
     )
     player1, raw_policy1 = _build_seat(
         args.seat_1, 1, args.game, _seat_label(args.seat_1),
         args.ollama_host, args.ollama_temperature, args.ollama_seed,
         args.ollama_max_retries, not args.ollama_no_format,
-        args.ollama_timeout, retry_sink,
+        args.ollama_timeout, retry_sink, decision_sink,
     )
 
     ollama_models = [
@@ -239,6 +249,7 @@ def main(argv: list[str] | None = None) -> int:
         policies,
         out_dir=args.out_dir,
         retry_sink=retry_sink if retry_sink else None,
+        decision_sink=decision_sink if decision_sink else None,
     )
 
 

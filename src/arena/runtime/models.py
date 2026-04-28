@@ -167,6 +167,15 @@ class PolicyRetried(RuntimeEvent):
     reason_summary: str
 
 
+@dataclass(frozen=True)
+class PolicyDecided(RuntimeEvent):
+    """A policy committed to a legal action; carries any model reasoning text."""
+
+    seat: Seat
+    attempt: int
+    thought: str
+
+
 __all__ = [
     "AbortMetadata",
     "AbortReason",
@@ -175,6 +184,7 @@ __all__ = [
     "MatchFinished",
     "MatchStarted",
     "PlayerRecord",
+    "PolicyDecided",
     "PolicyRetried",
     "RuntimeEvent",
     "RuntimeLifecycle",

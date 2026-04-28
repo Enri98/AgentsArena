@@ -15,6 +15,7 @@ from arena.runtime import (
     AbortReason,
     Arena,
     PlayerRecord,
+    PolicyDecided,
     PolicyRetried,
     RuntimeLifecycle,
     RuntimeStateError,
@@ -36,6 +37,7 @@ def play_match(
     stdout: Any = None,
     arena: Arena | None = None,
     retry_sink: dict[int, list[tuple[int, str]]] | None = None,
+    decision_sink: dict[int, list[tuple[int, str]]] | None = None,
 ) -> int:
     """Run one interactive or scripted match and write JSON artefacts.
 
@@ -73,6 +75,8 @@ def play_match(
 
         if retry_sink is not None:
             session = _drain_retry_sink(session, retry_sink)
+        if decision_sink is not None:
+            session = _drain_decision_sink(session, decision_sink)
 
     _render(session, stdout)
 
@@ -100,6 +104,23 @@ def _drain_retry_sink(
                 seat=seat,
                 attempt=attempt,
                 reason_summary=reason,
+            )
+            session = record_runtime_event(session, event)
+        entries.clear()
+    return session
+
+
+def _drain_decision_sink(
+    session: Any,
+    decision_sink: dict[int, list[tuple[int, str]]],
+) -> Any:
+    for seat, entries in decision_sink.items():
+        for attempt, thought in entries:
+            event = PolicyDecided(
+                match_id=session.match_id,
+                seat=seat,
+                attempt=attempt,
+                thought=thought,
             )
             session = record_runtime_event(session, event)
         entries.clear()

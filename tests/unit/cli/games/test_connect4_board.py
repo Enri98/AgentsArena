@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from arena.cli.games.connect4 import render_board
+from arena.cli.games.connect4 import render_board, render_board_plain
 from arena.games.connect4 import Connect4GameDefinition
 from arena.games.connect4.state import EMPTY_CELL, SEAT0_DISC, SEAT1_DISC, Connect4State
 
@@ -120,3 +120,74 @@ def test_render_terminal_board_is_deterministic() -> None:
     )
     sp = _dump(state)
     assert render_board(sp) == render_board(sp)
+
+
+_PLAIN_EMPTY_6x7_EXPECTED = (
+    "0 1 2 3 4 5 6\n"
+    + "\n".join(
+        " ".join("." for _ in range(7))
+        for _ in range(6)
+    )
+)
+
+_PLAIN_MID_EXPECTED = (
+    "0 1 2 3 4 5 6\n"
+    + "\n".join(". . . . . . ." for _ in range(5))
+    + "\nX O . . . . ."
+)
+
+_PLAIN_WIN_4x4_EXPECTED = (
+    "0 1 2 3\n"
+    "X . . .\n"
+    "X O . .\n"
+    "X O . .\n"
+    "X O . ."
+)
+
+
+def test_render_board_plain_empty() -> None:
+    state = _empty_board()
+    result = render_board_plain(_dump(state))
+    assert result == _PLAIN_EMPTY_6x7_EXPECTED
+
+
+def test_render_board_plain_no_ansi() -> None:
+    state = _empty_board()
+    result = render_board_plain(_dump(state))
+    assert "\x1b[" not in result
+
+
+def test_render_board_plain_mid_game() -> None:
+    mid_board = [
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0],
+        [SEAT0_DISC, SEAT1_DISC, 0, 0, 0, 0, 0],
+    ]
+    state = Connect4State(
+        board=tuple(tuple(r) for r in mid_board), current_seat=0
+    )
+    result = render_board_plain(_dump(state))
+    assert result == _PLAIN_MID_EXPECTED
+
+
+def test_render_board_plain_terminal() -> None:
+    win_board = [
+        [SEAT0_DISC, 0, 0, 0],
+        [SEAT0_DISC, SEAT1_DISC, 0, 0],
+        [SEAT0_DISC, SEAT1_DISC, 0, 0],
+        [SEAT0_DISC, SEAT1_DISC, 0, 0],
+    ]
+    state = Connect4State(
+        board=tuple(tuple(r) for r in win_board), current_seat=1
+    )
+    result = render_board_plain(_dump(state))
+    assert result == _PLAIN_WIN_4x4_EXPECTED
+
+
+def test_render_board_plain_is_deterministic() -> None:
+    state = _empty_board()
+    sp = _dump(state)
+    assert render_board_plain(sp) == render_board_plain(sp)

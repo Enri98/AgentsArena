@@ -42,6 +42,25 @@ def _cell(value: int) -> str:
     return _EMPTY_CELL
 
 
+def render_board_plain(state_payload: Mapping[str, Any]) -> str:
+    board: list[list[int]] = state_payload["board"]
+    col_count = len(board[0]) if board else _COLUMNS
+    header = " ".join(str(c) for c in range(col_count))
+    rows = [header]
+    for row in board:
+        cells = [_cell_plain(v) for v in row]
+        rows.append(" ".join(cells))
+    return "\n".join(rows)
+
+
+def _cell_plain(value: int) -> str:
+    if value == _SEAT0:
+        return "X"
+    if value == _SEAT1:
+        return "O"
+    return "."
+
+
 def parse_input(line: str, observation: Any) -> DropDisc | None:
     """Parse a column index from *line* and return a legal DropDisc or None."""
     stripped = line.strip()
@@ -59,4 +78,4 @@ def parse_input(line: str, observation: Any) -> DropDisc | None:
     return None
 
 
-__all__: tuple[str, ...] = ("parse_input", "render_board")
+__all__: tuple[str, ...] = ("parse_input", "render_board", "render_board_plain")
