@@ -149,6 +149,7 @@ from arena.runtime import (
     PlayerRecord,
     dump_runtime_transcript,
     dump_session_status,
+    format_runtime_session_report,
     validate_runtime_transcript,
     validate_session_status,
 )
@@ -215,6 +216,14 @@ assert runtime_transcript["schema_version"] == 1
 assert all(event["event_scope"] == "runtime" for event in runtime_transcript["events"])
 assert loaded is not None
 assert loaded.latest_state == session.local_match.state
+
+readable_report = format_runtime_session_report(
+    status_payload=status,
+    transcript_payload=runtime_transcript,
+)
+assert "Lifecycle: finished" in readable_report
+assert "Turn history:" in readable_report
+assert "Runtime events:" in readable_report
 ```
 
 The public path stays intentionally small:
@@ -226,3 +235,4 @@ The public path stays intentionally small:
 - `dump_match_transcript(...)` and `validate_match_transcript(...)` export and replay-check local transcripts
 - `run_local_match(...)` drives in-process observation-based policies to terminal state
 - `arena.runtime` adds pure in-memory session lifecycle, player metadata, match ids, status payloads, and wrapped runtime transcripts
+- `format_runtime_session_report(...)` renders deterministic demo text from status/transcript payloads without becoming authoritative state

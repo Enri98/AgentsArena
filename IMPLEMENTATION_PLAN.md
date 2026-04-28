@@ -2449,7 +2449,13 @@ Acceptance criteria:
 - tests assert representative output without overfitting to cosmetic wording
 
 Status:
-- planned after Phase 21
+- completed
+
+Implementation note:
+- added pure runtime formatting helpers that consume stabilized session status and runtime transcript payloads
+- supported deterministic readable output for completed and aborted local sessions, including player/seat assignments, lifecycle, current or terminal status, result/abort metadata, runtime events, and turn history
+- kept runtime events in the top-level runtime transcript section and game-domain events in per-turn history formatting
+- added focused formatter tests plus README-backed demo coverage without adding CLI parsing, UI rendering, transport, persistence, remote agents, or broader infrastructure
 
 ### Phase 23 - UI adapter boundary
 

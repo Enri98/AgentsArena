@@ -28,6 +28,7 @@ from arena.runtime import (
     PlayerRecord,
     dump_runtime_transcript,
     dump_session_status,
+    format_runtime_session_report,
     validate_runtime_transcript,
     validate_session_status,
 )
@@ -201,3 +202,11 @@ def test_readme_runtime_flow_matches_the_public_runtime_api() -> None:
     assert runtime_transcript["match_transcript"]["game_id"] == CONNECT4_GAME_ID
     assert loaded is not None
     assert loaded.latest_state == session.local_match.state
+
+    readable_report = format_runtime_session_report(
+        status_payload=status,
+        transcript_payload=runtime_transcript,
+    )
+    assert "Lifecycle: finished" in readable_report
+    assert "Turn history:" in readable_report
+    assert "Runtime events:" in readable_report

@@ -7,6 +7,11 @@ from arena.runtime.exceptions import (
     RuntimeAbortedError,
     RuntimeStateError,
 )
+from arena.runtime.formatting import (
+    format_runtime_session_report,
+    format_runtime_transcript,
+    format_session_status,
+)
 from arena.runtime.ids import MatchId, generate_match_id
 from arena.runtime.models import (
     AbortMetadata,
@@ -67,6 +72,9 @@ __all__ = [
     "TurnRequested",
     "dump_runtime_transcript",
     "dump_session_status",
+    "format_runtime_session_report",
+    "format_runtime_transcript",
+    "format_session_status",
     "generate_match_id",
     "validate_session_status",
     "validate_runtime_transcript",
