@@ -24,7 +24,8 @@ class _ScriptedPolicy:
     def select_action(self, observation: Any) -> Any:
         if self._index >= len(self._actions):
             raise RuntimeError(
-                f"Scripted seat {self._seat_index} ran out of actions after {self._index} moves."
+                f"Scripted seat {self._seat_index} ran out of actions "
+                f"after {self._index} moves."
             )
         action = self._actions[self._index]
         self._index += 1
@@ -49,7 +50,18 @@ def _parse_scripted_tictactoe(spec: str) -> list[Any]:
     return actions
 
 
-def _build_seat(spec: str, seat: int, game: str, label: str) -> tuple[PlayerRecord, Any]:
+def _build_seat(
+    spec: str,
+    seat: int,
+    game: str,
+    label: str,
+    ollama_host: str,
+    ollama_temperature: float,
+    ollama_seed: int,
+    ollama_max_retries: int,
+    ollama_use_format: bool,
+    retry_sink: dict[int, list[tuple[int, str]]],
+) -> tuple[PlayerRecord, Any]:
     player = PlayerRecord(player_id=f"player-{seat}", seat=seat, label=label)
     if spec == "human":
         return player, None
@@ -60,7 +72,64 @@ def _build_seat(spec: str, seat: int, game: str, label: str) -> tuple[PlayerReco
         else:
             actions = _parse_scripted_tictactoe(raw)
         return player, _ScriptedPolicy(actions, seat_index=seat)
-    raise ValueError(f"Unknown seat spec {spec!r}. Use 'human' or 'scripted:<actions>'.")
+    if spec.startswith("ollama:"):
+        model_name = spec[len("ollama:"):]
+        return player, _build_ollama_agent(
+            model_name=model_name,
+            game=game,
+            seat=seat,
+            host=ollama_host,
+            temperature=ollama_temperature,
+            seed=ollama_seed,
+            max_retries=ollama_max_retries,
+            use_format_spec=ollama_use_format,
+            retry_sink=retry_sink,
+        )
+    raise ValueError(
+        f"Unknown seat spec {spec!r}. "
+        "Use 'human', 'scripted:<actions>', or 'ollama:<model>'."
+    )
+
+
+def _build_ollama_agent(
+    *,
+    model_name: str,
+    game: str,
+    seat: int,
+    host: str,
+    temperature: float,
+    seed: int,
+    max_retries: int,
+    use_format_spec: bool,
+    retry_sink: dict[int, list[tuple[int, str]]],
+) -> Any:
+    from arena.agents.ollama import OllamaAgent, OllamaClient
+    from arena.agents.ollama.connect4 import Connect4PromptBuilder
+    from arena.agents.ollama.tictactoe import TicTacToePromptBuilder
+
+    client = OllamaClient(host=host)
+    builder: Any
+    if game == "connect4":
+        builder = Connect4PromptBuilder()
+    else:
+        builder = TicTacToePromptBuilder()
+
+    seat_entries: list[tuple[int, str]] = []
+    retry_sink[seat] = seat_entries
+
+    def _callback(attempt: int, reason: str) -> None:
+        seat_entries.append((attempt, reason))
+
+    return OllamaAgent(
+        client=client,
+        model=model_name,
+        prompt_builder=builder,
+        max_retries=max_retries,
+        seed=seed,
+        temperature=temperature,
+        retry_callback=_callback,
+        use_format_spec=use_format_spec,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -72,6 +141,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rows", type=int, default=6)
     parser.add_argument("--cols", type=int, default=7)
     parser.add_argument("--connect-length", type=int, default=4, dest="connect_length")
+    parser.add_argument("--ollama-host", default="http://localhost:11434", dest="ollama_host")
+    parser.add_argument(
+        "--ollama-temperature", type=float, default=0.0, dest="ollama_temperature"
+    )
+    parser.add_argument("--ollama-seed", type=int, default=0, dest="ollama_seed")
+    parser.add_argument(
+        "--ollama-max-retries", type=int, default=3, dest="ollama_max_retries"
+    )
+    parser.add_argument(
+        "--ollama-no-format",
+        action="store_true",
+        dest="ollama_no_format",
+        help="Disable structured-output format spec (use for older Ollama versions).",
+    )
     args = parser.parse_args(argv)
 
     if args.game == "connect4":
@@ -89,11 +172,43 @@ def main(argv: list[str] | None = None) -> int:
         config = TicTacToeConfig()
         parser_fn = _ttt_renderer.parse_input
 
-    label0 = "Human" if args.seat_0 == "human" else "Scripted"
-    label1 = "Human" if args.seat_1 == "human" else "Scripted"
+    def _seat_label(spec: str) -> str:
+        if spec == "human":
+            return "Human"
+        if spec.startswith("ollama:"):
+            return f"Ollama({spec[len('ollama:'):]})"
+        return "Scripted"
 
-    player0, raw_policy0 = _build_seat(args.seat_0, 0, args.game, label0)
-    player1, raw_policy1 = _build_seat(args.seat_1, 1, args.game, label1)
+    retry_sink: dict[int, list[tuple[int, str]]] = {}
+
+    player0, raw_policy0 = _build_seat(
+        args.seat_0, 0, args.game, _seat_label(args.seat_0),
+        args.ollama_host, args.ollama_temperature, args.ollama_seed,
+        args.ollama_max_retries, not args.ollama_no_format, retry_sink,
+    )
+    player1, raw_policy1 = _build_seat(
+        args.seat_1, 1, args.game, _seat_label(args.seat_1),
+        args.ollama_host, args.ollama_temperature, args.ollama_seed,
+        args.ollama_max_retries, not args.ollama_no_format, retry_sink,
+    )
+
+    ollama_models = [
+        spec[len("ollama:"):]
+        for spec in (args.seat_0, args.seat_1)
+        if spec.startswith("ollama:")
+    ]
+    if ollama_models:
+        from arena.agents.ollama import OllamaUnavailableError, probe_models
+        from arena.agents.ollama.exceptions import OllamaModelMissingError
+
+        try:
+            probe_models(args.ollama_host, ollama_models)
+        except OllamaUnavailableError as exc:
+            sys.stderr.write(f"Error: {exc}\n")
+            return 2
+        except OllamaModelMissingError as exc:
+            sys.stderr.write(f"Error: {exc}\n")
+            return 2
 
     from arena.adapters.in_process import TypedPayloadPolicyAdapter
 
@@ -111,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         (player0, player1),
         policies,
         out_dir=args.out_dir,
+        retry_sink=retry_sink if retry_sink else None,
     )
 
 

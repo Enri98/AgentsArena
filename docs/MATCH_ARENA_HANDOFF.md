@@ -143,3 +143,19 @@ Key notes for Phase 26:
 - The user will need an Anthropic API key; the Max plan does not cover programmatic API access — the key must be set via `ANTHROPIC_API_KEY` environment variable.
 - Extend `--seat-0`/`--seat-1` in `arena.cli.play.__main__` to accept `llm` (or `claude`) alongside `human` and `scripted:...`.
 - Keep the same abort semantics; if the SDK raises an exception, it surfaces as `AbortReason.ADAPTER_ERROR` through the existing handler in `step_session`.
+
+## Phase 26 Status
+
+Implemented and verified (Phase 26 — Local Ollama LLM agent):
+- `arena.agents.ollama`: stdlib HTTP client (`OllamaClient`), generic `OllamaAgent` with retry-with-feedback loop, `Connect4PromptBuilder`, `TicTacToePromptBuilder`, typed exceptions (`OllamaIllegalActionError`, `OllamaUnavailableError`, `OllamaModelMissingError`), and `probe_models` startup check
+- `arena.runtime.models.PolicyRetried`: new additive frozen-dataclass event; included in the `RuntimeEvent` hierarchy and serialized with `event_scope="runtime"` in transcripts; no `schema_version` bump
+- `arena.runtime.session.record_runtime_event`: small public helper to append a runtime event to a session immutably; exported from `arena.runtime`
+- `arena.cli.play.play_match`: extended with optional `retry_sink` parameter; after each `complete_turn`, the driver drains seat-keyed lists of `(attempt, reason)` tuples written by agent callbacks and records them as `PolicyRetried` events — keeping `arena.agents` ignorant of runtime internals
+- `arena.cli.play.__main__`: `ollama:<model>` seat spec parsing; `--ollama-host`, `--ollama-temperature`, `--ollama-seed`, `--ollama-max-retries` flags; `probe_models` startup check with `sys.exit(2)` on failure
+- `examples/run_ollama_vs_ollama.py`: importable `run()` driving `llama3.2:latest` vs `qwen2.5:1.5b` on 4x4 Connect 4
+- Architecture boundary test: `tests/unit/architecture/test_agents_boundaries.py` enforces neither upper layers import `arena.agents` nor `arena.agents` imports `arena.match`, `arena.adapters`, `arena.runtime`, or `arena.ui`
+
+## Phase 27 Recommendation
+
+Phase 27: Anthropic-SDK-backed agent reusing the `PromptBuilder` interface. Build `AnthropicAgent` in `arena.agents.anthropic` implementing `InProcessAgent` and accepting any `PromptBuilder` from Slice 2 — the same Connect4PromptBuilder and TicTacToePromptBuilder should work without modification. The user will need `ANTHROPIC_API_KEY`; the Max plan does not cover programmatic API access.
+

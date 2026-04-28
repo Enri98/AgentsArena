@@ -5,3 +5,4 @@ __pycache__/
 # AGENTS.md
 # IMPLEMENTATION_PLAN.md
 .gitnexus
+out/

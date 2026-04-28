@@ -158,6 +158,15 @@ class MatchAborted(RuntimeEvent):
     abort: AbortMetadata
 
 
+@dataclass(frozen=True)
+class PolicyRetried(RuntimeEvent):
+    """A policy produced an illegal action and the agent will retry."""
+
+    seat: Seat
+    attempt: int
+    reason_summary: str
+
+
 __all__ = [
     "AbortMetadata",
     "AbortReason",
@@ -166,6 +175,7 @@ __all__ = [
     "MatchFinished",
     "MatchStarted",
     "PlayerRecord",
+    "PolicyRetried",
     "RuntimeEvent",
     "RuntimeLifecycle",
     "TurnAccepted",

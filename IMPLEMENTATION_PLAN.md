@@ -2711,3 +2711,105 @@ Acceptance criteria:
 - architecture tests still pass and still forbid upward imports from `arena.cli`
 - README and handoff docs reflect the live-play entrypoint and the Phase 26 direction
 - ruff and pytest pass
+
+### Phase 26 - Local LLM agent (Ollama)
+
+Objective:
+- add a local LLM-backed agent so two Ollama models can play a deterministic perfect-information match against each other (or against a human or scripted seat) through the existing typed in-process adapter, without introducing remote API keys, networking transport, persistence, subprocess orchestration, deadlines, auth, or matchmaking
+
+Scope:
+- new `arena.agents.ollama` package containing a stdlib HTTP client, an `OllamaAgent` implementing the typed agent contract, per-game prompt builders/parsers, and typed exceptions
+- new additive runtime event `PolicyRetried` so retry-with-feedback iterations show up in transcripts without leaking agent internals into runtime models
+- CLI extension: a third seat type `ollama:<model>` plus `--ollama-host`, `--ollama-temperature`, `--ollama-seed`, `--ollama-max-retries` flags
+- model availability probe at CLI startup so missing models fail fast with a clear message
+- runnable example using `llama3.2:latest` vs `qwen2.5:1.5b` on a small Connect 4 board
+- README section, handoff doc, and architecture test for the new package
+
+Out of scope:
+- Anthropic / OpenAI / any remote-API agent (deferred to Phase 27)
+- async or streaming responses
+- subprocess orchestration of the model server
+- timeouts beyond a single per-request HTTP timeout
+- persistence beyond writing the final transcript JSON files
+- new transport layer (HTTP to Ollama is local stdlib `urllib`, in-process from the runtime's perspective)
+- model fine-tuning, tournament infrastructure, or evaluation harnesses
+
+Design decisions (locked before slicing):
+- the agent is a typed `InProcessAgent` wrapped by the existing `TypedPayloadPolicyAdapter`; no new adapter contract, no parallel runner
+- HTTP is stdlib `urllib.request` only; no `httpx`, no `requests`, no `aiohttp`; no new third-party dependencies
+- prompts always include both the ASCII rendered board (via existing `arena.cli.games.<game>.render_board`) and the structured JSON snapshot, plus the legal-actions list
+- response parsing uses Ollama's `format` JSON-schema constraint to force structured output; the parsed dict is rehydrated via the game serializer's `load_action` path where possible
+- on illegal action, the agent retries up to 3 times by default with the rejection reason and the legal-actions list re-injected; after exhaustion it raises `OllamaIllegalActionError`, which becomes a runtime abort with `AbortReason.ADAPTER_ERROR` and an informative cause message
+- retry attempts emit a new additive `PolicyRetried` runtime event via a callback the agent receives at construction so `arena.agents` does not import runtime internals
+- determinism by default: `temperature=0` and a fixed `seed` (default `0`) so transcript replay reproduces the same chosen actions; both are CLI-overridable
+- model availability is probed once via `/api/tags` at CLI startup before the session is created; missing models exit non-zero with a clear message naming what to pull
+- architecture rule extended: `arena.core`, `arena.games`, `arena.match`, `arena.adapters`, `arena.runtime`, `arena.ui`, and `arena.cli` do not import `arena.agents`; `arena.agents` may import `arena.core`, game-specific serializers, and the existing public `arena.cli.games.<game>.render_board` helpers
+
+Acceptance criteria:
+- the documented CLI command runs an end-to-end match against a real local Ollama daemon when both models are pulled
+- with the daemon unreachable or a model missing, the entrypoint fails fast with a clear non-zero exit and a message naming the missing model or host
+- agent retry attempts on illegal model output are visible as `PolicyRetried` runtime events in the dumped transcript
+- after the configured retry budget is exhausted, the session aborts with `ADAPTER_ERROR` and the abort metadata cause message includes the model id and the last invalid action
+- `examples/run_ollama_vs_ollama.py` runs the full flow and writes status/transcript JSON
+- architecture tests prevent any non-`arena.agents` package from importing `arena.agents`
+- ruff and pytest pass
+
+#### Slice 1 - Ollama HTTP client + `OllamaAgent` shell + retry loop
+
+Objective:
+- add the package skeleton, a stdlib HTTP client, and the generic typed agent with retry-with-feedback logic; no game-specific code yet
+
+Scope:
+- `src/arena/agents/__init__.py` (empty `__all__`)
+- `src/arena/agents/ollama/__init__.py` exposing `OllamaAgent`, `OllamaIllegalActionError`, `OllamaUnavailableError`, `OllamaModelMissingError`, `probe_models`
+- `src/arena/agents/ollama/client.py` with `OllamaClient` wrapping `POST /api/chat` and `GET /api/tags` via `urllib.request`, with configurable timeout and host
+- `src/arena/agents/ollama/agent.py` with `OllamaAgent` implementing the typed agent contract, holding `(client, model, prompt_builder, max_retries, seed, temperature, retry_callback)`
+- a `PromptBuilder` Protocol describing the interface Slice 2 must implement
+- `src/arena/agents/ollama/exceptions.py` with the three typed exceptions
+- new tests under `tests/unit/agents/ollama/` using a stub transport (no real HTTP) covering: legal response, illegal-then-legal recovery emitting a retry callback, exhausted retries raising `OllamaIllegalActionError`, daemon unreachable, model missing
+- new `tests/unit/architecture/test_agents_boundaries.py` enforcing the dependency direction
+
+Acceptance criteria:
+- the package imports cleanly and exposes the documented surface
+- agent loop works against a stub `PromptBuilder` and stub `OllamaClient` injected at construction
+- retry callback fires once per retry, never on the first attempt or the final success
+- architecture test passes
+- ruff + pytest pass
+
+#### Slice 2 - Per-game prompt builders and parsers
+
+Objective:
+- implement `Connect4PromptBuilder` and `TicTacToePromptBuilder` so the generic `OllamaAgent` from Slice 1 can play both built-in games
+
+Scope:
+- `src/arena/agents/ollama/connect4.py` with deterministic system + user prompt templates and a JSON-schema response spec
+- `src/arena/agents/ollama/tictactoe.py` same shape, using the existing public `numpad_action` helper for action rehydration
+- prompts include: short rules block, the rendered ASCII board, the structured JSON snapshot, the legal-actions list, and a labeled retry-feedback section when present
+- parsers reject malformed responses by returning `None` so the agent retries; never by raising
+- new tests with golden prompt strings and parser behavior coverage on legal / illegal / malformed responses
+
+Acceptance criteria:
+- prompt rendering is deterministic byte-for-byte
+- parsers handle malformed responses by returning `None`, not by raising
+- a stubbed transport emitting canned legal moves can complete a full Connect 4 game in tests
+- ruff + pytest pass
+
+#### Slice 3 - Runtime event, CLI wiring, example, and docs
+
+Objective:
+- expose retries in the transcript, wire the new seat type into the CLI, ship a runnable example, and document the flow
+
+Scope:
+- new `PolicyRetried` runtime event in `src/arena/runtime/models.py` with fields `match_id`, `seat`, `attempt`, `reason_summary`; additive change consistent with the existing `USER_QUIT` precedent; included in the runtime event union and reflected in transcript payload schemas without bumping `schema_version`
+- a small public helper in `arena.runtime` so the agent's callback does not reach into runtime internals
+- CLI extension in `src/arena/cli/play/__main__.py`: parse `ollama:<model>` seat specs, plus `--ollama-host`, `--ollama-temperature`, `--ollama-seed`, `--ollama-max-retries` flags with the locked defaults; construct `OllamaAgent` wrapped in `TypedPayloadPolicyAdapter`
+- startup probe: when at least one Ollama seat is configured, call `probe_models(host)` and fail fast on missing daemon or models
+- `examples/run_ollama_vs_ollama.py` runs `llama3.2:latest` vs `qwen2.5:1.5b` on Connect 4 (rows=4, cols=4, connect_length=4), dumps payloads, prints final frame; importable `run()` function with smoke test that uses a stubbed client
+- README: "Watch two LLMs play" section showing the CLI command, model-pull prerequisites, and the `PolicyRetried` runtime event note
+- `docs/MATCH_ARENA_HANDOFF.md` and `docs/NEXT_SESSION_PROMPT.md` updated for Phase 26 completion and Phase 27 (Anthropic-SDK-backed agent reusing `PromptBuilder`) as the next step
+
+Acceptance criteria:
+- a stubbed end-to-end test (no real Ollama) drives `play_match` with two `OllamaAgent`s, completes a small Connect 4 match, and dumps a transcript whose runtime events include at least one `PolicyRetried` from a forced retry path
+- a stubbed daemon-unreachable test on the CLI returns non-zero with a clear message
+- all existing tests still pass
+- ruff + pytest pass

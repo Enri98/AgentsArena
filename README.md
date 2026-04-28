@@ -282,3 +282,25 @@ session through the runtime abort path with a stable reason code (`user_quit` or
 `user_interrupt`) and a non-zero exit code. The abort block is printed in red and both
 `status.json` and `transcript.json` are written to `--out-dir` (default `./out`) regardless
 of whether the session finished or was aborted.
+
+## Watch two LLMs play
+
+Pull models and run a Connect 4 match between two local Ollama models:
+
+```bash
+ollama pull llama3.2
+ollama pull qwen2.5:1.5b
+./.venv/Scripts/python.exe -m arena.cli.play --game connect4 \
+    --seat-0 ollama:llama3.2:latest --seat-1 ollama:qwen2.5:1.5b \
+    --rows 4 --cols 4 --connect-length 4
+```
+
+Use `--ollama-host` to point at a non-default daemon, `--ollama-temperature` and
+`--ollama-seed` to control determinism, and `--ollama-max-retries` to set the retry
+budget when the model produces an illegal move.
+
+If a model returns an illegal action, the agent retries with the rejection reason
+re-injected into the prompt. Each retry attempt appears in `transcript.json` as a
+`PolicyRetried` runtime event with `event_scope="runtime"`, the seat index, the
+attempt number, and a short reason summary. After the configured retry budget is
+exhausted the session aborts with `ADAPTER_ERROR`.

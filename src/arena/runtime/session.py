@@ -313,7 +313,17 @@ def _abort_session(
     )
 
 
+def record_runtime_event(
+    session: MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    event: RuntimeEvent,
+) -> MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT]:
+    """Append a runtime event to a session without changing lifecycle."""
+
+    return replace(session, events=session.events + (event,))
+
+
 __all__: Sequence[str] = [
     "Arena",
     "MatchSession",
+    "record_runtime_event",
 ]

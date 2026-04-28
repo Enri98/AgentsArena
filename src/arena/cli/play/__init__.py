@@ -15,10 +15,12 @@ from arena.runtime import (
     AbortReason,
     Arena,
     PlayerRecord,
+    PolicyRetried,
     RuntimeLifecycle,
     RuntimeStateError,
     dump_runtime_transcript,
     dump_session_status,
+    record_runtime_event,
 )
 from arena.ui import build_match_screen
 
@@ -33,10 +35,15 @@ def play_match(
     stdin: Any = None,
     stdout: Any = None,
     arena: Arena | None = None,
+    retry_sink: dict[int, list[tuple[int, str]]] | None = None,
 ) -> int:
     """Run one interactive or scripted match and write JSON artefacts.
 
     Returns 0 on terminal completion, 1 on abort.
+
+    retry_sink maps seat -> list of (attempt, reason) tuples appended by agent
+    callbacks. After each complete_turn the driver drains the sink and records
+    PolicyRetried runtime events into the session.
     """
     if stdin is None:
         stdin = sys.stdin
@@ -64,6 +71,9 @@ def play_match(
             session = arena.abort_session(requested_session, reason=abort_reason, message=msg)
             break
 
+        if retry_sink is not None:
+            session = _drain_retry_sink(session, retry_sink)
+
     _render(session, stdout)
 
     status_payload = dump_session_status(session)
@@ -77,6 +87,23 @@ def play_match(
     )
 
     return 0 if session.lifecycle is RuntimeLifecycle.FINISHED else 1
+
+
+def _drain_retry_sink(
+    session: Any,
+    retry_sink: dict[int, list[tuple[int, str]]],
+) -> Any:
+    for seat, entries in retry_sink.items():
+        for attempt, reason in entries:
+            event = PolicyRetried(
+                match_id=session.match_id,
+                seat=seat,
+                attempt=attempt,
+                reason_summary=reason,
+            )
+            session = record_runtime_event(session, event)
+        entries.clear()
+    return session
 
 
 def _render(session: Any, stdout: Any) -> None:

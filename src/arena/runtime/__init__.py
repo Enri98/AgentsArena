@@ -21,6 +21,7 @@ from arena.runtime.models import (
     MatchFinished,
     MatchStarted,
     PlayerRecord,
+    PolicyRetried,
     RuntimeEvent,
     RuntimeLifecycle,
     TurnAccepted,
@@ -40,7 +41,7 @@ from arena.runtime.payloads import (
     validate_runtime_transcript,
     validate_session_status,
 )
-from arena.runtime.session import Arena, MatchSession
+from arena.runtime.session import Arena, MatchSession, record_runtime_event
 
 __all__ = [
     "AbortMetadata",
@@ -56,6 +57,7 @@ __all__ = [
     "MatchSession",
     "MatchStarted",
     "PlayerRecord",
+    "PolicyRetried",
     "RUNTIME_STATUS_SCHEMA_VERSION",
     "RUNTIME_TRANSCRIPT_SCHEMA_VERSION",
     "RuntimeAbortPayload",
@@ -76,6 +78,7 @@ __all__ = [
     "format_runtime_transcript",
     "format_session_status",
     "generate_match_id",
+    "record_runtime_event",
     "validate_session_status",
     "validate_runtime_transcript",
 ]
