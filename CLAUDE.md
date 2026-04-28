@@ -1,3 +1,49 @@
+# AgentsArena — Project Context
+
+Python 3.11 library that will eventually power an agent-vs-agent arena. Current scope is a pure simulation + local runtime stack for sequential, deterministic, perfect-information games. No networking, persistence, subprocesses, timeouts, auth, matchmaking, remote agents, or UI rendering yet.
+
+> Source of truth for plan + status: `IMPLEMENTATION_PLAN.md`. Working rules + style: `AGENTS.md`. Boundary contract for adapters: `docs/ADAPTER_BOUNDARIES.md`. Cross-session handoff: `docs/MATCH_ARENA_HANDOFF.md`.
+
+> **Activate `.venv` before running any script.** Verify with `.\.venv\Scripts\ruff.exe check .` and `.\.venv\Scripts\pytest.exe -q`.
+
+## Layered architecture (strict, downward-only deps)
+
+| Layer | Package | Responsibility |
+|-------|---------|---------------|
+| Simulation core | `arena.core` | Types, seats, exceptions, events, actions, observations, results, config, `GameDefinition`, `RulesEngine`, `Serializer`, `Registry`. Pure, immutable, no I/O. |
+| Games | `arena.games.connect4`, `arena.games.tictactoe` | Concrete game vertical slices (config, state, action, observation, events, rules, serializer, definition). Both registered via `build_default_registry()`. |
+| Local match | `arena.match` | `LocalMatch`, `TurnRecord`, `start_match` / `apply_match_action`, transcript dump/load/validate, in-process `Policy` protocol, `run_local_match`. Per-match isolated rules engine copy. |
+| Adapters | `arena.adapters.in_process` | Serialized payload contract: `ObservationRequestPayload`, `ActionResponsePayload`, domain-error payloads, `apply_payload_policy_turn`, `TypedPayloadPolicyAdapter` + `InProcessAgent` for typed local agents. |
+| Runtime | `arena.runtime` | Pure in-memory `Arena` coordinator, `MatchSession`, opaque `MatchId`, `PlayerRecord`, lifecycle (`created`/`running`/`finished`/`aborted`), runtime events, abort metadata, runtime exceptions, JSON-safe `dump_session_status` / `dump_runtime_transcript` (both pinned `schema_version=1`), `format_runtime_session_report`. |
+| UI adapter | `arena.ui` | Pure adapter over runtime payloads. `build_match_status`, `build_match_transcript`, `build_match_screen`. Reshapes envelopes into screen-level payloads, exposes `state_payload` from snapshots without recomputing rules. |
+
+Dependency direction is enforced by architecture tests: `core`/`games` import none of the upper layers; `match` cannot import adapters/runtime/ui; adapters cannot import runtime/ui; runtime cannot import ui.
+
+## Implementation status
+
+Completed phases (per `IMPLEMENTATION_PLAN.md`): 0–10 simulation baseline, 11 local match, 12 transcripts, 13 in-process policy protocol, 14 checkpoint, 15 Tic-Tac-Toe, 16 README examples, 17 adapter boundary doc, 18 serialized in-process adapter, 19 typed payload adapter, 20 runtime baseline (Slices 1–4), 21 runtime/UI contract stabilization (Slice 1), 22 human-readable formatting helpers, 23 UI adapter boundary.
+
+Most recent commits track Phase 23 (`arena.ui` adapter) and Phase 22 (formatting helpers) on top of the runtime payload contract. The plan's "post-baseline roadmap" continues with future UI/transport/persistence phases — none implemented.
+
+## Core design rules (do not violate)
+
+- Frozen dataclasses for in-memory domain state/actions; Pydantic v2 for config + boundary payloads + JSON Schema.
+- Integer seat ids inside the simulation core. Player names/labels live in runtime/UI layers.
+- Store only minimum authoritative state; derive legality, terminal, winners on demand.
+- `apply_action(...)` revalidates legality defensively; raises typed domain exceptions (`WrongPlayer`, `IllegalAction`, `GameFinished`, `InvalidConfig`, ...).
+- Serialize only at boundaries via dedicated `Serializer`; every accepted move yields a full post-move snapshot, and snapshots must rehydrate.
+- Runtime aborts wrap non-result failures while preserving the original `ArenaCoreError` as cause.
+- Runtime payload `schema_version` is fixed at `1`; any incompatible change must bump it explicitly.
+- Architecture/import-boundary tests are load-bearing — do not introduce upward imports.
+
+## Working workflow
+
+1. Re-read the relevant section of `IMPLEMENTATION_PLAN.md` and only expand the current slice.
+2. Implement the smallest coherent change; add/update focused unit tests near the code.
+3. Run ruff + pytest from the venv.
+4. Update the plan's slice status + handoff docs when a slice completes.
+5. Do not skip ahead, do not refactor unrelated modules, do not introduce deferred infrastructure (transport, persistence, subprocesses, deadlines, auth, matchmaking, UI rendering, remote agents).
+
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 

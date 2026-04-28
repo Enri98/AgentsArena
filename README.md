@@ -236,3 +236,32 @@ The public path stays intentionally small:
 - `run_local_match(...)` drives in-process observation-based policies to terminal state
 - `arena.runtime` adds pure in-memory session lifecycle, player metadata, match ids, status payloads, and wrapped runtime transcripts
 - `format_runtime_session_report(...)` renders deterministic demo text from status/transcript payloads without becoming authoritative state
+
+## Terminal replay viewer
+
+`arena.cli` is a pure consumer of the runtime/UI payload contracts. It reads saved JSON files
+produced by `dump_session_status(...)` and `dump_runtime_transcript(...)` and renders
+ANSI-colored terminal output without importing game internals or simulation rules.
+
+Run the end-to-end example to produce both payload files and print the final rendered frame:
+
+```bash
+python examples/run_and_render_match.py --out-dir ./out
+```
+
+Re-render the saved payloads at any time:
+
+```bash
+python -m arena.cli --status ./out/status.json --transcript ./out/transcript.json
+```
+
+Step through individual turn frames or render all frames at once:
+
+```bash
+python -m arena.cli --status ./out/status.json --transcript ./out/transcript.json --turn 0
+python -m arena.cli --status ./out/status.json --transcript ./out/transcript.json --all-frames
+```
+
+The renderer is a pure function of the payloads: the same status and transcript files always
+produce identical output. Board art for Connect 4 and Tic-Tac-Toe is dispatched via a small
+`game_id`-keyed registry inside `arena.cli`; unknown game ids fall back to a board-free layout.

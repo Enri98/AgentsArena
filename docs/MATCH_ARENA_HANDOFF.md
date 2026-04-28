@@ -104,3 +104,26 @@ The adapter preserves `latest_snapshot` as the authoritative state envelope and
 also exposes `state_payload` as the snapshot's opaque state mapping for board
 rendering. It does not recompute game rules or introduce a game-neutral board
 model.
+
+## Phase 24 Status
+
+Phase 24 is complete. Delivered:
+
+- `arena.cli` package with a strict import-direction boundary enforced by architecture tests.
+- `arena.cli.rendering` — generic ANSI-colored screen renderer consuming `UIMatchScreenPayload` dicts.
+- `arena.cli.games.connect4` and `arena.cli.games.tictactoe` — per-game board renderers reading `state_payload`.
+- `arena.cli.app` — file-based loader (`render_session_from_files`, `render_all_frames`) that reads status and transcript JSON, validates through `arena.ui`, and renders one or all frames. Frame stepping keeps status at latest state while shifting board and turn-history cursor to the requested turn.
+- `arena.cli.__main__` — `python -m arena.cli` entrypoint with `--status`, `--transcript`, `--turn`, and `--all-frames` flags.
+- `examples/run_and_render_match.py` — end-to-end script that runs a scripted 4x4 Connect 4 session, dumps both payload files, and prints the final rendered frame.
+- Architecture tests confirm no lower layer (`arena.core`, `arena.games`, `arena.match`, `arena.adapters`, `arena.runtime`, `arena.ui`) imports `arena.cli`.
+- README section "Terminal replay viewer" documents the example and entrypoint commands.
+
+## Phase 25 Recommendation
+
+The next slice should introduce live human play via a `HumanPolicy` before adding any transport adapter.
+
+Key notes for Phase 25:
+- `HumanPolicy` needs an input loop that reads from stdin (or a callback).
+- It breaks the determinism constraint for the seat that is human-controlled; golden tests must target only the scripted seat.
+- The input loop should be injected as a dependency so tests can provide a scripted input sequence without touching stdin.
+- No networking, remote agents, or transport adapters should be added in Phase 25; the goal is interactive in-process play only.

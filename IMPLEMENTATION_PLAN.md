@@ -2496,3 +2496,129 @@ Implementation note:
 - preserved runtime snapshots as authoritative while exposing only an opaque `state_payload` convenience mapping derived from each snapshot state for future board rendering
 - kept runtime events top-level and game-domain events inside turn history, sorted players by seat for deterministic output, and added architecture tests enforcing the UI adapter depends only on `arena.runtime` within the arena package
 - added focused tests for running, created, finished, and aborted status payloads; transcript event separation and turn ordering; combined screen mismatch rejection; schema-version constants; JSON round-tripping; and unknown runtime payload fields
+
+### Phase 24 - First concrete UI surface (terminal replay viewer)
+
+Objective:
+- prove that `arena.ui.build_match_screen(...)` is sufficient to render a real match screen by adding a pure terminal renderer that consumes the runtime/UI payload contract end-to-end without introducing transport, persistence beyond a single JSON file, subprocesses, deadlines, auth, matchmaking, live human play, or remote agents
+
+Scope:
+- new `arena.cli` package containing pure rendering helpers and a small frame-stepping entrypoint
+- per-game board renderers in `arena.cli.games.connect4` and `arena.cli.games.tictactoe` that read the opaque `state_payload` from `arena.ui`
+- a small `examples/` script that runs a scripted match, dumps `dump_session_status(...)` and `dump_runtime_transcript(...)` to disk, and re-renders the saved payloads
+- focused unit tests for renderer determinism plus an architecture test that pins import direction
+- README and handoff updates
+
+Out of scope:
+- web servers, HTTP/WebSocket transport, or any networking
+- persistence beyond reading and writing one JSON file in `examples/`
+- subprocess or remote agents
+- deadlines, timeouts, auth, matchmaking, tournaments
+- live human play (covered in Phase 25)
+- TUI frameworks beyond plain stdout
+- a game-neutral board view inside `arena.runtime` or `arena.ui`
+
+Design decisions (locked before slicing):
+- the renderer reads only `arena.ui` screen payloads; it does not access `LocalMatch`, rules engines, or game internals beyond `state_payload`
+- session status reflects the latest state only; the transcript provides historical turn data, and the renderer never reconstructs intermediate status payloads at older turns
+- renderer output uses ANSI color escape sequences for board cells and headers, with deterministic sequences so golden tests remain stable
+- match-running helpers that produce sample transcripts live in `examples/`, not inside `arena.cli`
+- after Phase 24, Phase 25 will introduce live human play (`HumanPolicy`) before any transport adapter
+
+Acceptance criteria:
+- a scripted Connect 4 and a scripted Tic-Tac-Toe match can be run, dumped to JSON, and re-rendered as deterministic readable terminal output
+- the renderer is a pure function of the payloads
+- architecture tests prevent any upper layer from depending on `arena.cli`
+- no transport, persistence layer beyond `json.dump`/`json.load`, no subprocesses, no human input loop
+
+#### Slice 1 - `arena.cli` package boundary and architecture test
+
+Objective:
+- create the `arena.cli` package as the first surface that may consume `arena.ui`, and lock the dependency direction with an architecture test
+
+Scope:
+- `src/arena/cli/__init__.py` with no runtime symbols beyond an explicit empty `__all__`
+- `src/arena/cli/games/__init__.py` placeholder
+- new architecture test asserting that `arena.core`, `arena.games`, `arena.match`, `arena.adapters`, `arena.runtime`, and `arena.ui` do not import `arena.cli`
+- update existing import-boundary tests if needed so they keep passing alongside the new package
+
+Acceptance criteria:
+- the package imports cleanly under the existing test runner
+- `arena.cli` may import `arena.ui` and `arena.runtime` (and `arena.games.*` only when needed for game ids), but every layer below is forbidden from importing `arena.cli`
+- ruff and pytest both pass
+
+#### Slice 2 - Generic screen renderer
+
+Objective:
+- add a pure renderer that converts a screen payload from `arena.ui.build_match_screen(...)` into deterministic ANSI-colored terminal text covering the static screen chrome (without per-game board art)
+
+Scope:
+- `src/arena/cli/rendering.py` exposing `render_match_screen(screen_payload: Mapping[str, Any]) -> str`
+- header rendering: match id, game id, lifecycle, current seat, turn count
+- player roster rendering sorted by seat (label + seat + active indicator)
+- result and abort rendering for finished and aborted screens
+- runtime events list rendering (top-level), distinct from per-turn game events
+- turn-by-turn summary section rendering seats and actions only (no board yet)
+- ANSI color usage encapsulated in small constants, reset codes always emitted, no third-party color library
+- focused tests for running, finished, and aborted screen payloads asserting the rendered string matches a stable golden output (color escapes included)
+
+Acceptance criteria:
+- output is deterministic byte-for-byte for the same payload
+- the renderer does not import `arena.match`, `arena.adapters`, `arena.core`, or any game package
+- ruff and pytest pass
+
+#### Slice 3 - Per-game board renderers
+
+Objective:
+- add Connect 4 and Tic-Tac-Toe board renderers that read the opaque `state_payload` from screen payloads, plus a dispatch in the generic renderer keyed on `game_id`
+
+Scope:
+- `src/arena/cli/games/connect4.py` exposing `render_board(state_payload: Mapping[str, Any]) -> str`
+- `src/arena/cli/games/tictactoe.py` exposing `render_board(state_payload: Mapping[str, Any]) -> str`
+- registry mapping `{ "connect4": ..., "tictactoe": ... }` resolved inside `rendering.py` via a small dispatch helper
+- the generic renderer inserts the rendered board immediately after the header for running and finished screens, omits it for created/aborted screens where no snapshot is available
+- ANSI colors per disc/mark; consistent monospace grid; column headers for Connect 4
+- golden tests for representative empty, mid-game, and terminal boards for both games
+- a fallback path so unknown game ids render without a board instead of failing
+
+Acceptance criteria:
+- both board renderers are pure and depend only on the payload mapping
+- output is deterministic byte-for-byte
+- dispatch never imports the game package's typed modules beyond what is required for game-id constants
+- ruff and pytest pass
+
+#### Slice 4 - Transcript file loader and frame entrypoint
+
+Objective:
+- add a small loader that reads a status JSON file plus a transcript JSON file, validates them through `arena.ui`, and renders one or all frames; expose a tiny `python -m arena.cli` entrypoint for ad-hoc viewing
+
+Scope:
+- `src/arena/cli/app.py` with a `render_session_from_files(status_path, transcript_path, *, turn: int | None = None) -> str` helper
+- `src/arena/cli/__main__.py` that parses `--status`, `--transcript`, and optional `--turn` and prints the rendered output
+- "all frames" mode iterates each turn in transcript order and prints headers separating turn N output
+- frame N rendering keeps status reflecting the latest state and changes only the per-turn summary cursor; the board for an intermediate frame is rendered from that turn's `post_snapshot.state`
+- focused tests for the helper covering frame 0, mid-game frame, terminal frame, and the all-frames mode
+- the entrypoint is covered indirectly by helper tests; module-level argparse wiring stays minimal
+
+Acceptance criteria:
+- the helper validates input through the existing `arena.ui` validators and surfaces validation errors as exceptions
+- output is deterministic
+- no new dependencies are added; only stdlib `json` and `argparse`
+- ruff and pytest pass
+
+#### Slice 5 - Examples script, README example, and handoff update
+
+Objective:
+- prove the end-to-end flow with a scripted example, document the new viewer in the README, and update the handoff for Phase 25
+
+Scope:
+- `examples/run_and_render_match.py` that builds a Connect 4 (or Tic-Tac-Toe) session with scripted policies, runs it through `Arena.run_session(...)`, dumps both payloads to JSON files, and prints the rendered final frame
+- README section showing how to run the example and how to use `python -m arena.cli`
+- `docs/MATCH_ARENA_HANDOFF.md` updated with Phase 24 status and the Phase 25 (live human play / `HumanPolicy`) recommendation
+- `docs/NEXT_SESSION_PROMPT.md` refreshed to reflect Phase 24 completion and Phase 25 next steps
+
+Acceptance criteria:
+- the example script runs end-to-end without errors and produces both JSON payload files plus rendered output
+- README shows the example and the entrypoint
+- handoff and next-session prompt mention Phase 25 explicitly
+- ruff and pytest pass
