@@ -46,6 +46,8 @@ def test_arena_cli_is_importable() -> None:
 def test_cli_allowed_imports() -> None:
     """arena.cli may import arena.ui and arena.runtime (and stdlib); verify by import."""
     import arena.cli.app  # noqa: F401  — import exercise only
+    import arena.cli.play  # noqa: F401
+    import arena.cli.policies  # noqa: F401
     import arena.cli.rendering  # noqa: F401
 
 

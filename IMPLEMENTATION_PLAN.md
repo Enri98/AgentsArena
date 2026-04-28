@@ -2622,3 +2622,92 @@ Acceptance criteria:
 - README shows the example and the entrypoint
 - handoff and next-session prompt mention Phase 25 explicitly
 - ruff and pytest pass
+
+### Phase 25 - Live human play (terminal)
+
+Objective:
+- let a human take a seat in a local runtime session and play against a scripted opponent through the terminal, exercising the runtime step loop and validating the abort path under realistic interactive conditions, without introducing networking, persistence beyond writing the final transcript, subprocesses, deadlines, auth, matchmaking, GUI, or remote agents
+
+Scope:
+- new `arena.cli.policies` module containing `HumanPolicy` plus per-game input parsers added to the existing `arena.cli.games.<game>` modules
+- new `arena.cli.play` module containing an interactive driver and a `python -m arena.cli.play` entrypoint
+- focused unit tests for input parsing, the driver loop, the abort path, and a full end-to-end Connect 4 game with fake stdin
+- README and handoff updates
+
+Out of scope:
+- networking, HTTP/WebSocket transport
+- persistence beyond writing the final transcript JSON files
+- subprocesses, remote agents, LLM-backed agents
+- deadlines, timeouts, auth, matchmaking, tournaments
+- GUI or TUI frameworks beyond plain stdout
+- simultaneous human players on different machines
+
+Design decisions (locked before slicing):
+- `HumanPolicy` lives in `arena.cli.policies`; it is a typed-observation in-process policy that delegates parsing to a per-game callable and retries on bad input
+- the CLI driver renders the screen between turns; `HumanPolicy` itself does not render
+- per-game parsers are pure functions returning the typed action or `None` to retry; they live next to the renderers in `arena.cli.games.<game>`
+- Connect 4 input is a single integer column index; Tic-Tac-Toe uses numpad-style `1-9` with `1` = top-left, `9` = bottom-right
+- `q`, `quit`, EOF, and `KeyboardInterrupt` abort the session through the runtime abort path with stable reason codes (`user_quit`, `user_interrupt`); they do not exit the process directly
+- bad input never aborts the session; the policy reprompts until the human provides a syntactically valid line that parses to a legal action
+- the driver is a single blocking function with `stdin`/`stdout` injection so tests can feed pre-baked input queues
+- inline action specs are accepted for scripted seats on the command line; no JSON action files
+- the interactive driver does not replace `examples/run_and_render_match.py`; non-interactive demos stay there
+- the existing simulation invariant holds: transcripts replay deterministically given the recorded actions, regardless of who chose them
+
+Acceptance criteria:
+- a human can play a full Connect 4 game against a scripted opponent through `python -m arena.cli.play`
+- bad and out-of-range inputs reprompt without affecting the session
+- `q` / `quit` / EOF / Ctrl-C produce a runtime abort with a clear reason and a non-zero exit code, with the abort block rendered in red
+- on terminal completion, status and transcript JSON files are written to `--out-dir` and the final frame is printed
+- transcript replay through `validate_runtime_transcript(...)` continues to succeed for a completed human-vs-scripted match
+- `arena.core`, `arena.games`, `arena.match`, `arena.adapters`, `arena.runtime`, and `arena.ui` do not import `arena.cli`
+- ruff and pytest pass
+
+#### Slice 1 - `HumanPolicy` and per-game input parsers
+
+Objective:
+- add the typed in-process human policy and pure per-game input parsers without touching the driver loop yet
+
+Scope:
+- `src/arena/cli/policies.py` exposing `HumanPolicy` and a small `HumanQuit` sentinel exception
+- new `parse_input(line, observation)` callables in `src/arena/cli/games/connect4.py` and `src/arena/cli/games/tictactoe.py`
+- focused tests using `io.StringIO` stdin and a captured stdout: legal input, illegal syntax retry, out-of-range retry, full Connect 4 column retry, illegal Tic-Tac-Toe cell retry, `q` and EOF raising `HumanQuit`, KeyboardInterrupt also raising `HumanQuit`
+
+Acceptance criteria:
+- parsers are pure functions returning the typed action or `None` to signal retry
+- `HumanPolicy` calls the parser, reprompts on `None`, raises `HumanQuit` on quit/EOF/KeyboardInterrupt
+- no rendering, no session, no runtime imports beyond what is needed for typed observation/action types
+
+#### Slice 2 - Interactive driver and `python -m arena.cli.play` entrypoint
+
+Objective:
+- add the interactive driver that creates a session, renders, steps, and exits cleanly on terminal or abort, plus a small CLI entrypoint that wires up game/seat/policy choices
+
+Scope:
+- `src/arena/cli/play.py` exposing `play_match(definition, config, players, policies, *, out_dir, stdin=sys.stdin, stdout=sys.stdout) -> int`
+- the driver renders the screen between turns, calls `Arena.step_session(...)`, catches `HumanQuit` and `KeyboardInterrupt` and routes them through the runtime abort path with reason codes `user_quit` and `user_interrupt`, and writes status/transcript JSON files on terminal or abort
+- `src/arena/cli/play/__main__.py` (or a `__main__` block in `play.py`) accepting `--game {connect4,tictactoe}`, `--seat-0`, `--seat-1` (`human` or `scripted:0,1,0,...`), `--out-dir`, plus optional Connect 4 config flags
+- inline scripted seat specs parse to a small in-process policy that emits the listed actions in order
+- focused tests driving a full Connect 4 game with a fake stdin queue against a scripted opponent, asserting deterministic final rendered output and transcript file existence; tests for the abort paths (`q` mid-game, EOF mid-game) asserting non-zero return code, abort block rendered, and aborted-lifecycle status payload on disk
+
+Acceptance criteria:
+- the driver is a single blocking function; tests run it with injected `stdin`/`stdout`
+- abort paths produce a runtime-aborted session with the correct reason code preserved in the dumped status payload
+- the entrypoint prints rendered output to stdout and writes both JSON files
+- ruff and pytest pass
+
+#### Slice 3 - Architecture test refresh, README, and handoff update
+
+Objective:
+- keep import boundaries tight, document the new entrypoint, and prepare the handoff for Phase 26 (LLM-backed agent through the existing typed payload adapter)
+
+Scope:
+- update `tests/unit/architecture/test_cli_boundaries.py` if Slices 1-2 introduce new submodules; the prohibition that nothing below `arena.cli` imports `arena.cli` stays in force
+- README: new "Play locally" section showing a `python -m arena.cli.play --game connect4 --seat-0 human --seat-1 scripted:0,1,0,1,0,1,0` example and a one-paragraph note on quit/abort semantics
+- `docs/MATCH_ARENA_HANDOFF.md`: Phase 25 status section and Phase 26 recommendation pointing at an Anthropic-SDK-backed `InProcessAgent` wrapped by the existing `TypedPayloadPolicyAdapter`
+- `docs/NEXT_SESSION_PROMPT.md`: refreshed current-status paragraph and Phase 26 as the next slice
+
+Acceptance criteria:
+- architecture tests still pass and still forbid upward imports from `arena.cli`
+- README and handoff docs reflect the live-play entrypoint and the Phase 26 direction
+- ruff and pytest pass

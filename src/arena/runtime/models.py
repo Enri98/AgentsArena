@@ -53,6 +53,8 @@ class AbortReason(StrEnum):
     MISSING_POLICY = "missing_policy"
     RUNTIME_ERROR = "runtime_error"
     CANCELLED = "cancelled"
+    USER_QUIT = "user_quit"
+    USER_INTERRUPT = "user_interrupt"
 
 
 @dataclass(frozen=True)

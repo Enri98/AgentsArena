@@ -134,11 +134,14 @@ class Arena:
             events=events,
         )
 
-    def step_session(
+    def request_turn(
         self,
         session: MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT],
-    ) -> MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT]:
-        """Advance one local runtime turn by delegating to the active seat policy."""
+    ) -> tuple[MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT], Seat]:
+        """Append TurnRequested to the session and return the session plus active seat.
+
+        Raises RuntimeStateError when the session is not running or has no match.
+        """
 
         if session.lifecycle is not RuntimeLifecycle.RUNNING:
             raise RuntimeStateError(
@@ -149,14 +152,22 @@ class Arena:
             raise RuntimeStateError("Running session has no local match.")
 
         local_match = session.local_match
-        if local_match.rules_engine.is_terminal(local_match.state):
-            return _finish_session(session)
-
         seat = local_match.rules_engine.current_seat(local_match.state)
         requested_session = replace(
             session,
             events=session.events + (TurnRequested(match_id=session.match_id, seat=seat),),
         )
+        return requested_session, seat
+
+    def complete_turn(
+        self,
+        requested_session: MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT],
+        seat: Seat,
+    ) -> MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT]:
+        """Call the policy for *seat* and return the resulting session."""
+
+        local_match = requested_session.local_match
+        assert local_match is not None
 
         if seat not in requested_session.policy_bindings:
             return _abort_session(
@@ -192,7 +203,7 @@ class Arena:
             events=requested_session.events
             + (
                 TurnAccepted(
-                    match_id=session.match_id,
+                    match_id=requested_session.match_id,
                     seat=seat,
                     turn_index=len(next_match.turns),
                 ),
@@ -201,6 +212,27 @@ class Arena:
         if next_match.rules_engine.is_terminal(next_match.state):
             return _finish_session(accepted_session)
         return accepted_session
+
+    def step_session(
+        self,
+        session: MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    ) -> MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT]:
+        """Advance one local runtime turn by delegating to the active seat policy."""
+
+        if session.lifecycle is not RuntimeLifecycle.RUNNING:
+            raise RuntimeStateError(
+                "Only running sessions can be advanced.",
+                details={"match_id": session.match_id, "lifecycle": session.lifecycle.value},
+            )
+        if session.local_match is None:
+            raise RuntimeStateError("Running session has no local match.")
+
+        local_match = session.local_match
+        if local_match.rules_engine.is_terminal(local_match.state):
+            return _finish_session(session)
+
+        requested_session, seat = self.request_turn(session)
+        return self.complete_turn(requested_session, seat)
 
     def run_session(
         self,

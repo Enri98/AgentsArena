@@ -118,12 +118,28 @@ Phase 24 is complete. Delivered:
 - Architecture tests confirm no lower layer (`arena.core`, `arena.games`, `arena.match`, `arena.adapters`, `arena.runtime`, `arena.ui`) imports `arena.cli`.
 - README section "Terminal replay viewer" documents the example and entrypoint commands.
 
-## Phase 25 Recommendation
+## Phase 25 Status
 
-The next slice should introduce live human play via a `HumanPolicy` before adding any transport adapter.
+Phase 25 is complete. Delivered:
 
-Key notes for Phase 25:
-- `HumanPolicy` needs an input loop that reads from stdin (or a callback).
-- It breaks the determinism constraint for the seat that is human-controlled; golden tests must target only the scripted seat.
-- The input loop should be injected as a dependency so tests can provide a scripted input sequence without touching stdin.
-- No networking, remote agents, or transport adapters should be added in Phase 25; the goal is interactive in-process play only.
+- `arena.cli.policies` — `HumanPolicy` (stdin/stdout-injected, parser-delegating) and `HumanQuit` sentinel exception (inherits `BaseException` to bypass the runtime's `except Exception` handler and reach the driver cleanly).
+- `arena.cli.games.connect4.parse_input` and `arena.cli.games.tictactoe.parse_input` — pure per-game input parsers; return the typed action or `None` to reprompt.
+- `arena.cli.play` package — `play_match(...)` interactive driver that creates/starts/steps a session, renders each frame, catches `HumanQuit`/`KeyboardInterrupt`, calls `Arena.abort_session(...)` with `AbortReason.USER_QUIT` or `AbortReason.USER_INTERRUPT`, writes `status.json` and `transcript.json`, and returns 0 on finish or 1 on abort.
+- `arena.cli.play.__main__` — `python -m arena.cli.play` entrypoint with `--game`, `--seat-0`, `--seat-1` (`human` or `scripted:<actions>`), `--out-dir`, and Connect 4 board flags.
+- `AbortReason.USER_QUIT` and `AbortReason.USER_INTERRUPT` added to `arena.runtime.models.AbortReason` (additive, no existing tests affected).
+- Architecture tests extended to exercise `arena.cli.play` and `arena.cli.policies` imports.
+- README "Play locally" section added.
+- 398 tests pass (371 before Phase 25).
+
+Abort path: `HumanQuit` (and raw `KeyboardInterrupt`) propagate past `step_session`'s `except Exception` guard because `HumanQuit` inherits `BaseException`. The driver catches both in inner and outer handlers, calls `Arena.abort_session(...)` with the correct reason, and always writes both JSON files before returning.
+
+## Phase 26 Recommendation
+
+The next slice should add an Anthropic-SDK-backed `InProcessAgent` so LLM opponents can play against the human through the existing typed adapter chain.
+
+Key notes for Phase 26:
+- The existing `TypedPayloadPolicyAdapter` already wraps any `InProcessAgent[ObservationT, ActionT]` into the `PayloadPolicy` contract the runtime expects — no schema change needed.
+- Build a concrete `AnthropicAgent` (or `ClaudeAgent`) in a new `arena.agents` package that receives a typed observation, formats it as a user message, calls the Anthropic SDK, and parses the model's response into a typed action.
+- The user will need an Anthropic API key; the Max plan does not cover programmatic API access — the key must be set via `ANTHROPIC_API_KEY` environment variable.
+- Extend `--seat-0`/`--seat-1` in `arena.cli.play.__main__` to accept `llm` (or `claude`) alongside `human` and `scripted:...`.
+- Keep the same abort semantics; if the SDK raises an exception, it surfaces as `AbortReason.ADAPTER_ERROR` through the existing handler in `step_session`.

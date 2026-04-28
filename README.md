@@ -265,3 +265,20 @@ python -m arena.cli --status ./out/status.json --transcript ./out/transcript.jso
 The renderer is a pure function of the payloads: the same status and transcript files always
 produce identical output. Board art for Connect 4 and Tic-Tac-Toe is dispatched via a small
 `game_id`-keyed registry inside `arena.cli`; unknown game ids fall back to a board-free layout.
+
+## Play locally
+
+Take a seat and play against a scripted opponent directly in the terminal:
+
+```bash
+python -m arena.cli.play --game connect4 --seat-0 human --seat-1 scripted:0,1,0,1,0,1,0
+```
+
+Use `--rows`, `--cols`, and `--connect-length` to customise the Connect 4 board. Tic-Tac-Toe
+uses numpad-style input: `1` = top-left, `9` = bottom-right.
+
+Typing `q` or `quit` at any prompt, pressing Ctrl-C, or closing stdin (EOF) all abort the
+session through the runtime abort path with a stable reason code (`user_quit` or
+`user_interrupt`) and a non-zero exit code. The abort block is printed in red and both
+`status.json` and `transcript.json` are written to `--out-dir` (default `./out`) regardless
+of whether the session finished or was aborted.
