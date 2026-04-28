@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
 import urllib.request
 from typing import Any
@@ -16,7 +17,7 @@ class OllamaClient:
     def __init__(
         self,
         host: str = "http://localhost:11434",
-        timeout: float = 30.0,
+        timeout: float = 300.0,
     ) -> None:
         self.host = host.rstrip("/")
         self.timeout = timeout
@@ -74,7 +75,22 @@ class OllamaClient:
                 self.host, exc.code, _read_error_body(exc)
             ) from exc
         except urllib.error.URLError as exc:
-            raise OllamaUnavailableError(self.host, str(exc.reason)) from exc
+            reason = exc.reason
+            if isinstance(reason, (TimeoutError, socket.timeout)):
+                raise OllamaUnavailableError(
+                    self.host,
+                    f"request timed out after {self.timeout}s "
+                    "(the model may still be loading; try increasing --ollama-timeout "
+                    "or pre-warm with `ollama run <model> hi`)",
+                ) from exc
+            raise OllamaUnavailableError(self.host, str(reason)) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise OllamaUnavailableError(
+                self.host,
+                f"request timed out after {self.timeout}s "
+                "(the model may still be loading; try increasing --ollama-timeout "
+                "or pre-warm with `ollama run <model> hi`)",
+            ) from exc
 
 
 def _read_error_body(exc: urllib.error.HTTPError) -> str:

@@ -60,6 +60,7 @@ def _build_seat(
     ollama_seed: int,
     ollama_max_retries: int,
     ollama_use_format: bool,
+    ollama_timeout: float,
     retry_sink: dict[int, list[tuple[int, str]]],
 ) -> tuple[PlayerRecord, Any]:
     player = PlayerRecord(player_id=f"player-{seat}", seat=seat, label=label)
@@ -83,6 +84,7 @@ def _build_seat(
             seed=ollama_seed,
             max_retries=ollama_max_retries,
             use_format_spec=ollama_use_format,
+            timeout=ollama_timeout,
             retry_sink=retry_sink,
         )
     raise ValueError(
@@ -101,13 +103,14 @@ def _build_ollama_agent(
     seed: int,
     max_retries: int,
     use_format_spec: bool,
+    timeout: float,
     retry_sink: dict[int, list[tuple[int, str]]],
 ) -> Any:
     from arena.agents.ollama import OllamaAgent, OllamaClient
     from arena.agents.ollama.connect4 import Connect4PromptBuilder
     from arena.agents.ollama.tictactoe import TicTacToePromptBuilder
 
-    client = OllamaClient(host=host)
+    client = OllamaClient(host=host, timeout=timeout)
     builder: Any
     if game == "connect4":
         builder = Connect4PromptBuilder()
@@ -155,6 +158,13 @@ def main(argv: list[str] | None = None) -> int:
         dest="ollama_no_format",
         help="Disable structured-output format spec (use for older Ollama versions).",
     )
+    parser.add_argument(
+        "--ollama-timeout",
+        type=float,
+        default=300.0,
+        dest="ollama_timeout",
+        help="Per-request HTTP timeout in seconds (raise this for slow cold starts).",
+    )
     args = parser.parse_args(argv)
 
     if args.game == "connect4":
@@ -184,12 +194,14 @@ def main(argv: list[str] | None = None) -> int:
     player0, raw_policy0 = _build_seat(
         args.seat_0, 0, args.game, _seat_label(args.seat_0),
         args.ollama_host, args.ollama_temperature, args.ollama_seed,
-        args.ollama_max_retries, not args.ollama_no_format, retry_sink,
+        args.ollama_max_retries, not args.ollama_no_format,
+        args.ollama_timeout, retry_sink,
     )
     player1, raw_policy1 = _build_seat(
         args.seat_1, 1, args.game, _seat_label(args.seat_1),
         args.ollama_host, args.ollama_temperature, args.ollama_seed,
-        args.ollama_max_retries, not args.ollama_no_format, retry_sink,
+        args.ollama_max_retries, not args.ollama_no_format,
+        args.ollama_timeout, retry_sink,
     )
 
     ollama_models = [
