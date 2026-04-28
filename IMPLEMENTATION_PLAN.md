@@ -2489,4 +2489,10 @@ Acceptance criteria:
 - no web server, database, subprocess, auth, or matchmaking code is introduced
 
 Status:
-- planned after Phase 22
+- completed
+
+Implementation note:
+- added a pure `arena.ui` package that validates runtime status/transcript envelopes and reshapes them into deterministic screen-level payloads for status, transcript/history, and combined match-screen consumers
+- preserved runtime snapshots as authoritative while exposing only an opaque `state_payload` convenience mapping derived from each snapshot state for future board rendering
+- kept runtime events top-level and game-domain events inside turn history, sorted players by seat for deterministic output, and added architecture tests enforcing the UI adapter depends only on `arena.runtime` within the arena package
+- added focused tests for running, created, finished, and aborted status payloads; transcript event separation and turn ordering; combined screen mismatch rejection; schema-version constants; JSON round-tripping; and unknown runtime payload fields

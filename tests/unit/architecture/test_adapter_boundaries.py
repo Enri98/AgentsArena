@@ -81,3 +81,27 @@ def test_runtime_package_may_depend_on_core_match_and_adapters_when_it_exists() 
                 violations.append(f"{relative_path}: {imported_module}")
 
     assert violations == []
+
+
+def test_ui_package_depends_only_on_runtime_within_arena_when_it_exists() -> None:
+    ui_root = SOURCE_ROOT / "ui"
+
+    if not ui_root.exists():
+        return
+
+    violations: list[str] = []
+
+    for path in _python_files("ui"):
+        relative_path = path.relative_to(PROJECT_ROOT)
+
+        for imported_module in _imported_modules(path):
+            if imported_module.startswith(("arena.runtime", "arena.ui")):
+                continue
+
+            if imported_module == "arena":
+                continue
+
+            if imported_module.startswith("arena."):
+                violations.append(f"{relative_path}: {imported_module}")
+
+    assert violations == []

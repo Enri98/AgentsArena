@@ -84,3 +84,23 @@ If code is added after the checkpoint, keep it pure and local:
 - no auth
 - no matchmaking
 - no concrete UI rendering
+
+## Phase 23 UI Adapter Boundary
+
+The first UI boundary is `arena.ui`. It is a pure adapter over `arena.runtime`
+payloads and does not import simulation, game, match, transport, persistence, or
+rendering code.
+
+Current UI-facing helpers:
+- `build_match_status(...)` validates a runtime session status payload and returns
+  a deterministic screen-level status payload.
+- `build_match_transcript(...)` validates a runtime transcript envelope shape and
+  returns screen-level history data with top-level runtime events separated from
+  game-domain turn events.
+- `build_match_screen(...)` combines matching status and transcript payloads for a
+  match screen.
+
+The adapter preserves `latest_snapshot` as the authoritative state envelope and
+also exposes `state_payload` as the snapshot's opaque state mapping for board
+rendering. It does not recompute game rules or introduce a game-neutral board
+model.
