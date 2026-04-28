@@ -2134,3 +2134,43 @@ Status:
 
 Implementation note:
 - added `docs/ADAPTER_BOUNDARIES.md` to define dependency direction, allowed inputs/outputs, forbidden infrastructure concerns, and the first safe future adapter slice, then added import-boundary tests to keep existing pure packages independent from future adapters while leaving runtime packages unchanged
+
+### Phase 18 - Pure in-process adapter payload contract
+
+Objective:
+- add the smallest adapter-facing payload contract for in-process action selection without introducing transport, persistence, process management, deadlines, or UI concerns
+
+Scope:
+- `arena.adapters`
+- focused adapter unit tests
+- architecture boundary tests remain in force
+- documentation and handoff notes
+
+Out of scope:
+- FastAPI or WebSocket APIs
+- remote agent protocols
+- subprocess management
+- persistent transcript storage
+- stale-version handling
+- clocks and timeout outcomes
+- authentication and authorization
+- matchmaking and tournaments
+- UI render payloads
+
+Acceptance criteria:
+- adapter-facing observation requests are JSON-safe payloads built from `rules_engine.observation(...)` and game serializers
+- adapter-facing action responses are rehydrated through the game serializer before being applied through the existing local match helper
+- domain exceptions raised by rules engines remain unchanged and can be dumped to metadata-preserving boundary payloads
+- adapter helpers do not add a second match runner or bypass `arena.match.apply_match_action(...)`
+- `arena.core`, `arena.games`, and `arena.match` do not import adapter code
+
+#### Slice 1 - Serialized in-process policy turn `[done]`
+
+Objective:
+- support one serialized in-process policy turn over the existing local match API
+
+Status:
+- completed
+
+Implementation note:
+- added `arena.adapters.in_process` with strict Pydantic payloads for observation requests, action responses, and domain errors; the helper builds observations via the active match rules engine, loads actions through the game serializer, and applies them through `apply_match_action(...)` with focused unit coverage for serialization, action loading, domain-error preservation, and response mismatch rejection

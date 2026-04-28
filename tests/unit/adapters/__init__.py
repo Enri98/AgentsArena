@@ -1,0 +1,1 @@
+"""Adapter-boundary unit tests."""

@@ -68,3 +68,19 @@ When adapter work begins, the first implementation should be narrow and reversib
 
 Do not add a server, database, remote process runner, timeout system, or matchmaking layer in the first
 adapter slice.
+
+## Implemented Phase 18 Slice
+
+The first adapter slice is `arena.adapters.in_process`.
+
+It provides:
+- `ObservationRequestPayload`
+- `ActionResponsePayload`
+- `DomainErrorPayload`
+- `build_observation_request(...)`
+- `load_action_response(...)`
+- `apply_payload_policy_turn(...)`
+- `dump_domain_error(...)`
+
+This adapter boundary remains in-process and payload-oriented. It does not add networking,
+subprocesses, persistence, timeouts, auth, matchmaking, or UI payloads.
