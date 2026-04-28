@@ -10,6 +10,7 @@ from arena.adapters import (
     ADAPTER_PAYLOAD_SCHEMA_VERSION,
     ActionResponsePayload,
     ObservationRequestPayload,
+    TypedPayloadPolicyAdapter,
     apply_payload_policy_turn,
     build_observation_request,
     dump_domain_error,
@@ -20,6 +21,7 @@ from arena.games.connect4 import (
     CONNECT4_GAME_ID,
     Connect4Config,
     Connect4GameDefinition,
+    Connect4Observation,
     DropDisc,
 )
 from arena.match import start_match
@@ -41,6 +43,28 @@ class PayloadScriptPolicy:
             seat=request.seat,
             action=action,
         )
+
+
+@dataclass
+class TypedRecordingAgent:
+    actions: tuple[DropDisc, ...]
+    observations: list[Connect4Observation] = field(default_factory=list)
+    index: int = 0
+
+    def select_action(self, observation: Connect4Observation) -> DropDisc:
+        self.observations.append(observation)
+        action = self.actions[self.index]
+        self.index += 1
+        return action
+
+
+@dataclass
+class WrongActionAgent:
+    observations: list[Connect4Observation] = field(default_factory=list)
+
+    def select_action(self, observation: Connect4Observation) -> object:
+        self.observations.append(observation)
+        return object()
 
 
 def test_build_observation_request_uses_active_seat_and_game_serializer() -> None:
@@ -83,6 +107,65 @@ def test_apply_payload_policy_turn_applies_one_serialized_policy_action() -> Non
     assert next_match.turns[0].seat == 0
     assert next_match.turns[0].action == DropDisc(column=0)
     assert next_match.state.current_seat == 1
+
+
+def test_typed_payload_policy_adapter_loads_observation_and_dumps_action() -> None:
+    match = start_match(Connect4GameDefinition, Connect4Config())
+    request = build_observation_request(match)
+    agent = TypedRecordingAgent(actions=(DropDisc(column=2),))
+    adapter = TypedPayloadPolicyAdapter(Connect4GameDefinition, agent)
+
+    response = adapter.select_action(request)
+
+    assert len(agent.observations) == 1
+    assert agent.observations[0] == match.rules_engine.observation(match.state, 0)
+    assert response == ActionResponsePayload(
+        game_id=CONNECT4_GAME_ID,
+        schema_version=ADAPTER_PAYLOAD_SCHEMA_VERSION,
+        seat=0,
+        action={"column": 2},
+    )
+
+
+def test_typed_payload_policy_adapter_can_drive_one_payload_policy_turn() -> None:
+    match = start_match(Connect4GameDefinition, Connect4Config())
+    agent = TypedRecordingAgent(actions=(DropDisc(column=0),))
+    adapter = TypedPayloadPolicyAdapter(Connect4GameDefinition, agent)
+
+    next_match = apply_payload_policy_turn(match, adapter)
+
+    assert len(agent.observations) == 1
+    assert next_match.turns[0].seat == 0
+    assert next_match.turns[0].action == DropDisc(column=0)
+    assert next_match.state.current_seat == 1
+
+
+def test_typed_payload_policy_adapter_rejects_foreign_request_and_schema_version() -> None:
+    match = start_match(Connect4GameDefinition, Connect4Config())
+    request = build_observation_request(match)
+    agent = TypedRecordingAgent(actions=(DropDisc(column=0),))
+    adapter = TypedPayloadPolicyAdapter(Connect4GameDefinition, agent)
+
+    foreign_game = request.model_copy(update={"game_id": "other-game"})
+    wrong_schema = request.model_copy(
+        update={"schema_version": ADAPTER_PAYLOAD_SCHEMA_VERSION + 1}
+    )
+
+    with pytest.raises(ValueError, match="game_id"):
+        adapter.select_action(foreign_game)
+
+    with pytest.raises(ValueError, match="schema_version"):
+        adapter.select_action(wrong_schema)
+
+    assert agent.observations == []
+
+
+def test_typed_payload_policy_adapter_surfaces_wrong_action_type_from_serializer() -> None:
+    match = start_match(Connect4GameDefinition, Connect4Config())
+    adapter = TypedPayloadPolicyAdapter(Connect4GameDefinition, WrongActionAgent())
+
+    with pytest.raises(TypeError, match="Expected DropDisc"):
+        apply_payload_policy_turn(match, adapter)
 
 
 def test_apply_payload_policy_turn_surfaces_domain_errors_without_translation() -> None:

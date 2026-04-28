@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol, TypeVar, cast
+from dataclasses import dataclass
+from typing import Generic, Protocol, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -64,6 +65,37 @@ class PayloadPolicy(Protocol):
         """Return an adapter-facing action response."""
 
 
+class InProcessAgent(Protocol[ObservationT, ActionT]):
+    """Select a typed action from a typed observation."""
+
+    def select_action(self, observation: ObservationT) -> ActionT:
+        """Return the next typed action for the supplied observation."""
+
+
+@dataclass(frozen=True)
+class TypedPayloadPolicyAdapter(Generic[ConfigT, StateT, ActionT, ObservationT, ResultT]):
+    """Adapt a typed in-process agent to the serialized payload policy contract."""
+
+    definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT]
+    agent: InProcessAgent[ObservationT, ActionT]
+
+    def select_action(self, request: ObservationRequestPayload) -> ActionResponsePayload:
+        """Load the request observation, ask the typed agent, and dump its action."""
+
+        _ensure_request_matches_definition(self.definition, request)
+        observation = cast(
+            ObservationT,
+            self.definition.serializer.load_observation(request.observation),
+        )
+        action = self.agent.select_action(observation)
+        return ActionResponsePayload(
+            game_id=request.game_id,
+            schema_version=request.schema_version,
+            seat=request.seat,
+            action=self.definition.serializer.dump_action(action),
+        )
+
+
 def build_observation_request(
     match: LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT],
 ) -> ObservationRequestPayload:
@@ -115,10 +147,7 @@ def _ensure_response_matches_definition(
     definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT],
     response: ActionResponsePayload,
 ) -> None:
-    if response.game_id != definition.game_id:
-        raise ValueError(
-            f"Action response game_id {response.game_id!r} does not match {definition.game_id!r}."
-        )
+    _ensure_game_id_matches_definition(definition.game_id, response.game_id, "Action response")
 
     if response.schema_version != ADAPTER_PAYLOAD_SCHEMA_VERSION:
         raise ValueError(
@@ -130,12 +159,41 @@ def _ensure_response_matches_definition(
         )
 
 
+def _ensure_request_matches_definition(
+    definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    request: ObservationRequestPayload,
+) -> None:
+    _ensure_game_id_matches_definition(definition.game_id, request.game_id, "Observation request")
+
+    if request.schema_version != ADAPTER_PAYLOAD_SCHEMA_VERSION:
+        raise ValueError(
+            (
+                "Observation request schema_version "
+                f"{request.schema_version!r} does not match "
+                f"{ADAPTER_PAYLOAD_SCHEMA_VERSION!r}."
+            )
+        )
+
+
+def _ensure_game_id_matches_definition(
+    expected_game_id: str,
+    actual_game_id: str,
+    context: str,
+) -> None:
+    if actual_game_id != expected_game_id:
+        raise ValueError(
+            f"{context} game_id {actual_game_id!r} does not match {expected_game_id!r}."
+        )
+
+
 __all__: Sequence[str] = [
     "ADAPTER_PAYLOAD_SCHEMA_VERSION",
     "ActionResponsePayload",
     "DomainErrorPayload",
+    "InProcessAgent",
     "ObservationRequestPayload",
     "PayloadPolicy",
+    "TypedPayloadPolicyAdapter",
     "apply_payload_policy_turn",
     "build_observation_request",
     "dump_domain_error",

@@ -77,6 +77,8 @@ It provides:
 - `ObservationRequestPayload`
 - `ActionResponsePayload`
 - `DomainErrorPayload`
+- `InProcessAgent`
+- `TypedPayloadPolicyAdapter`
 - `build_observation_request(...)`
 - `load_action_response(...)`
 - `apply_payload_policy_turn(...)`
@@ -84,3 +86,7 @@ It provides:
 
 This adapter boundary remains in-process and payload-oriented. It does not add networking,
 subprocesses, persistence, timeouts, auth, matchmaking, or UI payloads.
+
+`TypedPayloadPolicyAdapter` is a convenience wrapper over the same payload contract. It loads typed
+observations and dumps typed actions through the game serializer, but it still plugs into
+`apply_payload_policy_turn(...)` rather than introducing a second match runner.

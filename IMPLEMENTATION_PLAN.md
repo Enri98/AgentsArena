@@ -2174,3 +2174,40 @@ Status:
 
 Implementation note:
 - added `arena.adapters.in_process` with strict Pydantic payloads for observation requests, action responses, and domain errors; the helper builds observations via the active match rules engine, loads actions through the game serializer, and applies them through `apply_match_action(...)` with focused unit coverage for serialization, action loading, domain-error preservation, and response mismatch rejection
+
+### Phase 19 - Typed in-process adapter convenience wrapper
+
+Objective:
+- make the serialized in-process adapter contract easier to use with typed local agents while keeping the payload boundary authoritative
+
+Scope:
+- `arena.adapters.in_process`
+- focused adapter unit tests
+- documentation and handoff notes
+
+Out of scope:
+- network protocols
+- subprocess management
+- persistence
+- deadlines and timeout outcomes
+- UI payloads
+- a second match runner
+- changes to `arena.core`, `arena.games`, or `arena.match`
+
+Acceptance criteria:
+- a typed in-process agent can receive a typed observation rehydrated from `ObservationRequestPayload`
+- the typed agent's action is serialized into `ActionResponsePayload` through the game serializer
+- the wrapper remains usable anywhere a `PayloadPolicy` is expected
+- foreign game ids and schema-version mismatches are rejected before invoking the typed agent
+- wrong action types continue to surface serializer/type errors instead of being normalized into adapter-specific errors
+
+#### Slice 1 - Typed payload policy adapter `[done]`
+
+Objective:
+- adapt typed local agents to the existing payload policy contract without adding a new runner
+
+Status:
+- completed
+
+Implementation note:
+- added `InProcessAgent` and `TypedPayloadPolicyAdapter`, which validate payload metadata, load observations through the game serializer, call the typed agent, dump typed actions through the serializer, and then remain compatible with `apply_payload_policy_turn(...)`
