@@ -2813,3 +2813,339 @@ Acceptance criteria:
 - a stubbed daemon-unreachable test on the CLI returns non-zero with a clear message
 - all existing tests still pass
 - ruff + pytest pass
+
+Status:
+- completed (Slices 1-3 shipped; the local Ollama vs Ollama Connect 4 flow runs end-to-end through `python -m arena.cli.play`)
+
+### Remote-play roadmap (Phases 27 - 35)
+
+Phase 26 closes the "everything in one process" branch of the roadmap. The remaining phases pivot to remote play: a WebSocket server, a typed reference SDK, two local Ollama agents connecting to a publicly reachable server as the v1 acceptance demo, plus the resilience and observability needed to call v1 "solid". This block lifts the long-standing bans on networking, deadlines, and remote agents in a controlled order.
+
+The locked decisions that drive Phases 27 - 35:
+- transport is WebSocket only; wire format is JSON; no MessagePack/Protobuf option
+- per-turn deadlines live in `arena.server`, never in `arena.runtime`; expiry produces an existing-style runtime abort
+- match identity uses unguessable opaque ids (`secrets.token_urlsafe(16)` >=128 bits of entropy), and possession of the id is the only capability in v1 (no auth)
+- the creator becomes seat 0; the joiner becomes seat 1; the unguessable `match_id` is the invite token
+- `MatchRegistry` is in from day one; there is no "single hardcoded match" intermediate step
+- the SDK ships both a `connect(...)` callback form and a lower-level `Session` loop form so future MCP layering does not require an SDK redesign
+- the SDK ships the Connect 4 / Tic-Tac-Toe Pydantic schemas directly; clients do not fetch schemas at handshake
+- `docs/NETWORK_PROTOCOL.md` is the language-agnostic source of truth; the Python SDK is a reference implementation, not the spec
+- structured JSON logging lives in `arena.server` only; metrics endpoints, Prometheus, and OpenTelemetry tracing are deferred to v2
+- v2 deferrals (out of scope for Phases 27 - 35): web spectator UI, transcript persistence beyond stdout/file, real auth, Anthropic-SDK-backed agent, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, third-party game registration, TypeScript SDK port, MCP server unless explicitly built in Phase 35
+- v1 acceptance demo: two local Ollama agents on the user's laptop both connect to a publicly reachable `arena.server` instance, complete one clean Connect 4 match, and complete one deliberate-abort scenario (one peer killed mid-turn)
+
+New layer rules introduced by this block:
+- new packages: `arena.adapters.websocket`, `arena.server`, `arena.sdk`
+- existing layer rules continue to hold; `arena.core`, `arena.games`, `arena.match`, `arena.runtime`, and `arena.ui` must not import any of the three new packages
+- `arena.adapters.websocket` is a sibling of `arena.adapters.in_process`; it depends only on `arena.core` payload types and pure `arena.adapters.in_process` payload models
+- `arena.server` may depend on `arena.runtime`, `arena.adapters.in_process`, `arena.adapters.websocket`, and `arena.ui`; nothing else may import `arena.server`. `arena.server` exposes a `GET /schemas/payloads` endpoint serving the canonical JSON Schema bundle described in `docs/NETWORK_PROTOCOL.md` §17 so non-Python SDKs can codegen against the same source of truth
+- `arena.sdk` may depend on `arena.core` (for game schemas) and `arena.adapters.websocket` (for envelope types); it must not import `arena.match`, `arena.adapters.in_process`, `arena.runtime`, `arena.ui`, `arena.cli`, or `arena.server`
+- structured logging at module-load scope is allowed only in `arena.server`; lower layers may use `logging` only inside functions and only when explicitly opted in
+- `arena.cli` may consume `arena.sdk` so the existing `python -m arena.cli.play` entrypoint can drive remote sessions through `--server-url`
+
+### Phase 27 - Network protocol design checkpoint
+
+Objective:
+- lock the wire protocol, glossary, error taxonomy, and layer rules before any networking code is added, so every subsequent slice has a single source of truth to implement against
+
+Scope:
+- `docs/NETWORK_PROTOCOL.md`
+- updates to `CLAUDE.md`, `AGENTS.md`, `docs/ADAPTER_BOUNDARIES.md`, `docs/MATCH_ARENA_HANDOFF.md`, `docs/NEXT_SESSION_PROMPT.md` reflecting the lifted bans, the new packages, and the new layer rules
+- this `IMPLEMENTATION_PLAN.md` block (Phases 27 - 35)
+- no source code, no tests touching `src/`
+
+Out of scope:
+- any code under `src/arena/server`, `src/arena/sdk`, or `src/arena/adapters/websocket`
+- HTTP routes, FastAPI wiring, `websockets` library integration
+- new architecture tests (those land with the packages they protect)
+- web spectator UI work
+- Anthropic / OpenAI / remote-API agents
+- any v2 deferrals listed in the roadmap intro
+
+Acceptance criteria:
+- `docs/NETWORK_PROTOCOL.md` exists and covers: transport, URL shape, lifecycle, envelope, schema-versioning policy, every message type with payload fields, error taxonomy with WebSocket close codes and in-band error codes, match creation/join flow, disconnect/reconnection rules, idempotency model, rate limits, logging contract, conformance test contract, forward-compatibility notes
+- the protocol doc declares itself the language-agnostic source of truth and labels the Python SDK as a reference implementation
+- `CLAUDE.md` no longer claims "no networking, persistence, subprocesses, timeouts, auth, matchmaking, remote agents, or UI rendering yet"; the layer table includes `arena.adapters.websocket`, `arena.server`, and `arena.sdk` with their responsibilities; the rule that timeouts live only in `arena.server` is recorded
+- `AGENTS.md` records the same rule changes
+- `docs/ADAPTER_BOUNDARIES.md` describes `arena.adapters.websocket` as a sibling to `arena.adapters.in_process` and documents what each may import
+- `docs/MATCH_ARENA_HANDOFF.md` and `docs/NEXT_SESSION_PROMPT.md` point at Phase 28 as the next entry point
+- ruff + pytest pass (no source changes)
+
+Status:
+- in progress (Slice 1 first pass shipped; revised after adversarial review with the following additions: full HTTP request/response shapes for `POST /matches`, `GET /matches/{id}`, `GET /games`; explicit `per_action_retry_budget`, `per_turn_deadline_ms`, `disconnect_grace_ms` lifecycle owned by match creation; `resume_token` scoped server-side to `(match_id, seat)` and rotated on every resume; deterministic ordering of `action_rejected(0)` -> `match_state(aborted)` -> `match_aborted` -> close on retry-budget exhaustion; atomicity rule for `running -> finished/aborted` transitions; per-connection FIFO + per-`turn_id` retry-counter decrement semantics; per-match concurrent-connection cap; new §17 "Payload reference" exposing `GET /schemas/payloads` for non-Python SDK codegen; new §18 "Message broadcast matrix"; explicit v1 information-model assumption restricting the protocol to public-move perfect-information games; replaced "byte-identical replay" with "logically equivalent state". The first three CRITICAL findings (resume-token seat takeover, retry budget undefined, unspecified payload schemas) are closed by the revision; the remaining findings are either accepted as v1 trust-model decisions or already addressed)
+
+#### Slice 1 - Protocol document and doc updates
+
+Objective:
+- ship the protocol doc and propagate the new rules to the existing meta-docs in one reviewable change
+
+Scope:
+- create `docs/NETWORK_PROTOCOL.md`
+- update `CLAUDE.md`, `AGENTS.md`, `docs/ADAPTER_BOUNDARIES.md`, `docs/MATCH_ARENA_HANDOFF.md`, `docs/NEXT_SESSION_PROMPT.md`
+- append Phases 27 - 35 to `IMPLEMENTATION_PLAN.md`
+
+Acceptance criteria:
+- the protocol doc passes its own internal completeness checklist (every message type from the taxonomy is described, every close code is listed, every layer rule is traceable to the locked decisions above)
+- meta-doc updates do not contradict each other or the protocol doc
+- ruff + pytest pass
+
+### Phase 28 - `arena.adapters.websocket` payload contract
+
+Objective:
+- add the typed wire-envelope contract as a sibling adapter to `arena.adapters.in_process`, without introducing any I/O, server, or client code
+
+Scope:
+- new package `src/arena/adapters/websocket/` containing only Pydantic v2 envelope models and discriminated-union message-type validators, plus pure JSON encode/decode helpers
+- focused unit tests covering: envelope round-trips for every message type, schema-version validation, malformed-envelope rejection, additive-optional forward compatibility
+- new architecture test extending the existing import-boundary suite to forbid lower layers from importing `arena.adapters.websocket`
+
+Out of scope:
+- any networking code, including imports of `websockets`, `aiohttp`, `httpx`, FastAPI, or the stdlib `socket`/`asyncio.network` surface
+- server or client implementations
+- timeouts, heartbeats, reconnection logic
+- match creation HTTP routes
+
+Acceptance criteria:
+- every protocol message type from `docs/NETWORK_PROTOCOL.md` has a Pydantic envelope model that round-trips JSON byte-for-byte against representative fixtures
+- `schema_version` is enforced to `1` in v1 with a clear error on mismatch
+- payload bodies for `observation_request`, `action_response`, and `action_rejected` re-use the existing `arena.adapters.in_process` payload models verbatim (no copy-paste)
+- architecture tests prove `arena.core`, `arena.games`, `arena.match`, `arena.runtime`, and `arena.ui` do not import `arena.adapters.websocket`
+- ruff + pytest pass
+
+#### Slice 1 - Envelope models and discriminated union
+
+Scope:
+- envelope base model with the fields documented in protocol §6
+- one Pydantic model per message type from §8
+- `dumps(envelope) -> str` and `loads(text) -> Envelope` helpers using stdlib `json`
+- focused unit tests
+
+Acceptance criteria:
+- every protocol message type has a model and a passing round-trip test
+- unknown envelope fields are accepted and ignored
+- unknown payload fields inside known message types are accepted and ignored
+- binary input to `loads` raises a clean typed error
+
+### Phase 29 - `arena.server` skeleton with `MatchRegistry`
+
+Objective:
+- ship the smallest WebSocket server that can host a Connect 4 or Tic-Tac-Toe match between two scripted Clients end-to-end, with `MatchRegistry` and `POST /matches` from day one
+
+Scope:
+- new package `src/arena/server/` containing: `app.py` (FastAPI app), `registry.py` (`MatchRegistry`, `Match`), `routes_http.py` (`POST /matches`, `GET /matches/{id}`, `GET /games`), `routes_ws.py` (the play WS handler), `runtime_bridge.py` (glue between an `Arena` session and the WS handler), `__main__.py` (`python -m arena.server`)
+- in-process integration test infrastructure: pytest fixture spawning the FastAPI app on an ephemeral port and a small async WS test client
+- new architecture test forbidding lower layers from importing `arena.server`
+- one happy-path Connect 4 integration test driving two scripted Clients through real WebSocket frames against a real running server
+
+Out of scope:
+- timeouts and heartbeats (Phase 32)
+- reconnection and resume tokens beyond a stub (Phase 32)
+- structured JSON logging (Phase 33)
+- TLS, deployment recipes, Dockerfile (Phase 34)
+- the SDK (Phase 30)
+- Ollama integration (Phase 31)
+
+Acceptance criteria:
+- `python -m arena.server --host 127.0.0.1 --port 8080` boots the server
+- `POST /matches` with a valid `game_id` and `game_config` returns `{match_id, seat_0_url, seat_1_url}` with a `match_id` of >=128 bits of entropy
+- `GET /games` returns the registered game ids and their config schemas via existing `Serializer.config_schema()`
+- two test Clients can connect to the seat URLs, complete a Connect 4 match, and validate the resulting transcript through `validate_runtime_transcript(...)`
+- malformed envelopes close the offending connection with code `4422`
+- `arena.core`, `arena.games`, `arena.match`, `arena.adapters.*`, `arena.runtime`, `arena.ui`, `arena.cli`, and `arena.sdk` do not import `arena.server`
+- ruff + pytest pass
+
+#### Slice 1 - HTTP surface and `MatchRegistry`
+
+Scope:
+- `MatchRegistry` holding `Match` records keyed by id; `Match` owns its `Arena` session, its registered `GameDefinition`, its current connections, and its lifecycle
+- HTTP routes: `POST /matches`, `GET /matches/{id}`, `GET /games`
+- focused unit tests for the registry and route validation
+
+Acceptance criteria:
+- `POST /matches` validates the requested `game_id` and `game_config` through the registered serializer; rejects unknown game ids with HTTP 400; rejects invalid configs with the existing domain error
+- `POST /matches` accepts and validates `per_turn_deadline_ms`, `per_action_retry_budget`, and `disconnect_grace_ms` per protocol §4.1; defaults match the doc; out-of-range values return HTTP 400 `invalid_request`
+- `match_id` generation uses `secrets.token_urlsafe(16)`
+- `GET /games` exposes config schemas without importing `arena.server` from any lower layer
+- `GET /schemas/payloads` returns the JSON Schema bundle defined in protocol §17, byte-stable for `schema_version=1`
+
+#### Slice 2 - WebSocket play handler
+
+Scope:
+- `WS /matches/{id}/play?seat=N` handler implementing the `hello` -> `welcome` handshake, the per-turn `observation_request` -> `action_response` loop, and the terminal `match_finished` / `match_aborted` messages
+- runtime bridge that pulls observations from the session's bound `Arena.step_session(...)` and pushes them as envelopes; routes `action_response` back through `apply_payload_policy_turn(...)`
+- close-code coverage for `4400`, `4404`, `4409`, `4422`
+
+Acceptance criteria:
+- two scripted test Clients complete a Connect 4 match through real WebSocket frames against an ephemeral-port server
+- close codes match the protocol doc on every documented failure path
+
+#### Slice 3 - Integration test infrastructure
+
+Scope:
+- pytest fixture for an ephemeral-port server lifecycle (start, yield base URL, stop)
+- minimal async WS test client helper using `websockets` or `httpx`'s WS support
+- one Connect 4 happy path test, one Tic-Tac-Toe happy path test, one malformed-envelope test
+
+### Phase 30 - `arena.sdk` reference Python client
+
+Objective:
+- ship a Python SDK that lets a user write `def choose(obs): ...` and connect to a running `arena.server` with one call, plus a lower-level `Session` loop form so future MCP layering does not require an SDK redesign
+
+Scope:
+- new package `src/arena/sdk/` containing: `client.py` (`connect(...)` callback form, `Session` class loop form), `types.py` (re-exports of game schemas + envelope models), `errors.py` (typed wire-error hierarchy mapping protocol error codes to exceptions), `testing.py` (`LocalSession` test helper that runs the protocol in-memory without a real WS)
+- focused unit tests using `LocalSession` for the SDK itself; one integration test that runs the SDK against the real `arena.server` from Phase 29
+- new architecture test forbidding `arena.sdk` from importing `arena.match`, `arena.adapters.in_process`, `arena.runtime`, `arena.ui`, `arena.cli`, or `arena.server`
+
+Out of scope:
+- TypeScript port (v2)
+- MCP wrapper (Phase 35)
+- reconnection logic beyond surfacing dropped sessions (Phase 32 finishes resume)
+- agent-side telemetry of any kind
+
+Acceptance criteria:
+- the documented `connect(url, seat, choose=...)` callback form completes a Connect 4 match against the real server end-to-end with a scripted callback
+- the `Session` loop form is exercised by a test that drives the same match using `recv()` / `send_action(...)` calls
+- typed errors (`IllegalActionError`, `WrongSeatError`, `MatchAbortedError`, `ProtocolError`, `SchemaVersionError`, `MatchNotFoundError`) cover every protocol error code
+- `LocalSession` lets a user unit-test their `choose(...)` callback without spinning up a server
+- the SDK ships Connect 4 and Tic-Tac-Toe schemas via re-export of existing `arena.core`/`arena.games` Pydantic models without copy-paste
+
+#### Slice 1 - `Session` loop form and `LocalSession`
+
+Scope:
+- `Session.connect(url, seat, *, resume_token=None) -> Session` opening the WS, performing the handshake, and exposing `recv()` and `send_action(...)`
+- `LocalSession` implementing the same surface against an in-memory protocol simulator backed by `arena.runtime`
+- focused unit tests using `LocalSession` against scripted match scripts
+
+#### Slice 2 - `connect(...)` callback form
+
+Scope:
+- thin wrapper turning `Session.recv()` -> dispatch -> `Session.send_action(...)` into a single call with a user-supplied `choose(observation) -> action` callback
+- handles `match_finished` and `match_aborted` by returning the final transcript to the caller
+- focused unit tests using `LocalSession`
+
+#### Slice 3 - Integration test against real server
+
+Scope:
+- one test that spawns the Phase 29 server, calls `arena.sdk.connect(...)` from two scripted Clients, completes a Connect 4 match, and validates the transcript
+
+### Phase 31 - Ollama-over-WS port and CLI `--server-url`
+
+Objective:
+- prove the SDK abstraction is right by running the existing `OllamaAgent` over the wire with zero changes to the prompt/parse code, and let `python -m arena.cli.play` connect to a remote server
+
+Scope:
+- new `arena.cli.remote` (or equivalent) module that wires `arena.agents.ollama.OllamaAgent` into `arena.sdk.connect(...)` via its existing `choose(observation)` shape
+- extend `arena.cli.play.__main__` with a `--server-url` flag; when present, the named seat connects to the remote server instead of running in-process
+- one stubbed end-to-end test (no real Ollama, scripted moves) running two `OllamaAgent`s through the SDK against a real `arena.server` instance, completing a small Connect 4 match
+- README section "Play remotely with Ollama" showing the local-only quickstart
+
+Out of scope:
+- TLS deployment (Phase 34)
+- timeouts and reconnection (Phase 32)
+- the public-internet acceptance demo (Phase 34)
+
+Acceptance criteria:
+- `python -m arena.cli.play --game connect4 --seat-0 ollama:llama3.2 --seat-1 ollama:qwen2.5 --server-url ws://127.0.0.1:8080` runs both agents against a local `arena.server`
+- the `OllamaAgent` source code is unchanged from Phase 26 (only the wiring is new)
+- the stubbed test passes deterministically and validates the resulting transcript
+
+### Phase 32 - Resilience: timeouts, aborts, reconnection
+
+Objective:
+- make the server survive the failure modes that appear once real network and real LLMs are in the loop, without leaking any deadline logic into `arena.runtime`
+
+Scope:
+- per-turn deadline configured at match creation; server-side timer per `observation_request`; expiry triggers a runtime abort with reason `turn_deadline_expired` (the abort itself stays in `arena.runtime`, the deadline lives in `arena.server`)
+- disconnect grace period (default 30s) for the active seat; off-turn disconnects keep the match alive until the dropped seat's turn arrives
+- WS heartbeats: server pings every 20s, two missed `pong`s closes with `4408`
+- action idempotency via per-match committed-`turn_id` set; duplicate `action_response` messages are dropped silently
+- resume protocol: `hello.resume_token` lets a reconnecting Client receive the latest lifecycle and a transcript replay before normal flow resumes
+- new tests covering each failure path documented in protocol §15
+- SDK reconnect helper using the resume token
+
+Out of scope:
+- TLS (Phase 34)
+- structured logging (Phase 33)
+- multi-match resilience scenarios beyond the existing `MatchRegistry`
+- persistence across server restarts (a stale `resume_token` correctly returns `4410`)
+
+Acceptance criteria:
+- the conformance test suite from protocol §15 passes for the server
+- `arena.runtime` source still contains no deadline logic; deadline enforcement lives entirely in `arena.server`
+- the SDK exposes a documented reconnection path; the integration test reconnects mid-match and finishes successfully
+- ruff + pytest pass
+
+#### Slice 1 - Per-turn deadline and timeout abort
+
+#### Slice 2 - Disconnect grace and resume protocol
+
+#### Slice 3 - Heartbeats and idempotency
+
+### Phase 33 - Server observability baseline (structured logging)
+
+Objective:
+- ship structured JSON logs from the server so debugging "what happened in match X" is a `grep` away, without introducing metrics, tracing, or any v2 telemetry
+
+Scope:
+- `arena.server.logging` configuring `structlog` (added as a dependency) with a JSON formatter writing to stdout
+- one structured log line per documented event in protocol §14; required fields enforced by a test
+- new architecture test forbidding lower layers from instantiating loggers at module-load scope (functions inside `arena.core`, `arena.games`, `arena.match`, `arena.adapters.*`, `arena.runtime`, `arena.ui`, `arena.cli`, `arena.sdk` may use `logging` lazily, but must not call `logging.getLogger(__name__)` at module scope)
+- README "Operating the server" section documenting how to capture, rotate, and grep logs
+
+Out of scope:
+- Prometheus metrics (v2)
+- OpenTelemetry tracing (v2)
+- match transcripts in logs (transcripts go to their own channel)
+- agent-side logging in the SDK (the SDK stays silent unless the user opts in via standard Python logging config)
+
+Acceptance criteria:
+- every event listed in protocol §14 is emitted at least once across the test suite, with all required fields present
+- the architecture test catches any new lower-layer module-scope logger
+- the SDK produces zero log output by default in the integration tests
+
+### Phase 34 - Public deployment and acceptance demo
+
+Objective:
+- prove v1 is solid by running the documented acceptance demo: two local Ollama agents on the user's laptop, both connecting to a publicly reachable `arena.server`, completing one clean match and one deliberate-abort scenario
+
+Scope:
+- `Dockerfile` building the server image
+- `docs/DEPLOYMENT.md` describing the Caddy reverse-proxy recipe (`wss://` termination), Fly.io / small-VM deployment example, environment variables, and the `python -m arena.server` entrypoint
+- README "Watch two LLMs play remotely" section showing both the run-it-locally and connect-to-public-server flows
+- acceptance demo script under `examples/run_remote_demo.py` that runs two local Ollama agents against a configurable `--server-url`, dumps both transcripts, and prints the final frames
+- focused tests where feasible (in-process server + scripted agents); the public-server run is documented but exercised manually
+- updates to `docs/MATCH_ARENA_HANDOFF.md` and `docs/NEXT_SESSION_PROMPT.md` recording the v1 milestone
+
+Out of scope:
+- TLS terminated by `arena.server` itself (always done by reverse proxy)
+- managed deployment to a specific provider beyond a single Fly.io example
+- transcript persistence beyond writing to disk in `examples/`
+- a friend physically running the agent on their machine (supported by the same code path; not required for the v1 bar because of the local-Ollama-only constraint)
+
+Acceptance criteria:
+- the user can run `examples/run_remote_demo.py --server-url wss://...` against a deployed server and watch two local Ollama agents play
+- one deliberate-abort scenario (one agent process killed mid-turn) leaves the server with an `aborted` transcript whose `validate_runtime_transcript(...)` succeeds and whose abort metadata reason is `peer_disconnected`
+- the README quickstart for the remote demo is reproducible
+- ruff + pytest pass
+
+### Phase 35 - MCP server layer (optional v1 extension)
+
+Objective:
+- expose the SDK through an MCP server so Claude Desktop and other MCP clients can join matches as agents, without changing the wire protocol or the SDK
+
+Scope:
+- new `arena-mcp-server` package (or `src/arena/mcp/`) implementing MCP tools `join_match`, `get_observation`, `make_move`, `get_history`, `match_status` on top of `arena.sdk.Session`
+- one stubbed end-to-end test driving the MCP tools against a stub MCP client and a real `arena.server`
+- README "Play with Claude Desktop" section
+
+Out of scope:
+- everything else listed under v2 deferrals
+
+Acceptance criteria:
+- the documented MCP tools complete a small Connect 4 match against a real server when invoked in sequence
+- `arena.sdk` source code is unchanged
+- v1 acceptance does not require Phase 35; if skipped, Phase 35 stays open without blocking the v1 milestone
+
+Status (Phases 27 - 35):
+- Phase 27 in progress (this document update + protocol doc + meta-doc updates)
+- Phases 28 - 35 not started

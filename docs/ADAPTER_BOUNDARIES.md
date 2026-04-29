@@ -69,6 +69,27 @@ When adapter work begins, the first implementation should be narrow and reversib
 Do not add a server, database, remote process runner, timeout system, or matchmaking layer in the first
 adapter slice.
 
+## Phase 28 Slice: `arena.adapters.websocket`
+
+A second adapter, `arena.adapters.websocket`, is planned as a sibling of `arena.adapters.in_process`. It owns the typed wire-envelope contract documented in `docs/NETWORK_PROTOCOL.md`.
+
+Allowed:
+- Pydantic v2 envelope models per protocol message type
+- discriminated-union message-type validation
+- pure JSON encode/decode helpers (`dumps`, `loads`)
+- re-export of `arena.adapters.in_process.ObservationRequestPayload`, `ActionResponsePayload`, and `DomainErrorPayload` as the bodies of `observation_request`, `action_response`, and `action_rejected`
+
+Not allowed:
+- importing `websockets`, `aiohttp`, `httpx`, FastAPI, or stdlib networking
+- performing any I/O (sending or receiving frames)
+- holding mutable connection state
+- enforcing timeouts, heartbeats, or rate limits (those live in `arena.server`)
+- any reference to `arena.server`, `arena.sdk`, `arena.runtime`, `arena.ui`, `arena.cli`
+
+`arena.adapters.websocket` may import `arena.core` (for serializer-derived types) and `arena.adapters.in_process` (for the payload bodies). Nothing in `arena.core`, `arena.games`, `arena.match`, `arena.runtime`, or `arena.ui` may import it.
+
+The server (`arena.server`) and SDK (`arena.sdk`) both depend on `arena.adapters.websocket` so the wire shape stays single-sourced.
+
 ## Implemented Phase 18 Slice
 
 The first adapter slice is `arena.adapters.in_process`.

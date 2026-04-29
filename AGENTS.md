@@ -2,14 +2,16 @@
 
 This repository contains a Python 3.11 library for turn-based game simulation, built incrementally for an agent-vs-agent arena project.
 
-Current scope is intentionally narrow:
+Current scope:
 - strictly sequential games
 - deterministic games
 - perfect-information games
-- simulation package first
-- no arena/server code in the initial implementation
+- two built-in games: Connect 4 and Tic-Tac-Toe
+- pure simulation core, local match runner, runtime coordinator, UI adapter, terminal CLI, and local Ollama agents are complete
+- active roadmap (Phases 27 - 35) introduces remote play: WebSocket server (`arena.server`), reference Python SDK (`arena.sdk`), wire-envelope adapter (`arena.adapters.websocket`), per-turn deadlines, structured logging, and a public-internet acceptance demo
+- v2 deferrals (do not introduce in Phases 27 - 35): persistence beyond JSON files, real auth, web spectator UI, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, TypeScript SDK port, Anthropic-SDK-backed agent
 
-The first concrete game is Connect 4.
+The first concrete game is Connect 4. Tic-Tac-Toe is the second.
 
 **REMEMBER TO ACTIVATE THE VIRTUAL ENVIRONMENT `.venv` IN THE BASE ROOT BEFORE RUNNING ANY SCRIPT**
 
@@ -71,17 +73,28 @@ Allowed:
 - pure domain events
 - shared generic test contract
 
-Not allowed:
+Not allowed in `arena.core`, `arena.games`, `arena.match`, `arena.adapters.*`, `arena.runtime`, `arena.ui`, `arena.cli`, `arena.sdk`, or `arena.agents.*`:
 - FastAPI
-- WebSockets
+- WebSocket I/O (envelope types live in `arena.adapters.websocket` but it must not perform I/O)
 - DB access
 - matchmaking
 - auth
-- timeouts
+- timeouts / wall-clock deadlines (these live exclusively in `arena.server`)
 - stale-move handling
-- agent connection logic
+- agent connection logic embedded in simulation code
 - UI rendering logic
 - infrastructure concerns
+- module-load-scope `logging.getLogger(__name__)` calls (allowed only in `arena.server`)
+
+# Layer rules introduced by Phases 27 - 35
+
+- `arena.adapters.websocket` is a sibling adapter to `arena.adapters.in_process`. It contains only Pydantic envelope models and pure JSON encode/decode helpers. It must not import `websockets`, `aiohttp`, FastAPI, or perform any I/O.
+- `arena.server` is the only layer allowed to enforce per-turn deadlines, heartbeats, disconnect grace periods, and structured logging at module scope. It depends on `arena.runtime`, `arena.adapters.in_process`, `arena.adapters.websocket`, and `arena.ui`. Nothing else may import it.
+- `arena.sdk` is the reference Python client. It depends on `arena.core` (for game schemas) and `arena.adapters.websocket` (for envelope types). It must not import `arena.match`, `arena.adapters.in_process`, `arena.runtime`, `arena.ui`, `arena.cli`, or `arena.server`. It produces no log output by default.
+- `arena.cli` may consume `arena.sdk` so `python -m arena.cli.play --server-url ...` can drive remote sessions.
+- `docs/NETWORK_PROTOCOL.md` is the language-agnostic source of truth for the wire protocol. The Python SDK is a reference implementation, not the spec.
+- Match identity is an unguessable opaque token (`secrets.token_urlsafe(16)`, >=128 bits of entropy). In v1 there is no auth: possession of the `match_id` is the capability.
+- Wire format is JSON over WebSocket. Not configurable.
 
 # Error handling expectations
 
@@ -163,7 +176,7 @@ When uncertain, preserve:
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **AgentsArena** (1440 symbols, 4161 relationships, 89 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **AgentsArena** (2192 symbols, 6676 relationships, 162 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 

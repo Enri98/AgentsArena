@@ -1,18 +1,58 @@
-# Runtime / UI Contract Handoff
+# Match / Arena Handoff
 
-Use this note to start the next planning discussion after the runtime match/session baseline.
+Use this note to start the next planning discussion. Last updated for the Phase 27 entry into the remote-play roadmap.
 
 ## Current Baseline
 
-Implemented and verified:
+Implemented and verified through Phase 26:
 - `arena.core`: pure simulation abstractions, typed domain exceptions, serializers, registry, results, observations, and events
-- `arena.games.connect4`: complete deterministic perfect-information vertical slice
-- `arena.games.tictactoe`: second complete deterministic perfect-information vertical slice
+- `arena.games.connect4` and `arena.games.tictactoe`: complete deterministic perfect-information vertical slices
 - `arena.match`: immutable local match execution, turn records, snapshots, transcript dump/load/validation, and observation-based in-process policies
 - `arena.adapters.in_process`: pure serialized in-process adapter payload contract plus typed convenience adapter
-- `arena.runtime`: pure in-memory arena/session coordination with match ids, player records, lifecycle states, runtime events, abort metadata, runtime exceptions, local session start/step/run, wrapped runtime transcripts, and UI-ready session status payloads
+- `arena.runtime`: pure in-memory arena/session coordination, match ids, player records, lifecycle, runtime events (including `PolicyRetried`), abort metadata, wrapped transcripts, UI-ready status payloads
+- `arena.ui`: pure adapter producing deterministic screen-level payloads
+- `arena.cli`: terminal renderer, replay viewer, interactive driver supporting `human` / `scripted:` / `ollama:<model>` seats
+- `arena.agents.ollama`: stdlib HTTP client, generic `OllamaAgent` with retry-with-feedback, per-game prompt builders, typed exceptions, `probe_models` startup check
 
-No networking, persistence, subprocesses, timeouts, auth, matchmaking, concrete UI rendering, or remote-agent protocols have been added.
+No networking, server, SDK, persistence, real auth, web UI, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, Anthropic/OpenAI agents, or TypeScript SDK port have been added.
+
+## Active Phase: 27 - Network Protocol Design Checkpoint
+
+In flight:
+- `docs/NETWORK_PROTOCOL.md` is the language-agnostic source of truth for the wire protocol; first pass plus an adversarial-review revision are both shipped
+- `IMPLEMENTATION_PLAN.md` extended with Phases 27 - 35 covering protocol doc, `arena.adapters.websocket`, `arena.server` skeleton with `MatchRegistry`, `arena.sdk` reference Python client, Ollama-over-WS port, resilience (timeouts/heartbeats/reconnection), structured logging baseline, public deployment + acceptance demo, and the optional MCP wrapper
+- `CLAUDE.md` and `AGENTS.md` updated to reflect the new layer rules and v2 deferrals
+
+Adversarial-review revision (applied to the protocol doc):
+- full HTTP request/response shapes for `POST /matches`, `GET /matches/{id}`, `GET /games` in §4.1
+- new endpoint `GET /schemas/payloads` (§17) serving JSON Schema for every payload type so non-Python SDKs can codegen against a single source of truth
+- new §18 "Message broadcast matrix" disambiguating recipients per message type
+- `resume_token` scoped server-side to `(match_id, seat)` and rotated on every resume; mismatch closes `4401`
+- match creation locks `per_turn_deadline_ms`, `per_action_retry_budget`, `disconnect_grace_ms`; `welcome` echoes them
+- deterministic close ordering on retry-budget exhaustion: `action_rejected(0)` -> `match_state(aborted)` -> `match_aborted` -> WS close `1000`
+- atomicity rule for `running -> finished/aborted` transitions; "action arrives after terminal" rule
+- per-connection FIFO + per-`turn_id` retry-counter decrement semantics
+- per-match concurrent-connection cap (4) added to §13
+- explicit v1 assumption: protocol supports public-move perfect-information games only; private-information games require a v2 extension
+- "byte-identical replay" claim replaced with "logically equivalent state"
+
+The v1 acceptance demo is two local Ollama agents on the user's laptop both connecting to a publicly reachable `arena.server`, completing one clean Connect 4 match and one deliberate-abort scenario.
+
+## Locked Decisions for Phases 27 - 35
+
+- WebSocket only; JSON wire format; not configurable
+- per-turn deadlines live in `arena.server`; `arena.runtime` stays deadline-free
+- match identity uses `secrets.token_urlsafe(16)`; possession of the id is the only capability in v1
+- creator becomes seat 0; joiner becomes seat 1
+- `MatchRegistry` from day one; no single-hardcoded-match intermediate
+- SDK ships both `connect(...)` callback form and `Session` loop form so MCP layering does not require a redesign
+- SDK ships Connect 4 / Tic-Tac-Toe schemas directly; no handshake-time fetching
+- structured JSON logging only in `arena.server`; lower layers stay quiet
+- v2 deferrals: persistence beyond JSON files, real auth, web spectator UI, Prometheus, OpenTelemetry, lobby/matchmaking, TypeScript SDK port, Anthropic agent, third-party game registration
+
+## Next Entry Point
+
+Phase 28 — `arena.adapters.websocket` payload contract. Sibling to `arena.adapters.in_process`, pure typed envelopes, no I/O. See `IMPLEMENTATION_PLAN.md` Phase 28 for slice breakdown.
 
 ## Working Assumption
 

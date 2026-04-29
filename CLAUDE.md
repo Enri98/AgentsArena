@@ -1,8 +1,8 @@
 # AgentsArena — Project Context
 
-Python 3.11 library that will eventually power an agent-vs-agent arena. Current scope is a pure simulation + local runtime stack for sequential, deterministic, perfect-information games. No networking, persistence, subprocesses, timeouts, auth, matchmaking, remote agents, or UI rendering yet.
+Python 3.11 library powering an agent-vs-agent arena for sequential, deterministic, perfect-information games. The simulation core, local runtime, terminal CLI, and local Ollama agents are complete. The current roadmap (Phases 27 - 35) introduces remote play: a WebSocket server, a typed reference SDK, per-turn deadlines, structured logging, and a public-internet acceptance demo. Persistence beyond JSON files, real auth, web UI, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, and a TypeScript SDK port are explicitly v2 concerns.
 
-> Source of truth for plan + status: `IMPLEMENTATION_PLAN.md`. Working rules + style: `AGENTS.md`. Boundary contract for adapters: `docs/ADAPTER_BOUNDARIES.md`. Cross-session handoff: `docs/MATCH_ARENA_HANDOFF.md`.
+> Source of truth for plan + status: `IMPLEMENTATION_PLAN.md`. Working rules + style: `AGENTS.md`. Wire protocol: `docs/NETWORK_PROTOCOL.md`. Adapter boundaries: `docs/ADAPTER_BOUNDARIES.md`. Cross-session handoff: `docs/MATCH_ARENA_HANDOFF.md`.
 
 > **Activate `.venv` before running any script.** Verify with `.\.venv\Scripts\ruff.exe check .` and `.\.venv\Scripts\pytest.exe -q`.
 
@@ -13,28 +13,50 @@ Python 3.11 library that will eventually power an agent-vs-agent arena. Current 
 | Simulation core | `arena.core` | Types, seats, exceptions, events, actions, observations, results, config, `GameDefinition`, `RulesEngine`, `Serializer`, `Registry`. Pure, immutable, no I/O. |
 | Games | `arena.games.connect4`, `arena.games.tictactoe` | Concrete game vertical slices (config, state, action, observation, events, rules, serializer, definition). Both registered via `build_default_registry()`. |
 | Local match | `arena.match` | `LocalMatch`, `TurnRecord`, `start_match` / `apply_match_action`, transcript dump/load/validate, in-process `Policy` protocol, `run_local_match`. Per-match isolated rules engine copy. |
-| Adapters | `arena.adapters.in_process` | Serialized payload contract: `ObservationRequestPayload`, `ActionResponsePayload`, domain-error payloads, `apply_payload_policy_turn`, `TypedPayloadPolicyAdapter` + `InProcessAgent` for typed local agents. |
-| Runtime | `arena.runtime` | Pure in-memory `Arena` coordinator, `MatchSession`, opaque `MatchId`, `PlayerRecord`, lifecycle (`created`/`running`/`finished`/`aborted`), runtime events, abort metadata, runtime exceptions, JSON-safe `dump_session_status` / `dump_runtime_transcript` (both pinned `schema_version=1`), `format_runtime_session_report`. |
+| In-process adapter | `arena.adapters.in_process` | Serialized payload contract: `ObservationRequestPayload`, `ActionResponsePayload`, domain-error payloads, `apply_payload_policy_turn`, `TypedPayloadPolicyAdapter` + `InProcessAgent` for typed local agents. |
+| WebSocket adapter | `arena.adapters.websocket` *(planned, Phase 28)* | Pure typed wire-envelope contract for WebSocket transport. Pydantic envelope models, message-type discriminated unions, JSON encode/decode helpers. No I/O. Reuses `arena.adapters.in_process` payload bodies verbatim. |
+| Runtime | `arena.runtime` | Pure in-memory `Arena` coordinator, `MatchSession`, opaque `MatchId`, `PlayerRecord`, lifecycle (`created`/`running`/`finished`/`aborted`), runtime events, abort metadata, runtime exceptions, JSON-safe `dump_session_status` / `dump_runtime_transcript` (both pinned `schema_version=1`), `format_runtime_session_report`. **Stays deadline-free.** |
 | UI adapter | `arena.ui` | Pure adapter over runtime payloads. `build_match_status`, `build_match_transcript`, `build_match_screen`. Reshapes envelopes into screen-level payloads, exposes `state_payload` from snapshots without recomputing rules. |
+| CLI | `arena.cli` | Terminal renderer, `python -m arena.cli` replay viewer, `python -m arena.cli.play` interactive driver supporting `human`, `scripted:`, and `ollama:<model>` seats. May depend on `arena.sdk` for `--server-url` remote play. |
+| Local agents | `arena.agents.ollama` | Stdlib HTTP client, generic `OllamaAgent` with retry-with-feedback, per-game prompt builders, typed exceptions, `probe_models`. Surfaces retries via the `PolicyRetried` runtime event. |
+| Server | `arena.server` *(planned, Phase 29+)* | Single-process FastAPI + WebSocket server. `MatchRegistry`, `POST /matches`, `GET /games`, `WS /matches/{id}/play`. Owns per-turn deadlines, heartbeats, disconnect grace, structured JSON logging. The **only** layer allowed to instantiate logging at module scope. |
+| SDK | `arena.sdk` *(planned, Phase 30+)* | Reference Python client for `arena.server`. Both `connect(url, seat, choose=...)` callback form and `Session` loop form. Ships Connect 4 / Tic-Tac-Toe schemas. Includes `LocalSession` test helper. Stays silent (no log output) by default. |
 
-Dependency direction is enforced by architecture tests: `core`/`games` import none of the upper layers; `match` cannot import adapters/runtime/ui; adapters cannot import runtime/ui; runtime cannot import ui.
+Dependency direction is enforced by architecture tests: `core`/`games` import none of the upper layers; `match` cannot import adapters/runtime/ui; `adapters.in_process` cannot import runtime/ui; `adapters.websocket` may import only `arena.core` and `arena.adapters.in_process` payload models; runtime cannot import ui; nothing below `arena.server` may import `arena.server`; nothing below `arena.sdk` may import `arena.sdk`; `arena.sdk` must not import `arena.match`, `arena.adapters.in_process`, `arena.runtime`, `arena.ui`, `arena.cli`, or `arena.server`.
 
 ## Implementation status
 
-Completed phases (per `IMPLEMENTATION_PLAN.md`): 0–10 simulation baseline, 11 local match, 12 transcripts, 13 in-process policy protocol, 14 checkpoint, 15 Tic-Tac-Toe, 16 README examples, 17 adapter boundary doc, 18 serialized in-process adapter, 19 typed payload adapter, 20 runtime baseline (Slices 1–4), 21 runtime/UI contract stabilization (Slice 1), 22 human-readable formatting helpers, 23 UI adapter boundary.
+Completed phases (per `IMPLEMENTATION_PLAN.md`): 0–10 simulation baseline, 11 local match, 12 transcripts, 13 in-process policy protocol, 14 checkpoint, 15 Tic-Tac-Toe, 16 README examples, 17 adapter boundary doc, 18 serialized in-process adapter, 19 typed payload adapter, 20 runtime baseline, 21 runtime/UI contract stabilization, 22 human-readable formatting helpers, 23 UI adapter boundary, 24 terminal replay viewer, 25 live human play, 26 local Ollama agents.
 
-Most recent commits track Phase 23 (`arena.ui` adapter) and Phase 22 (formatting helpers) on top of the runtime payload contract. The plan's "post-baseline roadmap" continues with future UI/transport/persistence phases — none implemented.
+Active phase: **Phase 27 — Network protocol design checkpoint** (this update). Following: Phases 28-35 implement the WebSocket adapter, server with `MatchRegistry`, reference Python SDK, Ollama-over-WS port, resilience (timeouts/heartbeats/reconnect), structured logging, public deployment + acceptance demo, and the optional MCP wrapper.
 
 ## Core design rules (do not violate)
 
 - Frozen dataclasses for in-memory domain state/actions; Pydantic v2 for config + boundary payloads + JSON Schema.
-- Integer seat ids inside the simulation core. Player names/labels live in runtime/UI layers.
+- Integer seat ids inside the simulation core. Player names/labels live in runtime/UI/server layers.
 - Store only minimum authoritative state; derive legality, terminal, winners on demand.
 - `apply_action(...)` revalidates legality defensively; raises typed domain exceptions (`WrongPlayer`, `IllegalAction`, `GameFinished`, `InvalidConfig`, ...).
 - Serialize only at boundaries via dedicated `Serializer`; every accepted move yields a full post-move snapshot, and snapshots must rehydrate.
 - Runtime aborts wrap non-result failures while preserving the original `ArenaCoreError` as cause.
 - Runtime payload `schema_version` is fixed at `1`; any incompatible change must bump it explicitly.
+- **Per-turn deadlines and wall-clock timeouts live exclusively in `arena.server`. `arena.runtime` stays deadline-free.** Server-enforced expiry produces an existing-style runtime abort with reason `turn_deadline_expired`.
+- **Match identity is an unguessable opaque token** (`secrets.token_urlsafe(16)`, >=128 bits of entropy). In v1 there is no auth: possession of the `match_id` is the capability.
+- **Structured logging at module-load scope is allowed only in `arena.server`.** Lower layers may use `logging` lazily inside functions when explicitly opted in. The SDK stays silent by default.
+- **`docs/NETWORK_PROTOCOL.md` is the language-agnostic source of truth for the wire protocol.** The Python SDK is a reference implementation, not the spec.
+- The wire format is JSON over WebSocket; this is not configurable.
 - Architecture/import-boundary tests are load-bearing — do not introduce upward imports.
+
+## Deferred to v2 (do not introduce in Phases 27 - 35)
+
+- Transcript persistence beyond JSON files written by `examples/`
+- Real authentication, tokens, or accounts
+- Web spectator UI (URL shape `WS /matches/{id}/spectate` reserved; closes with `4404` until v2)
+- Lobby, matchmaking, tournaments
+- Prometheus metrics endpoint
+- OpenTelemetry tracing
+- TypeScript SDK port
+- Anthropic-SDK-backed agent
+- Third-party game registration
 
 ## Working workflow
 
@@ -42,12 +64,12 @@ Most recent commits track Phase 23 (`arena.ui` adapter) and Phase 22 (formatting
 2. Implement the smallest coherent change; add/update focused unit tests near the code.
 3. Run ruff + pytest from the venv.
 4. Update the plan's slice status + handoff docs when a slice completes.
-5. Do not skip ahead, do not refactor unrelated modules, do not introduce deferred infrastructure (transport, persistence, subprocesses, deadlines, auth, matchmaking, UI rendering, remote agents).
+5. Do not skip ahead, do not refactor unrelated modules, do not introduce v2-deferred infrastructure (see list above).
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **AgentsArena** (1440 symbols, 4161 relationships, 89 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **AgentsArena** (2192 symbols, 6676 relationships, 162 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
