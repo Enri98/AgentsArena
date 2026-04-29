@@ -2891,6 +2891,8 @@ Acceptance criteria:
 
 ### Phase 28 - `arena.adapters.websocket` payload contract
 
+Status: Slice 1 complete — envelope models, discriminated union, codec, and full test suite shipped; all acceptance criteria met; ruff + pytest pass.
+
 Objective:
 - add the typed wire-envelope contract as a sibling adapter to `arena.adapters.in_process`, without introducing any I/O, server, or client code
 
@@ -2914,6 +2916,8 @@ Acceptance criteria:
 
 #### Slice 1 - Envelope models and discriminated union
 
+Status: complete.
+
 Scope:
 - envelope base model with the fields documented in protocol §6
 - one Pydantic model per message type from §8
@@ -2927,6 +2931,8 @@ Acceptance criteria:
 - binary input to `loads` raises a clean typed error
 
 ### Phase 29 - `arena.server` skeleton with `MatchRegistry`
+
+Status: Complete. Slice 1 shipped HTTP surface, `MatchRegistry`, and `create_app`. Slice 2 shipped the WebSocket play handler, runtime bridge, and 10 focused unit tests. Slice 3 shipped real-TCP integration tests (ephemeral-port uvicorn fixture + async WS client helper): Connect 4 happy path, Tic-Tac-Toe happy path, and malformed-envelope protocol test. All 541 tests pass; ruff clean.
 
 Objective:
 - ship the smallest WebSocket server that can host a Connect 4 or Tic-Tac-Toe match between two scripted Clients end-to-end, with `MatchRegistry` and `POST /matches` from day one
@@ -2956,6 +2962,8 @@ Acceptance criteria:
 
 #### Slice 1 - HTTP surface and `MatchRegistry`
 
+Status: complete.
+
 Scope:
 - `MatchRegistry` holding `Match` records keyed by id; `Match` owns its `Arena` session, its registered `GameDefinition`, its current connections, and its lifecycle
 - HTTP routes: `POST /matches`, `GET /matches/{id}`, `GET /games`
@@ -2970,6 +2978,8 @@ Acceptance criteria:
 
 #### Slice 2 - WebSocket play handler
 
+Status: complete.
+
 Scope:
 - `WS /matches/{id}/play?seat=N` handler implementing the `hello` -> `welcome` handshake, the per-turn `observation_request` -> `action_response` loop, and the terminal `match_finished` / `match_aborted` messages
 - runtime bridge that pulls observations from the session's bound `Arena.step_session(...)` and pushes them as envelopes; routes `action_response` back through `apply_payload_policy_turn(...)`
@@ -2980,6 +2990,8 @@ Acceptance criteria:
 - close codes match the protocol doc on every documented failure path
 
 #### Slice 3 - Integration test infrastructure
+
+Status: complete.
 
 Scope:
 - pytest fixture for an ephemeral-port server lifecycle (start, yield base URL, stop)

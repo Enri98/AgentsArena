@@ -13,9 +13,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+server = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.11",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "httpx>=0.27",
+    "websockets>=12",
 ]
 
 [tool.setuptools]
