@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import urllib.request
 from typing import Any
 
 from arena.cli.games import connect4 as _c4_renderer
@@ -144,6 +146,119 @@ def _build_ollama_agent(
     )
 
 
+def _ws_to_http(ws_url: str) -> str:
+    """Convert a WebSocket base URL to its HTTP equivalent for REST calls."""
+    if ws_url.startswith("wss://"):
+        return "https://" + ws_url[len("wss://"):]
+    if ws_url.startswith("ws://"):
+        return "http://" + ws_url[len("ws://"):]
+    return ws_url
+
+
+def _create_remote_match(http_base: str, game_id: str, config_dict: dict, players: list) -> dict:
+    """POST /matches and return the parsed response body."""
+    body = json.dumps(
+        {"game_id": game_id, "game_config": config_dict, "players": players}
+    ).encode()
+    req = urllib.request.Request(
+        f"{http_base}/matches",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req) as resp:  # noqa: S310
+        return json.loads(resp.read())
+
+
+def _raw_agent_choose(raw_agent: Any, definition: Any) -> Any:
+    """Build a choose() callable from a typed agent or raise for unsupported specs."""
+    from arena.cli.remote import make_typed_agent_choose
+
+    return make_typed_agent_choose(raw_agent, definition)
+
+
+def _run_remote(
+    *,
+    args: Any,
+    definition: Any,
+    config: Any,
+    raw_policy0: Any,
+    raw_policy1: Any,
+    player0: PlayerRecord,
+    player1: PlayerRecord,
+) -> int:
+    """Create a match on arena.server and connect all seats remotely."""
+    for seat, spec, policy in [(0, args.seat_0, raw_policy0), (1, args.seat_1, raw_policy1)]:
+        if spec == "human":
+            sys.stderr.write(
+                f"Error: seat {seat} is 'human' but --server-url is set. "
+                "Human play is not supported in remote mode.\n"
+            )
+            return 2
+        if policy is None:
+            sys.stderr.write(
+                f"Error: seat {seat} produced no policy for remote mode.\n"
+            )
+            return 2
+
+    http_base = _ws_to_http(args.server_url.rstrip("/"))
+
+    config_dict = config.model_dump(mode="json") if hasattr(config, "model_dump") else {}
+
+    players = [
+        {"label": player0.label},
+        {"label": player1.label},
+    ]
+
+    try:
+        match_info = _create_remote_match(http_base, args.game, config_dict, players)
+    except Exception as exc:
+        sys.stderr.write(f"Error: failed to create remote match: {exc}\n")
+        return 2
+
+    seat_0_url = match_info["seat_0_url"]
+    seat_1_url = match_info["seat_1_url"]
+    match_id = match_info["match_id"]
+
+    sys.stdout.write(f"Remote match created: {match_id}\n")
+    sys.stdout.write(f"  seat 0: {seat_0_url}\n")
+    sys.stdout.write(f"  seat 1: {seat_1_url}\n")
+    sys.stdout.flush()
+
+    from arena.cli.remote import run_remote_seats_sync
+
+    choose0 = _raw_agent_choose(raw_policy0, definition)
+    choose1 = _raw_agent_choose(raw_policy1, definition)
+
+    try:
+        results = run_remote_seats_sync(
+            [seat_0_url, seat_1_url],
+            [choose0, choose1],
+        )
+    except Exception as exc:
+        sys.stderr.write(f"Error: remote match failed: {exc}\n")
+        return 1
+
+    (result0, transcript0), (result1, transcript1) = results
+
+    import os
+
+    out_path = args.out_dir
+    os.makedirs(out_path, exist_ok=True)
+
+    transcript_data = (
+        transcript0.model_dump(mode="json") if hasattr(transcript0, "model_dump") else {}
+    )
+    with open(os.path.join(out_path, "transcript.json"), "w", encoding="utf-8") as f:
+        json.dump(transcript_data, f, indent=2)
+
+    lifecycle = getattr(transcript0, "lifecycle", None)
+    sys.stdout.write(f"Match finished. Lifecycle: {lifecycle}\n")
+    sys.stdout.flush()
+
+    return 0 if lifecycle == "finished" else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m arena.cli.play")
     parser.add_argument("--game", choices=["connect4", "tictactoe"], required=True)
@@ -173,6 +288,16 @@ def main(argv: list[str] | None = None) -> int:
         default=300.0,
         dest="ollama_timeout",
         help="Per-request HTTP timeout in seconds (raise this for slow cold starts).",
+    )
+    parser.add_argument(
+        "--server-url",
+        default=None,
+        dest="server_url",
+        help=(
+            "WebSocket base URL of a running arena.server, e.g. ws://127.0.0.1:8080. "
+            "When present all seats connect to the remote server instead of running "
+            "in-process. Ollama probe is still performed locally before connecting."
+        ),
     )
     args = parser.parse_args(argv)
 
@@ -231,6 +356,17 @@ def main(argv: list[str] | None = None) -> int:
         except OllamaModelMissingError as exc:
             sys.stderr.write(f"Error: {exc}\n")
             return 2
+
+    if args.server_url:
+        return _run_remote(
+            args=args,
+            definition=definition,
+            config=config,
+            raw_policy0=raw_policy0,
+            raw_policy1=raw_policy1,
+            player0=player0,
+            player1=player1,
+        )
 
     from arena.adapters.in_process import TypedPayloadPolicyAdapter
 

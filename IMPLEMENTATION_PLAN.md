@@ -3040,7 +3040,7 @@ Scope:
 Scope:
 - one test that spawns the Phase 29 server, calls `arena.sdk.connect(...)` from two scripted Clients, completes a Connect 4 match, and validates the transcript
 
-### Phase 31 - Ollama-over-WS port and CLI `--server-url`
+### Phase 31 - Ollama-over-WS port and CLI `--server-url` ✅ COMPLETE
 
 Objective:
 - prove the SDK abstraction is right by running the existing `OllamaAgent` over the wire with zero changes to the prompt/parse code, and let `python -m arena.cli.play` connect to a remote server
