@@ -5,7 +5,7 @@ from __future__ import annotations
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from arena.core.exceptions import ArenaCoreError
@@ -31,6 +31,9 @@ class Match:
     per_action_retry_budget: int
     disconnect_grace_ms: int
     created_at: float
+    # Phase 32: resume tokens rotated on every welcome/reconnect.
+    # seat → current valid token; set by send_welcome before being sent to the client.
+    resume_tokens: dict[int, str] = field(default_factory=dict)
 
 
 class MatchRegistry:

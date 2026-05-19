@@ -3063,6 +3063,8 @@ Acceptance criteria:
 
 ### Phase 32 - Resilience: timeouts, aborts, reconnection
 
+Status: ✅ COMPLETE
+
 Objective:
 - make the server survive the failure modes that appear once real network and real LLMs are in the loop, without leaking any deadline logic into `arena.runtime`
 
@@ -3082,16 +3084,22 @@ Out of scope:
 - persistence across server restarts (a stale `resume_token` correctly returns `4410`)
 
 Acceptance criteria:
-- the conformance test suite from protocol §15 passes for the server
-- `arena.runtime` source still contains no deadline logic; deadline enforcement lives entirely in `arena.server`
-- the SDK exposes a documented reconnection path; the integration test reconnects mid-match and finishes successfully
-- ruff + pytest pass
+- the conformance test suite from protocol §15 passes for the server ✅
+- `arena.runtime` source still contains no deadline logic; deadline enforcement lives entirely in `arena.server` ✅
+- the SDK exposes a documented reconnection path; the integration test reconnects mid-match and finishes successfully ✅
+- ruff + pytest pass ✅
 
 #### Slice 1 - Per-turn deadline and timeout abort
 
+Status: complete.
+
 #### Slice 2 - Disconnect grace and resume protocol
 
+Status: complete.
+
 #### Slice 3 - Heartbeats and idempotency
+
+Status: complete.
 
 ### Phase 33 - Server observability baseline (structured logging)
 

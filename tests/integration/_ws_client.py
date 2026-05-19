@@ -129,6 +129,18 @@ async def play_scripted(
             await send_envelope(ws, action_resp)
             continue
 
+        if env.type == "ping":
+            from arena.adapters.websocket.envelope import PongEnvelope
+            from arena.adapters.websocket.messages import PongBody
+
+            pong = PongEnvelope(
+                schema_version=1,
+                match_id=getattr(env, "match_id", None),
+                payload=PongBody(nonce=env.payload.nonce),  # type: ignore[union-attr]
+            )
+            await send_envelope(ws, pong)
+            continue
+
         if env.type == "error":
             raise RuntimeError(
                 f"Server sent error envelope: {env.payload}"  # type: ignore[union-attr]

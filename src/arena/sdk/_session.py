@@ -162,6 +162,26 @@ class Session:
             reason = exc.rcvd.reason if exc.rcvd else "connection closed"
             raise close_code_to_error(code, reason) from exc
 
+    @classmethod
+    async def reconnect(
+        cls,
+        url: str,
+        seat: int,
+        resume_token: str,
+    ) -> "Session":
+        """Reconnect to a match using a resume_token from a prior session.
+
+        Sends a hello envelope that includes the resume_token, triggering the
+        server's reconnect path (§8 of NETWORK_PROTOCOL.md).  On success the
+        server rotates the token and delivers a fresh welcome with a new
+        resume_token that the caller should store for future reconnects.
+
+        Raises:
+            HandshakeError: if welcome is not received or seat mismatch.
+            ProtocolError subclass: on WS close with a 4xxx code.
+        """
+        return await cls.connect(url, seat, resume_token=resume_token)
+
     async def close(self) -> None:
         await self._ws.close()
 

@@ -55,6 +55,12 @@ class AbortReason(StrEnum):
     CANCELLED = "cancelled"
     USER_QUIT = "user_quit"
     USER_INTERRUPT = "user_interrupt"
+    # Network / server-enforced abort reasons (Phase 32).
+    # Deadline logic lives exclusively in arena.server; these values are the
+    # stable string codes that arena.runtime uses to record why a session ended.
+    TURN_DEADLINE_EXPIRED = "turn_deadline_expired"
+    PEER_DISCONNECTED = "peer_disconnected"
+    HEARTBEAT_TIMEOUT = "heartbeat_timeout"
 
 
 @dataclass(frozen=True)
