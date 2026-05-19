@@ -13,3 +13,7 @@ MAX_DISCONNECT_GRACE_MS: int = 600000
 
 GAME_SCHEMA_VERSION: int = 1
 WIRE_SCHEMA_VERSION: int = 1
+
+# Heartbeat defaults (Phase 32).  arena.server owns all deadline/heartbeat logic.
+HEARTBEAT_INTERVAL_MS: int = 20_000
+HEARTBEAT_MAX_MISSES: int = 2

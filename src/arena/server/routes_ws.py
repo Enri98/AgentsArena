@@ -12,11 +12,18 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket
 
-from arena.adapters.websocket import WIRE_SCHEMA_VERSION, loads
+from arena.adapters.websocket import WIRE_SCHEMA_VERSION, MatchStateEnvelope, dumps, loads
 from arena.adapters.websocket.errors import SchemaVersionMismatch, WireProtocolError
+from arena.server.config import HEARTBEAT_MAX_MISSES
 from arena.server.errors import MatchNotFound
 from arena.server.registry import Match, MatchRegistry
-from arena.server.runtime_bridge import SeatConnection, run_match, send_welcome
+from arena.server.runtime_bridge import (
+    SeatConnection,
+    _get_reconnect_conns,
+    _get_reconnect_events,
+    run_match,
+    send_welcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +119,12 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         return
 
     hello = envelope.payload
+    app_state = ws.app.state
+
+    # 4a. Phase 32: check for reconnect (resume_token present in hello).
+    if hello.resume_token is not None:
+        await _handle_reconnect(ws, seat, match_id, match, hello.resume_token, app_state)
+        return
 
     # 5. Validate requested_seat matches the URL ?seat= param.
     if hello.requested_seat != seat:
@@ -124,7 +137,6 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         return
 
     # 7. Check seat occupancy.
-    app_state = ws.app.state
     seat_slots = _get_seat_slots(app_state)
     if match_id not in seat_slots:
         seat_slots[match_id] = {0: None, 1: None}
@@ -147,7 +159,7 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
 
     logger.debug("Seat %d joined match %s", seat, match_id)
 
-    # 9. Wait until both seats are connected; idle seat drains receives to detect disconnect.
+    # 9. Initialise per-match ready / done / reconnect event dicts.
     ready_events = _get_ready_events(app_state)
     if match_id not in ready_events:
         ready_events[match_id] = asyncio.Event()
@@ -157,6 +169,10 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
     if match_id not in done_events:
         done_events[match_id] = asyncio.Event()
     done_event = done_events[match_id]
+
+    # Phase 32: pre-create reconnect event for this seat so run_match can find it.
+    reconnect_events = _get_reconnect_events(app_state)
+    reconnect_events.setdefault(match_id, {})[seat] = asyncio.Event()
 
     other_seat = 1 - seat
     if seat_slots[match_id].get(other_seat) is not None:
@@ -194,7 +210,16 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         assert conn0 is not None
         assert conn1 is not None
         try:
-            await run_match(match, (conn0, conn1))
+            await run_match(
+                match,
+                (conn0, conn1),
+                done_event=done_event,
+                app_state=app_state,
+                heartbeat_interval_s=app_state.heartbeat_interval_ms / 1000.0,
+                heartbeat_max_misses=getattr(
+                    app_state, "heartbeat_max_misses", HEARTBEAT_MAX_MISSES
+                ),
+            )
         except Exception as exc:
             logger.exception("run_match error for match %s: %s", match_id, exc)
         finally:
@@ -209,6 +234,72 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
             pass
         finally:
             seat_slots[match_id][seat] = None
+
+
+# ---------------------------------------------------------------------------
+# Reconnect handler (Phase 32)
+# ---------------------------------------------------------------------------
+
+
+async def _handle_reconnect(
+    ws: WebSocket,
+    seat: int,
+    match_id: str,
+    match: Match,
+    resume_token: str,
+    app_state: Any,
+) -> None:
+    """Handle a reconnecting client presenting a valid resume_token."""
+
+    # Validate token.
+    expected = match.resume_tokens.get(seat)
+    if expected is None or expected != resume_token:
+        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "invalid_resume_token")
+        return
+
+    # Build new SeatConnection and send welcome.
+    # send_welcome rotates the resume_token in match.resume_tokens[seat] atomically.
+    new_conn = SeatConnection(websocket=ws, seat=seat)
+    try:
+        await send_welcome(new_conn, match)
+    except Exception:
+        await _close(ws, _CLOSE_SERVER_ERROR, "server_error")
+        return
+
+    # Send current match_state so the client knows the lifecycle.
+    from arena.server.runtime_bridge import _build_match_state_body
+
+    state_body = _build_match_state_body(match.session)
+    state_env = MatchStateEnvelope(
+        schema_version=WIRE_SCHEMA_VERSION,
+        match_id=match_id,
+        payload=state_body,
+    )
+    try:
+        await ws.send_text(dumps(state_env))
+    except Exception:
+        pass
+
+    # Register new connection so run_match can pick it up.
+    reconnect_conns = _get_reconnect_conns(app_state)
+    reconnect_conns.setdefault(match_id, {})[seat] = new_conn
+
+    # Signal run_match that the seat has reconnected.
+    reconnect_events = _get_reconnect_events(app_state)
+    event = reconnect_events.get(match_id, {}).get(seat)
+    if event:
+        event.set()
+
+    logger.debug("Seat %d reconnected to match %s", seat, match_id)
+
+    # Wait until the match finishes before letting this handler return.
+    done_events = _get_done_events(app_state)
+    done_event = done_events.get(match_id)
+    if done_event:
+        try:
+            await done_event.wait()
+        except Exception:
+            pass
 
 
 async def _safe_receive_text(ws: WebSocket) -> str | None:
