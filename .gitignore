@@ -6,3 +6,6 @@ __pycache__/
 # IMPLEMENTATION_PLAN.md
 .gitnexus
 out/
+.claude/
+.codex/
+ignored/
