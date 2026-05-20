@@ -11,10 +11,12 @@ def register_builtin_games(registry: GameRegistry) -> None:
     """Register the built-in game set in a supplied registry."""
 
     from arena.games.connect4.definition import register_connect4
+    from arena.games.nim.definition import register_nim
     from arena.games.tictactoe.definition import register_tictactoe
 
     register_connect4(registry)
     register_tictactoe(registry)
+    register_nim(registry)
 
 
 def build_default_registry() -> GameRegistry:
@@ -28,6 +30,7 @@ def build_default_registry() -> GameRegistry:
 __all__: Sequence[str] = [
     "build_default_registry",
     "connect4",
+    "nim",
     "tictactoe",
     "register_builtin_games",
 ]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -24,6 +25,7 @@ from arena.server.payload_schemas import get_payload_schemas
 from arena.server.registry import MatchRegistry
 
 router = APIRouter()
+logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +123,14 @@ async def create_match_handler(request: Request) -> JSONResponse:
         return _error_response(400, exc.error_code, exc.message, details=details)
     except Exception as exc:
         return _error_response(500, "server_error", str(exc))
+
+    logger.info(
+        "match_created",
+        match_id=match.match_id,
+        seat=None,
+        schema_version=1,
+        game_id=match.game_id,
+    )
 
     host = request.headers.get("host", "localhost")
     seat_0_url = f"ws://{host}/matches/{match.match_id}/play?seat=0"

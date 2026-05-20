@@ -27,12 +27,13 @@ Phase 32 features implemented here:
 from __future__ import annotations
 
 import asyncio
-import logging
 import secrets as _secrets
 import uuid
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 from arena.adapters.in_process import (
     ActionResponsePayload,
@@ -89,7 +90,7 @@ if TYPE_CHECKING:
 
     from arena.server.registry import Match
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 WS_CLOSE_NORMAL = 1000
 HEARTBEAT_CLOSE_CODE = 4408
@@ -172,7 +173,7 @@ async def _send(conn: SeatConnection, envelope: Any) -> None:
         try:
             await conn.websocket.send_text(text)
         except Exception as exc:
-            logger.debug("send to seat %d failed: %s", conn.seat, exc)
+            logger.debug("send_failed", seat=conn.seat, error=str(exc))
 
 
 async def _send_to_ws(ws: "WebSocket", envelope: Any) -> None:
@@ -181,7 +182,7 @@ async def _send_to_ws(ws: "WebSocket", envelope: Any) -> None:
     try:
         await ws.send_text(text)
     except Exception as exc:
-        logger.debug("send_to_ws failed: %s", exc)
+        logger.debug("send_to_ws_failed", error=str(exc))
 
 
 async def _broadcast(conns: tuple[SeatConnection, SeatConnection], envelope: Any) -> None:
@@ -199,7 +200,7 @@ async def _broadcast(conns: tuple[SeatConnection, SeatConnection], envelope: Any
             try:
                 await conn.websocket.send_text(text)
             except Exception as exc:
-                logger.debug("broadcast to seat %d failed: %s", conn.seat, exc)
+                logger.debug("broadcast_failed", seat=conn.seat, error=str(exc))
 
 
 async def _broadcast_match_state(
@@ -472,7 +473,7 @@ async def _receive_action(
         turn_id = envelope.turn_id or str(uuid.uuid4())
 
         if turn_id in committed_turn_ids or turn_id in rejected_turn_ids:
-            logger.debug("Dropped duplicate turn_id %s for match %s", turn_id, match_id)
+            logger.debug("duplicate_turn_id_dropped", turn_id=turn_id, match_id=match_id)
             continue
 
         return turn_id, envelope.payload.action_response, None
@@ -552,6 +553,13 @@ async def run_match(
 
     session = arena.start_session(session)
     match.session = session
+    logger.info(
+        "match_started",
+        match_id=session.match_id,
+        seat=None,
+        schema_version=1,
+        game_id=match.game_id,
+    )
 
     # One heartbeat task at a time — only for the ACTIVE seat during its turn.
     # Off-turn seats are not pinged: their disconnect is detected when their turn arrives.
@@ -644,6 +652,12 @@ async def run_match(
                 # --- Per-turn deadline expired ---
                 if error_msg == _DEADLINE_EXPIRED:
                     _cancel_task(deadline_timer_task)
+                    logger.warning(
+                        "turn_deadline_expired",
+                        match_id=session.match_id,
+                        seat=active_seat,
+                        schema_version=1,
+                    )
                     session = arena.abort_session(
                         session,
                         reason=AbortReason.TURN_DEADLINE_EXPIRED,
@@ -652,6 +666,13 @@ async def run_match(
                     match.session = session
                     await _broadcast_match_state(conns, session)
                     await _broadcast_match_aborted(conns, session)
+                    logger.info(
+                        "match_aborted",
+                        match_id=session.match_id,
+                        seat=active_seat,
+                        schema_version=1,
+                        reason="turn_deadline_expired",
+                    )
                     await _close_both(conns, WS_CLOSE_NORMAL, "turn_deadline_expired")
                     return
 
@@ -661,6 +682,12 @@ async def run_match(
                         # Heartbeat loop already closed the active seat's WS with 4408.
                         _cancel_task(deadline_timer_task)
                         await _cancel_hb()
+                        logger.warning(
+                            "heartbeat_timeout",
+                            match_id=session.match_id,
+                            seat=active_seat,
+                            schema_version=1,
+                        )
                         session = arena.abort_session(
                             session,
                             reason=AbortReason.HEARTBEAT_TIMEOUT,
@@ -669,6 +696,13 @@ async def run_match(
                         match.session = session
                         await _broadcast_match_state(conns, session)
                         await _broadcast_match_aborted(conns, session)
+                        logger.info(
+                            "match_aborted",
+                            match_id=session.match_id,
+                            seat=active_seat,
+                            schema_version=1,
+                            reason="heartbeat_timeout",
+                        )
                         await _close_both(conns, WS_CLOSE_NORMAL, "heartbeat_timeout")
                         return
 
@@ -682,6 +716,14 @@ async def run_match(
                     reconnect_event = (
                         reconnect_events.get(match.match_id, {}).get(active_seat)
                     )
+                    logger.info(
+                        "seat_disconnected",
+                        match_id=match.match_id,
+                        seat=active_seat,
+                        schema_version=1,
+                        grace_ms=match.disconnect_grace_ms,
+                    )
+
                     if reconnect_event is None:
                         # No event registered (shouldn't happen); abort immediately.
                         session = arena.abort_session(
@@ -692,15 +734,23 @@ async def run_match(
                         match.session = session
                         await _broadcast_match_state(conns, session)
                         await _broadcast_match_aborted(conns, session)
+                        logger.info(
+                            "match_aborted",
+                            match_id=session.match_id,
+                            seat=active_seat,
+                            schema_version=1,
+                            reason="peer_disconnected",
+                        )
                         await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
                     reconnect_event.clear()
                     logger.debug(
-                        "Seat %d disconnected from match %s; waiting %.1fs for reconnect",
-                        active_seat,
-                        match.match_id,
-                        grace_s,
+                        "seat_disconnected_awaiting_reconnect",
+                        match_id=match.match_id,
+                        seat=active_seat,
+                        grace_s=grace_s,
+                        schema_version=1,
                     )
                     try:
                         await asyncio.wait_for(reconnect_event.wait(), timeout=grace_s)
@@ -713,6 +763,13 @@ async def run_match(
                         match.session = session
                         await _broadcast_match_state(conns, session)
                         await _broadcast_match_aborted(conns, session)
+                        logger.info(
+                            "match_aborted",
+                            match_id=session.match_id,
+                            seat=active_seat,
+                            schema_version=1,
+                            reason="peer_disconnected_grace_expired",
+                        )
                         await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
@@ -731,6 +788,13 @@ async def run_match(
                         match.session = session
                         await _broadcast_match_state(conns, session)
                         await _broadcast_match_aborted(conns, session)
+                        logger.info(
+                            "match_aborted",
+                            match_id=session.match_id,
+                            seat=active_seat,
+                            schema_version=1,
+                            reason="peer_disconnected_no_conn",
+                        )
                         await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
@@ -755,6 +819,13 @@ async def run_match(
 
                 # --- Non-fatal parse/protocol error ---
                 if error_msg is not None:
+                    logger.warning(
+                        "protocol_violation",
+                        match_id=session.match_id,
+                        seat=active_seat,
+                        schema_version=1,
+                        detail=error_msg,
+                    )
                     err_env = ErrorEnvelope(
                         schema_version=WIRE_SCHEMA_VERSION,
                         match_id=session.match_id,
@@ -777,6 +848,15 @@ async def run_match(
                 except ArenaCoreError as exc:
                     domain_err = dump_domain_error(exc)
                     rejected_turn_ids.add(turn_id)
+                    logger.warning(
+                        "action_rejected",
+                        match_id=session.match_id,
+                        seat=active_seat,
+                        schema_version=1,
+                        turn_id=turn_id,
+                        error_code=domain_err.code,
+                        retries_remaining=retries_left - 1 if retries_left > 0 else 0,
+                    )
 
                     if retries_left == 0:
                         # §8.6: rejected(0) → match_state(aborted) → match_aborted → close
@@ -792,6 +872,13 @@ async def run_match(
                         match.session = session
                         await _broadcast_match_state(conns, session)
                         await _broadcast_match_aborted(conns, session)
+                        logger.info(
+                            "match_aborted",
+                            match_id=session.match_id,
+                            seat=active_seat,
+                            schema_version=1,
+                            reason="adapter_error_budget_exhausted",
+                        )
                         await _close_both(conns, WS_CLOSE_NORMAL, "adapter_error")
                         return
 
@@ -808,6 +895,15 @@ async def run_match(
                         message=str(exc) or "Unknown error",
                     )
                     rejected_turn_ids.add(turn_id)
+                    logger.warning(
+                        "action_rejected",
+                        match_id=session.match_id,
+                        seat=active_seat,
+                        schema_version=1,
+                        turn_id=turn_id,
+                        error_code=domain_err.code,
+                        retries_remaining=retries_left - 1 if retries_left > 0 else 0,
+                    )
 
                     if retries_left == 0:
                         rej_env = _make_rejected_env(
@@ -822,6 +918,13 @@ async def run_match(
                         match.session = session
                         await _broadcast_match_state(conns, session)
                         await _broadcast_match_aborted(conns, session)
+                        logger.info(
+                            "match_aborted",
+                            match_id=session.match_id,
+                            seat=active_seat,
+                            schema_version=1,
+                            reason="adapter_error_budget_exhausted",
+                        )
                         await _close_both(conns, WS_CLOSE_NORMAL, "adapter_error")
                         return
 
@@ -857,13 +960,34 @@ async def run_match(
                 )
                 match.session = session
 
+                logger.info(
+                    "turn_committed",
+                    match_id=session.match_id,
+                    seat=active_seat,
+                    schema_version=1,
+                    turn_index=len(next_match.turns) - 1,
+                    turn_id=turn_id,
+                )
                 await _broadcast_turn_committed(conns, session)
                 await _broadcast_match_state(conns, session)
 
         # Match reached terminal state.
         if session.lifecycle is RuntimeLifecycle.FINISHED:
+            logger.info(
+                "match_finished",
+                match_id=session.match_id,
+                seat=None,
+                schema_version=1,
+            )
             await _broadcast_match_finished(conns, session)
         else:
+            logger.info(
+                "match_aborted",
+                match_id=session.match_id,
+                seat=None,
+                schema_version=1,
+                reason=session.abort.reason.value if session.abort else "unknown",
+            )
             await _broadcast_match_aborted(conns, session)
 
         await _close_both(conns, WS_CLOSE_NORMAL, "normal_closure")

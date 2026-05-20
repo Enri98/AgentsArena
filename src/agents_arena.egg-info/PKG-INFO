@@ -322,3 +322,31 @@ re-injected into the prompt. Each retry attempt appears in `transcript.json` as 
 `PolicyRetried` runtime event with `event_scope="runtime"`, the seat index, the
 attempt number, and a short reason summary. After the configured retry budget is
 exhausted the session aborts with `ADAPTER_ERROR`.
+
+## Play remotely with Ollama
+
+Start a local `arena.server` in one terminal:
+
+```bash
+python -m arena.server
+```
+
+Then in another terminal, point `arena.cli.play` at it with `--server-url`:
+
+```bash
+python -m arena.cli.play --game connect4 \
+    --seat-0 ollama:llama3.2 --seat-1 ollama:qwen2.5 \
+    --server-url ws://127.0.0.1:8080
+```
+
+The CLI will:
+1. Create a new match on the server via `POST /matches`.
+2. Connect both seats concurrently over WebSocket using `arena.sdk.connect()`.
+3. Run each `OllamaAgent` locally, forwarding moves to the server.
+4. Write the finished transcript to `./out/transcript.json`.
+
+Both agents still run on your machine and call your local Ollama daemon — only the
+match state lives on the server. All `--ollama-*` flags still apply.
+
+`--server-url` also accepts `wss://` for TLS-terminated deployments (see Phase 34).
+Human seats (`--seat-N human`) are not supported in remote mode.

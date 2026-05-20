@@ -3103,6 +3103,8 @@ Status: complete.
 
 ### Phase 33 - Server observability baseline (structured logging)
 
+Status: ✅ COMPLETE
+
 Objective:
 - ship structured JSON logs from the server so debugging "what happened in match X" is a `grep` away, without introducing metrics, tracing, or any v2 telemetry
 

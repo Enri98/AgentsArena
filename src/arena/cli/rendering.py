@@ -7,6 +7,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from arena.cli.games import connect4 as _c4
+from arena.cli.games import nim as _nim
 from arena.cli.games import tictactoe as _ttt
 
 RESET = "\x1b[0m"
@@ -27,6 +28,7 @@ _LIFECYCLE_COLORS: dict[str, str] = {
 
 _BOARD_RENDERERS: dict[str, Callable[[Mapping[str, Any]], str]] = {
     "connect4": _c4.render_board,
+    "nim": _nim.render_state,
     "tictactoe": _ttt.render_board,
 }
 

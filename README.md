@@ -332,3 +332,54 @@ match state lives on the server. All `--ollama-*` flags still apply.
 
 `--server-url` also accepts `wss://` for TLS-terminated deployments (see Phase 34).
 Human seats (`--seat-N human`) are not supported in remote mode.
+
+## Operating the server
+
+The server emits structured JSON logs to stdout. One line per significant event.
+Every log line includes at minimum: `timestamp`, `level`, `event`, `match_id`,
+`seat`, and `schema_version`.
+
+### Capture logs
+
+```bash
+python -m arena.server 2>&1 | tee arena.log
+```
+
+### Grep by match
+
+```bash
+grep '"match_id": "abc123"' arena.log
+```
+
+### Grep by event type
+
+```bash
+grep '"event": "turn_deadline_expired"' arena.log
+```
+
+### Adjust log level
+
+```bash
+python -m arena.server --log-level DEBUG
+```
+
+### Log rotation (production)
+
+Pipe stdout through a tool like `rotatelogs` or use systemd's journal.
+The server writes to stdout only — no file handles to manage.
+
+### Logged events (protocol §14)
+
+| Event | Level | When |
+|-------|-------|------|
+| `match_created` | info | POST /matches succeeds |
+| `match_started` | info | Arena session begins |
+| `seat_connected` | info | hello/welcome handshake complete |
+| `seat_disconnected` | info | WS closes or disconnect detected |
+| `turn_committed` | info | apply_match_action succeeds |
+| `action_rejected` | warning | apply_match_action raises domain error |
+| `turn_deadline_expired` | warning | per-turn deadline fires |
+| `match_finished` | info | lifecycle → FINISHED |
+| `match_aborted` | info | any abort path |
+| `heartbeat_timeout` | warning | heartbeat_timed_out triggers close 4408 |
+| `protocol_violation` | warning | malformed or unexpected envelope |

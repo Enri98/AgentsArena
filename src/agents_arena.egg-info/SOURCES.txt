@@ -25,6 +25,7 @@ src/arena/cli/__init__.py
 src/arena/cli/__main__.py
 src/arena/cli/app.py
 src/arena/cli/policies.py
+src/arena/cli/remote.py
 src/arena/cli/rendering.py
 src/arena/cli/games/__init__.py
 src/arena/cli/games/connect4.py

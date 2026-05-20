@@ -7,9 +7,9 @@ WS /matches/{match_id}/spectate          -- reserved; closes 4404 (§4)
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any
 
+import structlog
 from fastapi import APIRouter, WebSocket
 
 from arena.adapters.websocket import WIRE_SCHEMA_VERSION, MatchStateEnvelope, dumps, loads
@@ -25,7 +25,7 @@ from arena.server.runtime_bridge import (
     send_welcome,
 )
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -108,13 +108,34 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
     try:
         envelope = loads(raw)
     except SchemaVersionMismatch:
+        logger.warning(
+            "protocol_violation",
+            match_id=match_id,
+            seat=seat,
+            schema_version=1,
+            detail="schema_version_mismatch",
+        )
         await _close(ws, _CLOSE_SCHEMA_MISMATCH, "schema_version_mismatch")
         return
     except WireProtocolError:
+        logger.warning(
+            "protocol_violation",
+            match_id=match_id,
+            seat=seat,
+            schema_version=1,
+            detail="malformed_envelope",
+        )
         await _close(ws, _CLOSE_MALFORMED, "malformed_envelope")
         return
 
     if envelope.type != "hello":
+        logger.warning(
+            "protocol_violation",
+            match_id=match_id,
+            seat=seat,
+            schema_version=1,
+            detail=f"expected_hello_got_{envelope.type}",
+        )
         await _close(ws, _CLOSE_MALFORMED, f"expected_hello_got_{envelope.type}")
         return
 
@@ -152,12 +173,23 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
     try:
         await send_welcome(conn, match)
     except Exception as exc:
-        logger.warning("Failed to send welcome for match %s seat %d: %s", match_id, seat, exc)
+        logger.warning(
+            "welcome_send_failed",
+            match_id=match_id,
+            seat=seat,
+            schema_version=1,
+            error=str(exc),
+        )
         seat_slots[match_id][seat] = None
         await _close(ws, _CLOSE_SERVER_ERROR, "server_error")
         return
 
-    logger.debug("Seat %d joined match %s", seat, match_id)
+    logger.info(
+        "seat_connected",
+        match_id=match_id,
+        seat=seat,
+        schema_version=1,
+    )
 
     # 9. Initialise per-match ready / done / reconnect event dicts.
     ready_events = _get_ready_events(app_state)
@@ -199,6 +231,13 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
                 if result is None:
                     # WebSocket closed before second seat arrived.
                     seat_slots[match_id][seat] = None
+                    logger.info(
+                        "seat_disconnected",
+                        match_id=match_id,
+                        seat=seat,
+                        schema_version=1,
+                        detail="disconnected_before_match_start",
+                    )
                     return
                 # Received some unexpected frame while idle; discard (match not started).
 
@@ -221,7 +260,13 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
                 ),
             )
         except Exception as exc:
-            logger.exception("run_match error for match %s: %s", match_id, exc)
+            logger.exception(
+                "run_match_error",
+                match_id=match_id,
+                seat=seat,
+                schema_version=1,
+                error=str(exc),
+            )
         finally:
             done_event.set()
             seat_slots[match_id] = {0: None, 1: None}
@@ -290,7 +335,13 @@ async def _handle_reconnect(
     if event:
         event.set()
 
-    logger.debug("Seat %d reconnected to match %s", seat, match_id)
+    logger.info(
+        "seat_connected",
+        match_id=match_id,
+        seat=seat,
+        schema_version=1,
+        reconnect=True,
+    )
 
     # Wait until the match finishes before letting this handler return.
     done_events = _get_done_events(app_state)
