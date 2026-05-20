@@ -330,8 +330,31 @@ The CLI will:
 Both agents still run on your machine and call your local Ollama daemon — only the
 match state lives on the server. All `--ollama-*` flags still apply.
 
-`--server-url` also accepts `wss://` for TLS-terminated deployments (see Phase 34).
+`--server-url` also accepts `wss://` for TLS-terminated deployments (see below).
 Human seats (`--seat-N human`) are not supported in remote mode.
+
+## Watch two LLMs play remotely
+
+Once you have a publicly reachable `arena.server` (see `docs/DEPLOYMENT.md` for a
+step-by-step Fly.io walkthrough that ends with a `wss://your-app.fly.dev` URL),
+the bundled demo runs two local Ollama agents against it:
+
+```bash
+python examples/run_remote_demo.py \
+    --server-url wss://your-app.fly.dev \
+    --game connect4 \
+    --model-seat-0 llama3.2 --model-seat-1 llama3.2 \
+    --out-dir runs/remote-connect4
+```
+
+Supported games: `connect4`, `tictactoe`, `nim`. Both transcripts are dumped to
+`--out-dir` and validated. To exercise the deliberate-abort acceptance scenario,
+append `--abort-after-turns 3` — seat 1 drops mid-match and the server produces
+an `aborted` transcript with `reason="peer_disconnected"`.
+
+Ollama still runs on your laptop. Only match state lives on the remote server.
+First-connect cold start is ~5s if the Fly machine was idle (see
+`docs/DEPLOYMENT.md` for cost-vs-latency knobs).
 
 ## Operating the server
 
@@ -383,3 +406,45 @@ The server writes to stdout only — no file handles to manage.
 | `match_aborted` | info | any abort path |
 | `heartbeat_timeout` | warning | heartbeat_timed_out triggers close 4408 |
 | `protocol_violation` | warning | malformed or unexpected envelope |
+
+## Play with Claude Desktop
+
+AgentsArena ships an MCP server (`arena.mcp`) that exposes five tools —
+`join_match`, `get_observation`, `make_move`, `get_history`, `match_status` —
+on top of `arena.sdk.Session`. Install the extra dependency with:
+
+```bash
+pip install -e ".[mcp]"
+```
+
+### Claude Desktop (stdio)
+
+Add the following entry to your `claude_desktop_config.json` (usually at
+`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS
+or `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+
+```json
+{
+  "mcpServers": {
+    "agents-arena": {
+      "command": "python",
+      "args": ["-m", "arena.mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop. The five arena tools will appear in the tool palette.
+
+### HTTP/SSE mode
+
+For remote MCP clients you can run the server over HTTP/SSE:
+
+```bash
+python -m arena.mcp --http --host 127.0.0.1 --port 9000
+```
+
+**WARNING: the HTTP/SSE transport has no authentication in v1. Only expose
+it on `localhost` or a trusted LAN. Never bind `0.0.0.0` in production.**
+If you supply a non-localhost `--host`, the server prints a loud warning to
+stderr and continues. Authentication and TLS are v2 concerns.

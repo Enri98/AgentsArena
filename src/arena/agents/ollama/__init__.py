@@ -1,5 +1,6 @@
 """Ollama-backed local LLM agent package."""
 
+from arena.agents.ollama._remote import run_remote_seat
 from arena.agents.ollama.agent import OllamaAgent, PromptBuilder
 from arena.agents.ollama.client import OllamaClient
 from arena.agents.ollama.connect4 import Connect4PromptBuilder
@@ -25,4 +26,5 @@ __all__: tuple[str, ...] = (
     "PromptBuilder",
     "TicTacToePromptBuilder",
     "probe_models",
+    "run_remote_seat",
 )

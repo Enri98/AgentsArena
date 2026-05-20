@@ -15,10 +15,12 @@ src/arena/adapters/websocket/errors.py
 src/arena/adapters/websocket/messages.py
 src/arena/agents/__init__.py
 src/arena/agents/ollama/__init__.py
+src/arena/agents/ollama/_remote.py
 src/arena/agents/ollama/agent.py
 src/arena/agents/ollama/client.py
 src/arena/agents/ollama/connect4.py
 src/arena/agents/ollama/exceptions.py
+src/arena/agents/ollama/nim.py
 src/arena/agents/ollama/probe.py
 src/arena/agents/ollama/tictactoe.py
 src/arena/cli/__init__.py
@@ -29,6 +31,7 @@ src/arena/cli/remote.py
 src/arena/cli/rendering.py
 src/arena/cli/games/__init__.py
 src/arena/cli/games/connect4.py
+src/arena/cli/games/nim.py
 src/arena/cli/games/tictactoe.py
 src/arena/cli/play/__init__.py
 src/arena/cli/play/__main__.py
@@ -55,6 +58,15 @@ src/arena/games/connect4/observation.py
 src/arena/games/connect4/rules.py
 src/arena/games/connect4/serializer.py
 src/arena/games/connect4/state.py
+src/arena/games/nim/__init__.py
+src/arena/games/nim/actions.py
+src/arena/games/nim/config.py
+src/arena/games/nim/definition.py
+src/arena/games/nim/events.py
+src/arena/games/nim/observation.py
+src/arena/games/nim/rules.py
+src/arena/games/nim/serializer.py
+src/arena/games/nim/state.py
 src/arena/games/tictactoe/__init__.py
 src/arena/games/tictactoe/actions.py
 src/arena/games/tictactoe/config.py
@@ -68,6 +80,11 @@ src/arena/match/__init__.py
 src/arena/match/local_match.py
 src/arena/match/policy.py
 src/arena/match/transcript.py
+src/arena/mcp/__init__.py
+src/arena/mcp/__main__.py
+src/arena/mcp/schemas.py
+src/arena/mcp/server.py
+src/arena/mcp/session_registry.py
 src/arena/runtime/__init__.py
 src/arena/runtime/exceptions.py
 src/arena/runtime/formatting.py
@@ -86,6 +103,7 @@ src/arena/server/__main__.py
 src/arena/server/app.py
 src/arena/server/config.py
 src/arena/server/errors.py
+src/arena/server/logging_setup.py
 src/arena/server/payload_schemas.py
 src/arena/server/registry.py
 src/arena/server/routes_http.py

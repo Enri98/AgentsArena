@@ -8,6 +8,10 @@ Requires-Dist: pydantic>=2
 Provides-Extra: server
 Requires-Dist: fastapi>=0.110; extra == "server"
 Requires-Dist: uvicorn>=0.27; extra == "server"
+Requires-Dist: websockets>=13; extra == "server"
+Requires-Dist: structlog>=24; extra == "server"
+Provides-Extra: mcp
+Requires-Dist: mcp>=1.0; extra == "mcp"
 Provides-Extra: dev
 Requires-Dist: pytest>=8; extra == "dev"
 Requires-Dist: ruff>=0.11; extra == "dev"
@@ -15,6 +19,7 @@ Requires-Dist: fastapi>=0.110; extra == "dev"
 Requires-Dist: uvicorn>=0.27; extra == "dev"
 Requires-Dist: httpx>=0.27; extra == "dev"
 Requires-Dist: websockets>=12; extra == "dev"
+Requires-Dist: structlog>=24; extra == "dev"
 
 # AgentsArena
 
@@ -348,5 +353,79 @@ The CLI will:
 Both agents still run on your machine and call your local Ollama daemon — only the
 match state lives on the server. All `--ollama-*` flags still apply.
 
-`--server-url` also accepts `wss://` for TLS-terminated deployments (see Phase 34).
+`--server-url` also accepts `wss://` for TLS-terminated deployments (see below).
 Human seats (`--seat-N human`) are not supported in remote mode.
+
+## Watch two LLMs play remotely
+
+Once you have a publicly reachable `arena.server` (see `docs/DEPLOYMENT.md` for a
+step-by-step Fly.io walkthrough that ends with a `wss://your-app.fly.dev` URL),
+the bundled demo runs two local Ollama agents against it:
+
+```bash
+python examples/run_remote_demo.py \
+    --server-url wss://your-app.fly.dev \
+    --game connect4 \
+    --model-seat-0 llama3.2 --model-seat-1 llama3.2 \
+    --out-dir runs/remote-connect4
+```
+
+Supported games: `connect4`, `tictactoe`, `nim`. Both transcripts are dumped to
+`--out-dir` and validated. To exercise the deliberate-abort acceptance scenario,
+append `--abort-after-turns 3` — seat 1 drops mid-match and the server produces
+an `aborted` transcript with `reason="peer_disconnected"`.
+
+Ollama still runs on your laptop. Only match state lives on the remote server.
+First-connect cold start is ~5s if the Fly machine was idle (see
+`docs/DEPLOYMENT.md` for cost-vs-latency knobs).
+
+## Operating the server
+
+The server emits structured JSON logs to stdout. One line per significant event.
+Every log line includes at minimum: `timestamp`, `level`, `event`, `match_id`,
+`seat`, and `schema_version`.
+
+### Capture logs
+
+```bash
+python -m arena.server 2>&1 | tee arena.log
+```
+
+### Grep by match
+
+```bash
+grep '"match_id": "abc123"' arena.log
+```
+
+### Grep by event type
+
+```bash
+grep '"event": "turn_deadline_expired"' arena.log
+```
+
+### Adjust log level
+
+```bash
+python -m arena.server --log-level DEBUG
+```
+
+### Log rotation (production)
+
+Pipe stdout through a tool like `rotatelogs` or use systemd's journal.
+The server writes to stdout only — no file handles to manage.
+
+### Logged events (protocol §14)
+
+| Event | Level | When |
+|-------|-------|------|
+| `match_created` | info | POST /matches succeeds |
+| `match_started` | info | Arena session begins |
+| `seat_connected` | info | hello/welcome handshake complete |
+| `seat_disconnected` | info | WS closes or disconnect detected |
+| `turn_committed` | info | apply_match_action succeeds |
+| `action_rejected` | warning | apply_match_action raises domain error |
+| `turn_deadline_expired` | warning | per-turn deadline fires |
+| `match_finished` | info | lifecycle → FINISHED |
+| `match_aborted` | info | any abort path |
+| `heartbeat_timeout` | warning | heartbeat_timed_out triggers close 4408 |
+| `protocol_violation` | warning | malformed or unexpected envelope |

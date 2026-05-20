@@ -18,6 +18,7 @@ LOWER_LAYER_ROOTS = [
     "src/arena/ui",
     "src/arena/cli",
     "src/arena/sdk",
+    "src/arena/mcp",
 ]
 
 

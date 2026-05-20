@@ -1,0 +1,17 @@
+# Exclude non-essential files from Docker build context to reduce image size and build time.
+
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitnexus/
+.claude/
+tests/
+runs/
+out/
+examples/
+docs/
+*.md
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/

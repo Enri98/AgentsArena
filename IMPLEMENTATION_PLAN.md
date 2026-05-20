@@ -3125,7 +3125,21 @@ Acceptance criteria:
 - the architecture test catches any new lower-layer module-scope logger
 - the SDK produces zero log output by default in the integration tests
 
-### Phase 34 - Public deployment and acceptance demo
+### Phase 34 - Public deployment and acceptance demo ✅ COMPLETE
+
+Status: ✅ COMPLETE — v1 milestone reached.
+
+Shipped:
+- `Dockerfile` (multi-stage python:3.11-slim, non-root user, EXPOSE 8080, `/games` HEALTHCHECK).
+- `fly.toml` (shared-cpu-1x, 256MB, auto-stop machines, force HTTPS).
+- `.dockerignore` keeping the build context small.
+- `docs/DEPLOYMENT.md` — beginner-friendly Fly.io walkthrough from zero (`flyctl` install on Windows, launch/deploy/logs/teardown). Caddy/VPS appendix.
+- `pyproject.toml` [server] extras now includes `websockets>=13` (required by uvicorn's WS backend).
+- `arena.agents.ollama.run_remote_seat` (new helper, in `src/arena/agents/ollama/_remote.py`). Reaches `arena.sdk` transitively via `arena.cli.remote.run_remote_seat_async` (new async single-seat helper) — no architecture boundary changes were needed.
+- `examples/run_remote_demo.py` driving two `run_remote_seat` calls. Supports `--game connect4|tictactoe|nim`, `--abort-after-turns N`, `--skip-probe`.
+- `tests/integration/test_remote_demo.py` — happy path, deliberate-abort with `reason="peer_disconnected"`, Nim smoke. All pass via the `running_server` fixture + stub `OllamaClient`.
+- README "Watch two LLMs play remotely" section.
+- Side note: Nim (added in commit `3da879a` outside the roadmap) is now exercised by the remote demo and tests.
 
 Objective:
 - prove v1 is solid by running the documented acceptance demo: two local Ollama agents on the user's laptop, both connecting to a publicly reachable `arena.server`, completing one clean match and one deliberate-abort scenario
@@ -3150,7 +3164,19 @@ Acceptance criteria:
 - the README quickstart for the remote demo is reproducible
 - ruff + pytest pass
 
-### Phase 35 - MCP server layer (optional v1 extension)
+### Phase 35 - MCP server layer (optional v1 extension) ✅ COMPLETE
+
+Status: ✅ COMPLETE.
+
+Shipped:
+- `src/arena/mcp/` — `SessionRegistry` with per-`(match_id, seat)` background `_recv_loop` + asyncio.Queue, 5 MCP tools (`join_match`, `get_observation`, `make_move`, `get_history`, `match_status`), per-game action JSON schemas (Connect 4, Tic-Tac-Toe, Nim), stdio + HTTP/SSE transports via `python -m arena.mcp`. HTTP mode prints a loud no-auth warning when bound to a non-localhost host.
+- `pyproject.toml` `[mcp]` optional dep group (`mcp>=1.0`).
+- `tests/unit/architecture/test_mcp_boundaries.py` — enforces `arena.mcp` may only import `arena.sdk` + `arena.core`; no lower layer may import `arena.mcp`. Module-load-scope logger ban extended to `arena.mcp`.
+- `tests/integration/test_mcp_integration.py` — in-process tool-handler drive of Connect 4 + auto-purge-on-finish + unknown-match error response.
+- README "Play with Claude Desktop" section (`claude_desktop_config.json` snippet + HTTP/SSE warning).
+- `arena.sdk/` source unchanged — acceptance criterion met.
+
+Deferred: stdio subprocess e2e test (transport-level handshake). Open as a follow-up; not v1-blocking.
 
 Objective:
 - expose the SDK through an MCP server so Claude Desktop and other MCP clients can join matches as agents, without changing the wire protocol or the SDK
@@ -3169,5 +3195,5 @@ Acceptance criteria:
 - v1 acceptance does not require Phase 35; if skipped, Phase 35 stays open without blocking the v1 milestone
 
 Status (Phases 27 - 35):
-- Phase 27 in progress (this document update + protocol doc + meta-doc updates)
-- Phases 28 - 35 not started
+- ✅ Phases 27 - 35 all complete. v1 milestone reached.
+- The remaining open item is a true stdio-subprocess MCP e2e test (Phase 35 follow-up); not v1-blocking.

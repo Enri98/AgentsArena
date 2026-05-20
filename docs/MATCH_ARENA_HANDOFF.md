@@ -199,3 +199,42 @@ Implemented and verified (Phase 26 — Local Ollama LLM agent):
 
 Phase 27: Anthropic-SDK-backed agent reusing the `PromptBuilder` interface. Build `AnthropicAgent` in `arena.agents.anthropic` implementing `InProcessAgent` and accepting any `PromptBuilder` from Slice 2 — the same Connect4PromptBuilder and TicTacToePromptBuilder should work without modification. The user will need `ANTHROPIC_API_KEY`; the Max plan does not cover programmatic API access.
 
+## Phase 34 Status — v1 milestone reached
+
+Implemented and verified:
+- `Dockerfile` (multi-stage `python:3.11-slim`, non-root user, `EXPOSE 8080`, `HEALTHCHECK` hitting `/games`, runs `python -m arena.server --host 0.0.0.0 --port 8080`).
+- `fly.toml` (shared-cpu-1x, 256MB, `auto_stop_machines = "stop"`, `min_machines_running = 0`, `force_https = true`).
+- `.dockerignore` excluding `.venv`, tests, runs, docs, `.gitnexus`, `.claude`, cache dirs.
+- `docs/DEPLOYMENT.md` — beginner-friendly Fly.io walkthrough from zero (account, `flyctl` install on Windows, launch/deploy, logs, teardown). Caddy/VPS appendix for self-hosters.
+- `pyproject.toml` `[server]` extras now include `websockets>=13` (required by uvicorn's WS backend at runtime).
+- `arena.agents.ollama.run_remote_seat(server_url, seat, game_id, model, ...)` async helper bundling Ollama + SDK wiring for a single seat. Connects through `arena.cli.remote` (existing `make_typed_agent_choose` + new `run_remote_seat_async`) so no architecture boundary changes were needed.
+- `examples/run_remote_demo.py` driving two `run_remote_seat` calls concurrently. Supports `--game connect4|tictactoe|nim`, `--abort-after-turns N` (seat-1 raises after N turns to trigger `peer_disconnected`), `--skip-probe`. Dumps both transcripts and validates them.
+- `tests/integration/test_remote_demo.py` — happy path (Connect 4), abort path with `reason="peer_disconnected"`, Nim smoke. All use the existing `running_server` fixture + stub `OllamaClient`.
+- README "Watch two LLMs play remotely" section pointing at `examples/run_remote_demo.py` and `docs/DEPLOYMENT.md`.
+
+Side context: Nim (`src/arena/games/nim/`) was added outside the documented roadmap in commit `3da879a`. It is now exercised by the remote demo and integration tests.
+
+Acceptance:
+- Local Docker build + run produces a working server reachable at `http://127.0.0.1:8080/games`.
+- Fly.io deploy walkthrough documented end-to-end; manual public-server run is reproducible.
+- Abort scenario produces an `aborted` transcript whose abort metadata `reason == "peer_disconnected"` and which passes `validate_runtime_transcript`.
+
+Skipped: TLS terminated by `arena.server` itself (always done by Fly's edge or Caddy); managed deployment to providers beyond the Fly.io example; transcript persistence beyond writing to `--out-dir`.
+
+## Phase 35 Status — MCP layer (optional v1 extension)
+
+Implemented and verified:
+- New top-level layer `src/arena/mcp/` exposing `arena.sdk.Session` through five MCP tools — `join_match`, `get_observation`, `make_move`, `get_history`, `match_status` — backed by a `SessionRegistry` with per-`(match_id, seat)` background `_recv_loop` and asyncio.Queue.
+- `src/arena/mcp/schemas.py` ships JSON Schema dicts for Connect 4, Tic-Tac-Toe, and Nim action inputs.
+- Transports: `python -m arena.mcp` defaults to stdio (Claude Desktop); `--http --host --port` runs the HTTP/SSE transport with a loud stderr warning when bound to a non-localhost host (no auth in v1).
+- `pyproject.toml` `[mcp]` optional dep group adds `mcp>=1.0`.
+- `tests/unit/architecture/test_mcp_boundaries.py` enforces `arena.mcp` may only import `arena.sdk` and `arena.core`; no lower layer imports `arena.mcp`. The module-load-scope logger ban is extended to `arena.mcp`.
+- `tests/integration/test_mcp_integration.py` drives Connect 4 through the five tool handlers directly (no transport subprocess), verifies happy-path completion, registry auto-purge on terminal events, and error response for unknown match.
+- README "Play with Claude Desktop" section with a `claude_desktop_config.json` snippet and the HTTP/SSE no-auth warning.
+- `arena.sdk/` source unchanged — Phase 35 acceptance criterion satisfied.
+
+Deferred:
+- True stdio subprocess e2e test (transport-level MCP handshake). The direct in-process tool test covers v1 acceptance; the subprocess variant remains open as a follow-up.
+
+Phase 35 does not block the v1 milestone; v1 = Phase 34 done.
+

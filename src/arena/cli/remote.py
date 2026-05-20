@@ -42,10 +42,41 @@ def make_typed_agent_choose(
     return choose
 
 
-async def _run_seat(url: str, seat: int, choose: Callable) -> tuple[Any, Any]:
+async def run_remote_seat_async(
+    url: str,
+    seat: int,
+    choose: Callable[..., Any],
+    *,
+    resume_token: str | None = None,
+) -> tuple[Any, Any]:
+    """Connect a single seat to arena.server and drive it to match completion.
+
+    Async public counterpart to :func:`run_remote_seats_sync` for callers that
+    already manage their own event loop (demos, integration tests).
+
+    Parameters
+    ----------
+    url:
+        WebSocket URL for the seat (e.g. ``ws://host/matches/{id}/play?seat=0``).
+    seat:
+        Integer seat id.
+    choose:
+        Sync ``(ObservationRequestPayload) -> dict`` callable, typically built by
+        :func:`make_typed_agent_choose`.
+    resume_token:
+        Optional resume token from a prior session for reconnect (Phase 32).
+
+    Returns
+    -------
+    ``(result_dict, transcript)`` from :func:`arena.sdk.connect`.
+    """
     from arena.sdk import connect
 
-    return await connect(url, seat, choose)
+    return await connect(url, seat, choose, resume_token=resume_token)
+
+
+async def _run_seat(url: str, seat: int, choose: Callable) -> tuple[Any, Any]:
+    return await run_remote_seat_async(url, seat, choose)
 
 
 async def _gather_seats(
@@ -80,4 +111,8 @@ def run_remote_seats_sync(
     return asyncio.run(_gather_seats(seat_urls, seat_chooses))
 
 
-__all__: tuple[str, ...] = ("make_typed_agent_choose", "run_remote_seats_sync")
+__all__: tuple[str, ...] = (
+    "make_typed_agent_choose",
+    "run_remote_seat_async",
+    "run_remote_seats_sync",
+)

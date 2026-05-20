@@ -13,7 +13,7 @@ from unittest.mock import MagicMock
 
 import httpx
 
-from arena.agents.ollama import OllamaAgent
+from arena.agents.ollama import OllamaAgent, run_remote_seat
 from arena.agents.ollama.client import OllamaClient
 from arena.agents.ollama.connect4 import Connect4PromptBuilder
 from arena.cli.remote import make_typed_agent_choose
@@ -121,5 +121,76 @@ def test_make_typed_agent_choose_action_shape(running_server: RunningServer) -> 
         for turn in match_txn.get("turns", []):
             action = turn.get("action", {})
             assert "column" in action, f"Expected 'column' key in action {action!r}"
+
+    asyncio.run(run())
+
+
+def _stub_client_returning(column: int) -> Any:
+    """Build a MagicMock OllamaClient that always answers with the given column."""
+    client = MagicMock(spec=OllamaClient)
+    client.chat.return_value = {
+        "message": {"content": json.dumps({"thought": "auto", "column": column})}
+    }
+    return client
+
+
+def test_run_remote_seat_drives_connect4_match(running_server: RunningServer) -> None:
+    """run_remote_seat() bundles the Ollama+SDK wiring into a single call."""
+
+    async def run() -> None:
+        match = _create_match(
+            running_server.http_base_url,
+            "connect4",
+            players=[{"label": "rs-0"}, {"label": "rs-1"}],
+        )
+
+        retry_sink_0: list[tuple[int, str]] = []
+        retry_sink_1: list[tuple[int, str]] = []
+
+        (result0, transcript0), (result1, transcript1) = await asyncio.gather(
+            run_remote_seat(
+                server_url=match["seat_0_url"],
+                seat=0,
+                game_id="connect4",
+                model="stub",
+                client=_stub_client_returning(0),
+                retry_sink=retry_sink_0,
+            ),
+            run_remote_seat(
+                server_url=match["seat_1_url"],
+                seat=1,
+                game_id="connect4",
+                model="stub",
+                client=_stub_client_returning(1),
+                retry_sink=retry_sink_1,
+            ),
+        )
+
+        assert transcript0.lifecycle == "finished"
+        assert transcript1.lifecycle == "finished"
+
+        registry = build_default_registry()
+        loaded = validate_runtime_transcript(
+            registry.get("connect4"), transcript0.model_dump(mode="json")
+        )
+        assert loaded is not None
+
+    asyncio.run(run())
+
+
+def test_run_remote_seat_rejects_unknown_game() -> None:
+    """run_remote_seat() raises ValueError when game_id is not supported."""
+
+    import pytest
+
+    async def run() -> None:
+        with pytest.raises(ValueError, match="Unsupported game_id"):
+            await run_remote_seat(
+                server_url="ws://example/invalid",
+                seat=0,
+                game_id="chess",
+                model="stub",
+                client=_stub_client_returning(0),
+            )
 
     asyncio.run(run())

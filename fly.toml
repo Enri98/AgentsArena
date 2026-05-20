@@ -1,0 +1,26 @@
+# Fly.io configuration for AgentsArena WebSocket server.
+#
+# On first deploy, rename `app` to your desired app name via `flyctl launch`
+# or by editing this file and running `flyctl deploy`.
+#
+# Cost optimization: `auto_stop_machines = "stop"` means the app stops when idle
+# (zero cost), but has a ~5s cold start. For instant response, set
+# `min_machines_running = 1` (hourly charge applies).
+
+app = "arena-server"
+primary_region = "fra"
+
+[build]
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
