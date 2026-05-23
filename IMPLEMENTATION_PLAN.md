@@ -3176,7 +3176,7 @@ Shipped:
 - README "Play with Claude Desktop" section (`claude_desktop_config.json` snippet + HTTP/SSE warning).
 - `arena.sdk/` source unchanged — acceptance criterion met.
 
-Deferred: stdio subprocess e2e test (transport-level handshake). Open as a follow-up; not v1-blocking.
+Stdio subprocess e2e test (transport-level handshake): ✅ COMPLETE — `tests/integration/test_mcp_stdio_e2e.py` spawns `python -m arena.mcp --stdio` as a real subprocess, drives a full Tic-Tac-Toe match through the official MCP `ClientSession` (initialize → list_tools → call_tool), and verifies unknown-match error handling.
 
 Objective:
 - expose the SDK through an MCP server so Claude Desktop and other MCP clients can join matches as agents, without changing the wire protocol or the SDK
@@ -3196,4 +3196,4 @@ Acceptance criteria:
 
 Status (Phases 27 - 35):
 - ✅ Phases 27 - 35 all complete. v1 milestone reached.
-- The remaining open item is a true stdio-subprocess MCP e2e test (Phase 35 follow-up); not v1-blocking.
+- ✅ Phase 35 stdio-subprocess MCP e2e test landed in `tests/integration/test_mcp_stdio_e2e.py`. No known v1 follow-ups remain.
