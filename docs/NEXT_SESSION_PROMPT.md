@@ -10,7 +10,6 @@ Paste this into a fresh Claude or Codex session:
 >
 > What's next is open. Defensible directions:
 > - **Public-server smoke test**: walk through `docs/DEPLOYMENT.md` for real — `flyctl launch` / `flyctl deploy` — and run `examples/run_remote_demo.py --server-url wss://<your-app>.fly.dev --game connect4 --abort-after-turns 3`. Verify both happy and abort transcripts in the wild.
-> - **MCP transport e2e test** (deferred from Phase 35): spawn `python -m arena.mcp --stdio` as a subprocess, drive a Connect 4 match through the official `mcp` SDK's stub client.
 > - **v2 candidates** (NOT yet in scope): TypeScript SDK port, web spectator UI, transcript persistence beyond JSON files, real auth, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, Anthropic-SDK-backed agent.
 > - **Nim cleanup**: backfill `arena.cli.play.__main__` to accept `--game nim` (currently only `connect4`/`tictactoe`). The new `run_remote_seat` helper already supports Nim end-to-end; only the local CLI driver lags.
 >

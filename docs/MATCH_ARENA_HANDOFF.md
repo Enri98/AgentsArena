@@ -233,8 +233,8 @@ Implemented and verified:
 - README "Play with Claude Desktop" section with a `claude_desktop_config.json` snippet and the HTTP/SSE no-auth warning.
 - `arena.sdk/` source unchanged — Phase 35 acceptance criterion satisfied.
 
-Deferred:
-- True stdio subprocess e2e test (transport-level MCP handshake). The direct in-process tool test covers v1 acceptance; the subprocess variant remains open as a follow-up.
+Follow-up shipped:
+- True stdio subprocess e2e test (transport-level MCP handshake) landed in commit `7fafbb0` as `tests/integration/test_mcp_stdio_e2e.py`, complementing the direct in-process tool test.
 
 Phase 35 does not block the v1 milestone; v1 = Phase 34 done.
 

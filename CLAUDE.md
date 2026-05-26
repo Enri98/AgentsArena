@@ -33,7 +33,7 @@ Dependency direction is enforced by architecture tests: `core`/`games` import no
 
 Outside the numbered roadmap: `arena.games.nim` (commit `3da879a`) is registered in the default registry and exercised by the remote demo.
 
-Open items: stdio-subprocess MCP e2e test (Phase 35 follow-up; not v1-blocking). Future work is the v2 backlog (see "Deferred to v2" below).
+Open items: none — all v1 follow-ups closed. Future work is the v2 backlog (see "Deferred to v2" below).
 
 ## Core design rules (do not violate)
 
@@ -70,6 +70,7 @@ Open items: stdio-subprocess MCP e2e test (Phase 35 follow-up; not v1-blocking).
 3. Run ruff + pytest from the venv.
 4. Update the plan's slice status + handoff docs when a slice completes.
 5. Do not skip ahead, do not refactor unrelated modules, do not introduce v2-deferred infrastructure (see list above).
+6. When adding a new game, follow `docs/ADDING_A_GAME.md`.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
