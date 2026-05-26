@@ -11,44 +11,35 @@ neither has to duplicate the boilerplate.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
+# Importing the per-game submodules directly ensures their top-level
+# register_ollama_adapter() calls fire even when arena.agents.ollama._remote
+# is imported without first importing arena.agents.ollama.
+from arena.agents.ollama import connect4 as _connect4  # noqa: F401
+from arena.agents.ollama import nim as _nim  # noqa: F401
+from arena.agents.ollama import tictactoe as _tictactoe  # noqa: F401
+from arena.agents.ollama._adapters import OLLAMA_GAME_ADAPTERS
 from arena.agents.ollama.agent import OllamaAgent, PromptBuilder
 from arena.agents.ollama.client import OllamaClient
-from arena.agents.ollama.connect4 import Connect4PromptBuilder
-from arena.agents.ollama.nim import NimPromptBuilder
-from arena.agents.ollama.tictactoe import TicTacToePromptBuilder
 
 # arena.agents is permitted to depend on arena.cli (see connect4.py / tictactoe.py
 # already importing arena.cli.games for board rendering). The SDK is reached
 # transitively through arena.cli.remote, satisfying the import-boundary tests.
 from arena.cli.remote import make_typed_agent_choose, run_remote_seat_async
+from arena.games import build_default_registry
 
-_PROMPT_BUILDERS: dict[str, Callable[[], PromptBuilder]] = {
-    "connect4": Connect4PromptBuilder,
-    "tictactoe": TicTacToePromptBuilder,
-    "nim": NimPromptBuilder,
-}
+_DEFINITION_REGISTRY = build_default_registry()
 
 
 def _resolve_definition(game_id: str) -> Any:
-    if game_id == "connect4":
-        from arena.games.connect4 import Connect4GameDefinition
-
-        return Connect4GameDefinition
-    if game_id == "tictactoe":
-        from arena.games.tictactoe import TicTacToeGameDefinition
-
-        return TicTacToeGameDefinition
-    if game_id == "nim":
-        from arena.games.nim import NimGameDefinition
-
-        return NimGameDefinition
-    raise ValueError(
-        f"Unsupported game_id {game_id!r}. "
-        f"Supported games: {sorted(_PROMPT_BUILDERS)}."
-    )
+    try:
+        return _DEFINITION_REGISTRY.get(game_id)
+    except Exception as exc:
+        raise ValueError(
+            f"Unsupported game_id {game_id!r}. "
+            f"Supported games: {sorted(OLLAMA_GAME_ADAPTERS)}."
+        ) from exc
 
 
 async def run_remote_seat(
@@ -104,7 +95,17 @@ async def run_remote_seat(
     ValueError: if ``game_id`` is not supported.
     """
     definition = _resolve_definition(game_id)
-    builder = prompt_builder or _PROMPT_BUILDERS[game_id]()
+    if prompt_builder is None:
+        try:
+            adapter = OLLAMA_GAME_ADAPTERS[game_id]
+        except KeyError as exc:
+            raise ValueError(
+                f"Unsupported game_id {game_id!r}. "
+                f"Supported games: {sorted(OLLAMA_GAME_ADAPTERS)}."
+            ) from exc
+        builder = adapter.prompt_builder_factory()
+    else:
+        builder = prompt_builder
     http_client = client or OllamaClient(host=ollama_host, timeout=timeout)
 
     retry_callback = None

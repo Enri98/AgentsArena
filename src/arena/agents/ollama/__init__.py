@@ -3,6 +3,10 @@
 from arena.agents.ollama._remote import run_remote_seat
 from arena.agents.ollama.agent import OllamaAgent, PromptBuilder
 from arena.agents.ollama.client import OllamaClient
+
+# Importing the per-game prompt-builder modules before _remote ensures their
+# top-level register_ollama_adapter() calls populate the adapter registry by
+# the time _remote (which consults it) is initialised.
 from arena.agents.ollama.connect4 import Connect4PromptBuilder
 from arena.agents.ollama.exceptions import (
     OllamaIllegalActionError,

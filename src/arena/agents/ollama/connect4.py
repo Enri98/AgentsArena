@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from arena.agents.ollama._adapters import OllamaGameAdapter, register_ollama_adapter
 from arena.cli.games.connect4 import render_board_plain
 from arena.games.connect4.actions import DropDisc
+from arena.games.connect4.definition import CONNECT4_GAME_ID
 
 _SEAT_SYMBOLS = ("X", "O")
 
@@ -97,6 +99,14 @@ def _cell_symbol(value: int, my_symbol: str, opp_symbol: str, seat: int) -> str:
     if value == seat + 1:
         return my_symbol
     return opp_symbol
+
+
+register_ollama_adapter(
+    OllamaGameAdapter(
+        game_id=CONNECT4_GAME_ID,
+        prompt_builder_factory=Connect4PromptBuilder,
+    )
+)
 
 
 __all__: tuple[str, ...] = ("Connect4PromptBuilder",)

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from arena.agents.ollama._adapters import OllamaGameAdapter, register_ollama_adapter
 from arena.cli.games.tictactoe import numpad_action, render_board_plain
 from arena.games.tictactoe.actions import PlaceMark
+from arena.games.tictactoe.definition import TICTACTOE_GAME_ID
 
 _SEAT_SYMBOLS = ("X", "O")
 
@@ -121,6 +123,14 @@ def _legal_keys(legal_actions: tuple[PlaceMark, ...]) -> list[int]:
         for a in legal_actions
         if (a.row, a.column) in _REVERSE_NUMPAD
     )
+
+
+register_ollama_adapter(
+    OllamaGameAdapter(
+        game_id=TICTACTOE_GAME_ID,
+        prompt_builder_factory=TicTacToePromptBuilder,
+    )
+)
 
 
 __all__: tuple[str, ...] = ("TicTacToePromptBuilder",)

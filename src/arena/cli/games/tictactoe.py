@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from arena.cli.games._registry import CliGameAdapter, register_cli_adapter
 from arena.games.tictactoe.actions import PlaceMark
+from arena.games.tictactoe.config import TicTacToeConfig
+from arena.games.tictactoe.definition import TICTACTOE_GAME_ID
 
 RESET = "\x1b[0m"
 DIM = "\x1b[2m"
@@ -102,6 +105,32 @@ def parse_input(line: str, observation: Any) -> PlaceMark | None:
     if action in observation.legal_actions:
         return action
     return None
+
+
+def _parse_scripted(spec: str) -> list[PlaceMark]:
+    actions: list[PlaceMark] = []
+    for v in spec.split(","):
+        v = v.strip()
+        if not v:
+            continue
+        actions.append(numpad_action(int(v)))
+    return actions
+
+
+def _config_from_args(_args: Any) -> TicTacToeConfig:
+    return TicTacToeConfig()
+
+
+register_cli_adapter(
+    CliGameAdapter(
+        game_id=TICTACTOE_GAME_ID,
+        renderer=render_board,
+        plain_renderer=render_board_plain,
+        human_parser=parse_input,
+        scripted_parser=_parse_scripted,
+        config_factory=_config_from_args,
+    )
+)
 
 
 __all__: tuple[str, ...] = ("numpad_action", "parse_input", "render_board", "render_board_plain")

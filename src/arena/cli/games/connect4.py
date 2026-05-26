@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from arena.cli.games._registry import CliGameAdapter, register_cli_adapter
 from arena.games.connect4.actions import DropDisc
+from arena.games.connect4.config import Connect4Config
+from arena.games.connect4.definition import CONNECT4_GAME_ID
 
 RESET = "\x1b[0m"
 DIM = "\x1b[2m"
@@ -76,6 +79,30 @@ def parse_input(line: str, observation: Any) -> DropDisc | None:
     if action in observation.legal_actions:
         return action
     return None
+
+
+def _parse_scripted(spec: str) -> list[DropDisc]:
+    return [DropDisc(column=int(v.strip())) for v in spec.split(",") if v.strip()]
+
+
+def _config_from_args(args: Any) -> Connect4Config:
+    return Connect4Config(
+        rows=args.rows,
+        columns=args.cols,
+        connect_length=args.connect_length,
+    )
+
+
+register_cli_adapter(
+    CliGameAdapter(
+        game_id=CONNECT4_GAME_ID,
+        renderer=render_board,
+        plain_renderer=render_board_plain,
+        human_parser=parse_input,
+        scripted_parser=_parse_scripted,
+        config_factory=_config_from_args,
+    )
+)
 
 
 __all__: tuple[str, ...] = ("parse_input", "render_board", "render_board_plain")

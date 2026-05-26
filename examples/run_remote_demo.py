@@ -28,16 +28,12 @@ def _create_match(http_base: str, game_id: str) -> dict[str, Any]:
 
 
 def _resolve_definition(game_id: str) -> Any:
-    if game_id == "connect4":
-        from arena.games.connect4 import Connect4GameDefinition
-        return Connect4GameDefinition
-    if game_id == "tictactoe":
-        from arena.games.tictactoe import TicTacToeGameDefinition
-        return TicTacToeGameDefinition
-    if game_id == "nim":
-        from arena.games.nim import NimGameDefinition
-        return NimGameDefinition
-    raise ValueError(f"Unsupported game: {game_id!r}")
+    from arena.games import build_default_registry
+
+    try:
+        return build_default_registry().get(game_id)
+    except Exception as exc:
+        raise ValueError(f"Unsupported game: {game_id!r}") from exc
 
 
 def _dump_transcript(transcript: Any, path: Path) -> dict[str, Any]:
@@ -114,21 +110,13 @@ async def _run_happy(args: argparse.Namespace) -> int:
 
 async def _run_abort(args: argparse.Namespace) -> int:
     """Abort scenario: seat 1 disconnects after N turns; verify peer_disconnected."""
+    from arena.agents.ollama._adapters import OLLAMA_GAME_ADAPTERS
     from arena.agents.ollama._remote import run_remote_seat
     from arena.agents.ollama.agent import OllamaAgent
     from arena.agents.ollama.client import OllamaClient
-    from arena.agents.ollama.connect4 import Connect4PromptBuilder
-    from arena.agents.ollama.nim import NimPromptBuilder
-    from arena.agents.ollama.tictactoe import TicTacToePromptBuilder
     from arena.cli.remote import make_typed_agent_choose, run_remote_seat_async
     from arena.runtime import validate_runtime_transcript
     from arena.sdk.errors import MatchAbortedError
-
-    _BUILDERS = {
-        "connect4": Connect4PromptBuilder,
-        "tictactoe": TicTacToePromptBuilder,
-        "nim": NimPromptBuilder,
-    }
 
     http_base = _ws_to_http(args.server_url)
     match_info = _create_match(http_base, args.game)
@@ -144,7 +132,7 @@ async def _run_abort(args: argparse.Namespace) -> int:
     agent1 = OllamaAgent(
         client=http_client,
         model=args.model_seat_1,
-        prompt_builder=_BUILDERS[args.game](),
+        prompt_builder=OLLAMA_GAME_ADAPTERS[args.game].prompt_builder_factory(),
         max_retries=args.ollama_max_retries,
         seed=0,
         temperature=args.ollama_temperature,

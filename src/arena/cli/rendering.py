@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from typing import Any
 
-from arena.cli.games import connect4 as _c4
-from arena.cli.games import nim as _nim
-from arena.cli.games import tictactoe as _ttt
+from arena.cli.games import CLI_GAME_ADAPTERS
 
 RESET = "\x1b[0m"
 BOLD = "\x1b[1m"
@@ -24,12 +22,6 @@ _LIFECYCLE_COLORS: dict[str, str] = {
     "created": DIM,
     "finished": BLUE,
     "aborted": RED,
-}
-
-_BOARD_RENDERERS: dict[str, Callable[[Mapping[str, Any]], str]] = {
-    "connect4": _c4.render_board,
-    "nim": _nim.render_state,
-    "tictactoe": _ttt.render_board,
 }
 
 
@@ -73,13 +65,13 @@ def _render_board(status: Mapping[str, Any]) -> str | None:
     if lifecycle not in ("running", "finished"):
         return None
     game_id = status.get("game_id", "")
-    renderer = _BOARD_RENDERERS.get(game_id)
-    if renderer is None:
+    adapter = CLI_GAME_ADAPTERS.get(game_id)
+    if adapter is None:
         return None
     state_payload = status.get("state_payload")
     if not isinstance(state_payload, dict):
         return None
-    return renderer(state_payload)
+    return adapter.renderer(state_payload)
 
 
 def _render_players(status: Mapping[str, Any]) -> str:

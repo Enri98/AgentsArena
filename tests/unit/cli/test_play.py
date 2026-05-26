@@ -183,6 +183,27 @@ def test_quit_mid_turn_transcript_has_turn_requested_before_match_aborted(
     assert abort_event["payload"]["abort"]["reason"] == "user_quit"
 
 
+def test_main_nim_scripted_vs_scripted_finishes(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    from arena.cli.play.__main__ import main
+
+    code = main(
+        [
+            "--game", "nim",
+            "--seat-0", "scripted:0 1",
+            "--seat-1", "scripted:1 1",
+            "--nim-piles", "2",
+            "--nim-pile-size", "1",
+            "--out-dir", str(tmp_path),
+        ]
+    )
+    assert code == 0
+
+    status = json.loads((tmp_path / "status.json").read_text(encoding="utf-8"))
+    assert status["lifecycle"] == "finished"
+
+
 def test_scripted_policy_exhaustion_abort_has_informative_cause_message(
     tmp_path: Path,
 ) -> None:

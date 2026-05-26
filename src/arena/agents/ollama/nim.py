@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from arena.agents.ollama._adapters import OllamaGameAdapter, register_ollama_adapter
 from arena.games.nim.actions import TakeObjects
+from arena.games.nim.definition import NIM_GAME_ID
 
 
 class NimPromptBuilder:
@@ -84,6 +86,14 @@ class NimPromptBuilder:
 
     def describe_invalid(self, raw_content: str) -> str:
         return f"Response was not a valid legal action. Raw content: {raw_content[:200]}"
+
+
+register_ollama_adapter(
+    OllamaGameAdapter(
+        game_id=NIM_GAME_ID,
+        prompt_builder_factory=NimPromptBuilder,
+    )
+)
 
 
 __all__: tuple[str, ...] = ("NimPromptBuilder",)
