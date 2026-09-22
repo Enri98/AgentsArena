@@ -543,6 +543,26 @@ game whose `GameDefinition` declares hidden information.
 
 ## 13. Rate limits (v1, hardcoded)
 
+> **Implementation status (Phase 36): all four caps enforced.**
+>
+> | Cap | Status |
+> |-----|--------|
+> | Max concurrent WebSocket connections per source IP | ✅ closes `4429` |
+> | Max match creations per source IP per minute | ✅ returns `HTTP 429 rate_limited` |
+> | Max concurrent connections per match | ✅ closes `4429` |
+> | Max `action_response` per match per second | ✅ closes `4429` |
+>
+> **Scope of the action cap.** It counts action frames the server actually *reads*, which are the
+> ones from the seat whose turn it is. An off-turn seat's frames sit unread in its socket buffer
+> until its turn arrives, so they are not counted when sent. The cap therefore bounds work the
+> match loop performs, not raw inbound traffic — the per-IP and per-match connection caps are what
+> bound the latter. Exceeding it closes that seat's connection with `4429`; no new abort reason is
+> introduced, because the closed socket surfaces as a disconnect and the existing disconnect-grace
+> path decides the match outcome.
+>
+> Implementation lives in `arena/server/rate_limits.py`. Caps are injectable: the test suite runs
+> with `RateLimiter.unlimited()` because the whole suite shares one client address.
+
 - Max concurrent WebSocket connections per source IP: **8**.
 - Max match creations per source IP per minute: **5**.
 - Max `action_response` messages per match per second: **2** (well above any sane agent).

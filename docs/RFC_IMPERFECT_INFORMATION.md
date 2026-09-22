@@ -1,6 +1,12 @@
 # RFC: Imperfect-Information Game Support (v2)
 
-Status: Draft for owner review. No code attached.
+Status: **SUPERSEDED as a plan, retained as analysis.** The seven open questions in §8 were
+answered by the owner on 2026-09-22; several answers diverge from this document's own
+recommendations. The approved roadmap is "v2 roadmap — Phases 36-42" in `IMPLEMENTATION_PLAN.md`
+and that is the plan of record. §1-5 (problem statement, current state, contract analysis, layer
+impact) remain accurate and useful; §6-8 (exemplar pick, phased rollout, open questions) are
+historical. No code attached.
+
 Scope: protocol-bumping (`schema_version` 1 -> 2). v1 (Phases 0-35) shipped only
 deterministic perfect-information sequential 2-player games.
 

@@ -33,7 +33,17 @@ Dependency direction is enforced by architecture tests: `core`/`games` import no
 
 Outside the numbered roadmap: `arena.games.nim` (commit `3da879a`) is registered in the default registry and exercised by the remote demo.
 
-Open items: none — all v1 follow-ups closed. Future work is the v2 backlog (see "Deferred to v2" below).
+**Post-v1 work already landed** (not part of the numbered roadmap):
+- `68b011a` — per-layer adapter registries. `arena.cli.games`, `arena.mcp.games`, and `arena.agents.ollama._adapters` each expose a registry that per-game modules register into at import time, replacing hand-maintained `if game_id == ...` ladders. **New games must register with each layer's registry rather than adding dispatch branches.**
+- `a408787` — `docs/ADDING_A_GAME.md` plus a scaffold generator: `python -m arena.games.scaffold`.
+- `cce1846` — `docs/RFC_IMPERFECT_INFORMATION.md`, a draft v2 RFC proposing Phases 36-40 (per-seat snapshots, `schema_version` 1→2, spectator endpoint, Liar's Dice exemplar). **Draft only — not approved, no code attached.**
+
+**Known gaps (documented but not implemented):**
+- `docs/NETWORK_PROTOCOL.md` §13 specifies per-IP and per-match rate limits with close code `4429`. None of it is implemented; `4429` appears nowhere in `src/`. This must be closed before any public, unauthenticated deployment.
+- No CI. There is no `.github/` workflow; `ruff` + `pytest` run only locally.
+- Nothing is deployed. `fly.toml` still carries the placeholder `app = "arena-server"`, and the Phase 34 public-server acceptance run has never been executed for real.
+
+Open items: no v1 follow-ups remain. Future work is the v2 backlog (see "Deferred to v2" below) plus the gaps above.
 
 ## Core design rules (do not violate)
 
@@ -51,17 +61,60 @@ Open items: none — all v1 follow-ups closed. Future work is the v2 backlog (se
 - The wire format is JSON over WebSocket; this is not configurable.
 - Architecture/import-boundary tests are load-bearing — do not introduce upward imports.
 
-## Deferred to v2
+## v2 roadmap (approved 2026-09-22)
 
-- Transcript persistence beyond JSON files written by `examples/`
+Phases 36-42 are specified in `IMPLEMENTATION_PLAN.md` under "v2 roadmap". Order:
+36 spectator endpoint + transport refactor + §13 rate limits + CI (v1 wire, no bump) →
+37 chance-node primitive (**bump to `schema_version=2`**) →
+38 imperfect-information contract (**bump to 3**) → 39 Liar's Dice →
+40 transcript persistence + `GET /matches/{id}/public-transcript` → 41 generalized turn loop
+(**bump to 4**) → 42 docs + packaged TypeScript SDK.
+
+**Active phase: 36.** It ships no new or changed wire fields — spectators get new message types
+(`spectator_hello` / `spectator_welcome`), which §7 permits without a bump, and receive the
+existing `post_snapshot`. `WIRE_SCHEMA_VERSION` must still be `1` when Phase 36 ends.
+
+Three hard constraints discovered by adversarial review, verified against the code:
+- **A slow spectator must not be able to stall a match.** `_broadcast` (`runtime_bridge.py:188`)
+  awaits `send_text` sequentially inside `run_match`; a blocked send suspends the driver while the
+  per-turn deadline keeps running, aborting the match and blaming an innocent seat. Spectators need
+  bounded per-connection outbound queues with their own writer tasks.
+- **Never put a game's RNG seed in config.** `send_welcome` dumps `match_config` to both seats
+  (`runtime_bridge.py:1021`) and `_build_snapshot` embeds it in every `SnapshotEnvelope`
+  (`local_match.py:99`), which is broadcast and stored in every transcript turn. A seed in config
+  is public, and would let either seat derive the opponent's hidden Liar's Dice hand.
+- **§13 rate limits are a prerequisite of the spectator endpoint, not a follow-on.** An
+  unauthenticated unlimited fan-out endpoint is exactly what §13 exists to bound.
+
+Two items moved OUT of the v2 deferral list by owner decision: **transcript persistence**
+(Phase 40, prerequisite for the HTTP transcript endpoint) and the **spectator endpoint**
+(Phase 36 — the URL no longer closes with `4404`).
+
+## Still deferred
+
 - Real authentication, tokens, or accounts
-- Web spectator UI (URL shape `WS /matches/{id}/spectate` reserved; closes with `4404` until v2)
+- A designed web spectator **UI** (Phase 36 ships functional viewer glue, not a product surface)
 - Lobby, matchmaking, tournaments
 - Prometheus metrics endpoint
 - OpenTelemetry tracing
 - TypeScript SDK port
 - Anthropic-SDK-backed agent
 - Third-party game registration
+
+## Testing rules (hard-won — do not relearn these)
+
+- **One WebSocket per Starlette `TestClient` test.** A test driving two live WS sessions through a
+  single TestClient shares one anyio portal and deadlocks nondeterministically on the receive side.
+  This made the whole suite hang in ~75% of full runs. Anything needing two live sockets belongs in
+  `tests/integration/`, which runs a real uvicorn server over real TCP via the `running_server`
+  fixture.
+- **Always context-manage `TestClient`** (`with TestClient(app) as client:`). Unclosed clients leak
+  portal threads across the session.
+- **Pass short `per_turn_deadline_ms` / `disconnect_grace_ms` in tests.** At the 30 s production
+  default, a test that abandons a match leaves `run_match` parked for 30 s.
+- `pytest-timeout` is configured in `pyproject.toml` (`--timeout=120 --timeout-method=thread`) so a
+  hang fails instead of blocking CI forever. The thread method is required: signal-based timeouts
+  do not exist on Windows.
 
 ## Working workflow
 

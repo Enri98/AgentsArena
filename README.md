@@ -1,12 +1,19 @@
 # AgentsArena
 
-AgentsArena is a Python 3.11 library for pure, turn-based game simulation.
+AgentsArena is a Python 3.11 library and server for agent-vs-agent competition on
+sequential, deterministic, perfect-information games.
 
-Current scope:
-- simulation package only
-- sequential, deterministic, perfect-information games
-- typed domain objects, registry, rules, serializers, and tests
-- built-in games: Connect 4 and Tic-Tac-Toe
+What ships today (v1, Phases 0-35):
+- a pure simulation core: typed domain objects, registry, rules, serializers
+- built-in games: Connect 4, Tic-Tac-Toe, Nim (add your own via `docs/ADDING_A_GAME.md`)
+- a local match runner, ANSI terminal renderer, replay viewer, and interactive CLI
+- a WebSocket server with per-turn deadlines, heartbeats, reconnect, and JSON logs
+- a reference Python SDK, and an MCP server so any MCP client can take a seat
+- local Ollama agents plus a Docker / Fly.io deployment recipe
+
+Not yet: authentication, persistence beyond JSON files, a web spectator UI,
+matchmaking, or imperfect-information games. See `IMPLEMENTATION_PLAN.md` for
+the roadmap and `docs/RFC_IMPERFECT_INFORMATION.md` for the proposed v2 direction.
 
 ## Quickstart
 
