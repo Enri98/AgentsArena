@@ -67,8 +67,18 @@ These do not invalidate the v1 claim. They all block a public launch.
 answered by the owner, and Phases 36-42 are now specified in `IMPLEMENTATION_PLAN.md` under
 "v2 roadmap". `docs/RFC_IMPERFECT_INFORMATION.md` is superseded as a plan, retained as analysis.
 
-Active phase: **36 — spectator endpoint and the transport refactor it requires**, landing on the
-v1 wire with no `schema_version` bump.
+**Phase 36 is complete** (2026-09-23), on the v1 wire with no `schema_version` bump. Shipped:
+CI, all four protocol §13 rate limits, `MatchRegistry` eviction, the public-view contract, the
+`MatchConnections` registry, per-connection bounded outboxes with writer tasks, the live
+`WS /matches/{id}/spectate` channel, and a zero-dependency browser viewer at
+`examples/spectator/`. 714 tests pass.
+
+One item was deliberately deferred out of Slice 2: the **match-owned driver task**. `run_match` is
+still owned by the seat-1 handler. Both things that motivated the refactor — the test flake and
+spectator attachment — were solved without it, and its only remaining consumer is Phase 41s
+simultaneous-move loop. Build it there rather than speculatively.
+
+Active phase: **37 — chance-node primitive**. This one carries the bump to `schema_version=2`.
 
 The Phase 36-38 specs were revised on 2026-09-22 after an adversarial review that checked every
 claim against the code. Three findings are worth carrying forward, because each is easy to
