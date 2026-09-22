@@ -35,7 +35,9 @@ from arena.sdk.errors import HandshakeError, ProtocolError, close_code_to_error
 
 CLIENT_NAME = "arena-sdk-python"
 CLIENT_VERSION = "0.1.0"
-SUPPORTED_SCHEMA_VERSIONS = [1]
+# Phase 37 bumped the wire to 2 (transcripts carry chance turns). The SDK
+# reads both, so it advertises both and a v1 server still accepts it.
+SUPPORTED_SCHEMA_VERSIONS = [1, 2]
 
 
 class Session:

@@ -98,13 +98,20 @@ class _MatchResultPayload(BaseModel):
 
 
 class _MatchTurnPayload(BaseModel):
+    """Mirrors arena.match.MatchTurnPayload for validation at the UI boundary.
+
+    Phase 37: a chance turn has no seat and no action, so both are optional and
+    `kind` distinguishes them. Defaults keep a v1 transcript valid.
+    """
+
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    seat: int = Field(ge=0)
-    action: JSONMapping
+    seat: int | None = Field(default=None, ge=0)
+    action: JSONMapping | None = None
     events: list[_MatchEventPayload]
     result: _MatchResultPayload | None
     post_snapshot: _SnapshotPayload
+    kind: str = "action"
 
 
 class _MatchTranscriptPayload(BaseModel):

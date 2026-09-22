@@ -16,7 +16,13 @@ from arena.core.observations import Observation
 from arena.core.results import Draw, RuleResult, Win
 from arena.core.serializer import JSONMapping, SnapshotEnvelope
 from arena.core.types import Seat
-from arena.match.local_match import LocalMatch, apply_match_action, start_match
+from arena.match.local_match import (
+    TURN_KIND_ACTION,
+    TURN_KIND_CHANCE,
+    LocalMatch,
+    apply_match_action,
+    start_match,
+)
 
 ConfigT = TypeVar("ConfigT", bound=BaseGameConfig)
 StateT = TypeVar("StateT")
@@ -24,7 +30,14 @@ ActionT = TypeVar("ActionT", bound=Action)
 ObservationT = TypeVar("ObservationT", bound=Observation)
 ResultT = TypeVar("ResultT", bound=RuleResult)
 
-MATCH_TRANSCRIPT_SCHEMA_VERSION = 1
+#: Bumped to 2 in Phase 37: turns gained a ``kind``, and a chance turn carries
+#: no seat and no action. That is a shape change an older reader cannot handle,
+#: so it is a version bump rather than an additive field.
+MATCH_TRANSCRIPT_SCHEMA_VERSION = 2
+
+#: Transcript versions this loader accepts. A v1 transcript predates chance
+#: nodes, so every one of its turns is an action turn.
+SUPPORTED_MATCH_TRANSCRIPT_SCHEMA_VERSIONS = (1, 2)
 
 
 class MatchEventPayload(BaseModel):
@@ -46,15 +59,21 @@ class MatchResultPayload(BaseModel):
 
 
 class MatchTurnPayload(BaseModel):
-    """JSON-safe payload for one accepted match turn."""
+    """JSON-safe payload for one match turn.
+
+    ``seat`` and ``action`` are null on a chance turn: no seat chose it. They
+    default to null and ``kind`` defaults to ``"action"`` so a v1 transcript,
+    which predates chance nodes, still validates.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    seat: int
-    action: JSONMapping
+    seat: int | None = None
+    action: JSONMapping | None = None
     events: list[MatchEventPayload]
     result: MatchResultPayload | None
     post_snapshot: SnapshotEnvelope
+    kind: str = TURN_KIND_ACTION
 
 
 class MatchTranscriptPayload(BaseModel):
@@ -73,13 +92,14 @@ class MatchTranscriptPayload(BaseModel):
 class LoadedMatchTurn(Generic[StateT, ActionT]):
     """Typed turn data rehydrated from a match transcript."""
 
-    seat: Seat
-    action: ActionT
+    seat: Seat | None
+    action: ActionT | None
     event_payloads: tuple[JSONMapping, ...]
     result: RuleResult | None
     result_payload: JSONMapping | None
     post_state: StateT
     post_snapshot: SnapshotEnvelope
+    kind: str = TURN_KIND_ACTION
 
 
 @dataclass(frozen=True)
@@ -109,7 +129,12 @@ def dump_match_transcript(
         turns=[
             MatchTurnPayload(
                 seat=turn.seat,
-                action=match.definition.serializer.dump_action(turn.action),
+                action=(
+                    match.definition.serializer.dump_action(turn.action)
+                    if turn.action is not None
+                    else None
+                ),
+                kind=turn.kind,
                 events=[
                     _dump_domain_event(event)
                     for event in turn.events
@@ -144,9 +169,11 @@ def load_match_transcript(
     loaded_turns = tuple(
         LoadedMatchTurn[StateT, ActionT](
             seat=turn_payload.seat,
-            action=cast(
-                ActionT,
-                definition.serializer.load_action(turn_payload.action),
+            kind=turn_payload.kind,
+            action=(
+                cast(ActionT, definition.serializer.load_action(turn_payload.action))
+                if turn_payload.action is not None
+                else None
             ),
             event_payloads=tuple(
                 event_payload.model_dump(mode="json") for event_payload in turn_payload.events
@@ -200,9 +227,36 @@ def validate_match_transcript(
         context="Initial",
     )
 
-    for turn_index, loaded_turn in enumerate(loaded_transcript.turns, start=1):
+    # Chance turns are NOT replayed: start_match and apply_match_action resolve
+    # chance nodes themselves, so replaying the action turns regenerates them in
+    # place. Reproducing the recorded outcome is the point — the generator lives
+    # in serialized state, so a faithful replay re-derives it rather than
+    # re-rolling. The full comparison below is what proves it.
+    for loaded_turn in loaded_transcript.turns:
+        if loaded_turn.kind == TURN_KIND_CHANCE:
+            continue
+        if loaded_turn.seat is None or loaded_turn.action is None:
+            raise ValueError(
+                "Transcript validation failed: an action turn must carry both a seat "
+                f"and an action (turn kind {loaded_turn.kind!r})."
+            )
         replay_match = apply_match_action(replay_match, loaded_turn.seat, loaded_turn.action)
-        generated_turn = replay_match.turns[-1]
+
+    if len(replay_match.turns) != len(loaded_transcript.turns):
+        raise ValueError(
+            "Transcript validation failed: replay produced "
+            f"{len(replay_match.turns)} turn(s) but the transcript records "
+            f"{len(loaded_transcript.turns)}."
+        )
+
+    for turn_index, (loaded_turn, generated_turn) in enumerate(
+        zip(loaded_transcript.turns, replay_match.turns), start=1
+    ):
+        if loaded_turn.kind != generated_turn.kind:
+            raise ValueError(
+                f"Transcript validation failed: turn {turn_index} is recorded as "
+                f"{loaded_turn.kind!r} but replayed as {generated_turn.kind!r}."
+            )
 
         _ensure_state_matches(
             expected=loaded_turn.post_state,
@@ -229,9 +283,19 @@ def validate_match_transcript(
     return loaded_transcript
 
 
-def _dump_domain_event(event: DomainEvent) -> MatchEventPayload:
+def dump_domain_event(event: DomainEvent) -> MatchEventPayload:
+    """Serialize one domain event to its JSON-safe payload.
+
+    Public because the server puts events on the wire: since Phase 37 a chance
+    outcome is carried by its events and cannot be recomputed by a client.
+    """
+
     payload = _dump_dataclass_fields(event)
     return MatchEventPayload(event_type=event.event_type, payload=payload)
+
+
+#: Retained for internal callers predating the public name.
+_dump_domain_event = dump_domain_event
 
 
 def _dump_rule_result(result: RuleResult | None) -> MatchResultPayload | None:
@@ -369,6 +433,7 @@ __all__: Sequence[str] = [
     "LoadedMatchTranscript",
     "LoadedMatchTurn",
     "MATCH_TRANSCRIPT_SCHEMA_VERSION",
+    "dump_domain_event",
     "MatchEventPayload",
     "MatchResultPayload",
     "MatchTranscriptPayload",

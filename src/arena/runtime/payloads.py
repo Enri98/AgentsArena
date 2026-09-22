@@ -40,8 +40,18 @@ ActionT = TypeVar("ActionT", bound=Action)
 ObservationT = TypeVar("ObservationT", bound=Observation)
 ResultT = TypeVar("ResultT", bound=RuleResult)
 
-RUNTIME_STATUS_SCHEMA_VERSION = 1
-RUNTIME_TRANSCRIPT_SCHEMA_VERSION = 1
+# Moves with RUNTIME_TRANSCRIPT_SCHEMA_VERSION: arena.ui cross-checks that a
+# status and a transcript come from the same runtime payload generation.
+RUNTIME_STATUS_SCHEMA_VERSION = 2
+
+#: Versions the status validator accepts.
+SUPPORTED_RUNTIME_STATUS_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2)
+# Bumped to 2 in Phase 37: the embedded match transcript's turns gained a
+# `kind`, and a chance turn carries no seat and no action.
+RUNTIME_TRANSCRIPT_SCHEMA_VERSION = 2
+
+#: Versions the transcript validator accepts. v1 predates chance nodes.
+SUPPORTED_RUNTIME_TRANSCRIPT_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2)
 
 
 class RuntimePlayerPayload(BaseModel):
@@ -89,7 +99,7 @@ class RuntimeSessionStatusPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     match_id: str = Field(min_length=1)
     game_id: str = Field(min_length=1)
     lifecycle: str = Field(min_length=1)
@@ -108,7 +118,8 @@ class RuntimeTranscriptPayload(BaseModel):
 
     match_id: str = Field(min_length=1)
     game_id: str = Field(min_length=1)
-    schema_version: Literal[1]
+    # Accepts 1 and 2: a v1 transcript predates chance nodes and stays readable.
+    schema_version: Literal[1, 2]
     lifecycle: str = Field(min_length=1)
     players: list[RuntimePlayerPayload]
     events: list[RuntimeEventPayload]
@@ -181,6 +192,7 @@ def validate_session_status(payload: JSONMapping) -> RuntimeSessionStatusPayload
     _ensure_supported_schema_version(
         payload=payload,
         expected=RUNTIME_STATUS_SCHEMA_VERSION,
+        supported=SUPPORTED_RUNTIME_STATUS_SCHEMA_VERSIONS,
         context="Runtime session status",
     )
     status_payload = RuntimeSessionStatusPayload.model_validate(payload)
@@ -196,6 +208,7 @@ def validate_runtime_transcript(
     _ensure_supported_schema_version(
         payload=payload,
         expected=RUNTIME_TRANSCRIPT_SCHEMA_VERSION,
+        supported=SUPPORTED_RUNTIME_TRANSCRIPT_SCHEMA_VERSIONS,
         context="Runtime transcript",
     )
     runtime_payload = RuntimeTranscriptPayload.model_validate(payload)
@@ -271,13 +284,26 @@ def _ensure_supported_schema_version(
     payload: JSONMapping,
     expected: int,
     context: str,
+    supported: tuple[int, ...] | None = None,
 ) -> None:
+    """Reject a payload this build cannot read.
+
+    ``supported`` lets a payload type accept more than the version it emits —
+    a v1 transcript predates chance nodes and is still perfectly readable.
+    """
+
+    accepted = supported if supported is not None else (expected,)
     actual = payload.get("schema_version")
     if actual is None:
         return
-    if actual != expected:
+    if actual not in accepted:
+        expected_text = (
+            repr(expected)
+            if len(accepted) == 1
+            else " or ".join(repr(v) for v in accepted)
+        )
         raise ValueError(
-            f"{context} schema_version {actual!r} does not match {expected!r}."
+            f"{context} schema_version {actual!r} does not match {expected_text}."
         )
 
 
@@ -294,7 +320,9 @@ def _dump_rule_result(result: RuleResult | None) -> RuntimeResultPayload | None:
 
 __all__: Sequence[str] = [
     "RUNTIME_STATUS_SCHEMA_VERSION",
+    "SUPPORTED_RUNTIME_STATUS_SCHEMA_VERSIONS",
     "RUNTIME_TRANSCRIPT_SCHEMA_VERSION",
+    "SUPPORTED_RUNTIME_TRANSCRIPT_SCHEMA_VERSIONS",
     "RuntimeAbortPayload",
     "RuntimeEventPayload",
     "RuntimePlayerPayload",

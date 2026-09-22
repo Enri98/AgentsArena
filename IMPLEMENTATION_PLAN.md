@@ -3657,10 +3657,47 @@ Acceptance criteria:
 - `WIRE_SCHEMA_VERSION == 2`; a v1 client is refused with a clear error
 - ruff + pytest green
 
-#### Slice 1 - `Seat | None` audit and the chance-node contract
-#### Slice 2 - Transcript turn kinds, load-bearing events, RNG-in-state, schema bump to 2
+#### Slice 1 - Chance-node contract and seeded RNG — ✅ COMPLETE (2026-09-23)
+
+- `arena.core.chance`: `ChanceRng` (a frozen `(seed, counter)` pair), the `is_chance_node` /
+  `resolve_chance` hooks, and `validate_chance_support`.
+- `GameDefinition.has_chance_nodes`, enforced at registration like the public-view declaration.
+- `ChanceRng` draws are hash-based and rejection-sampled: reproducible across processes and Python
+  builds, and unbiased. A `random.Random` could not be used — its 625-int internal state is
+  interpreter-tied, and transcript validation compares post-state snapshots exactly on every turn,
+  so the generator has to round-trip and compare equal.
+
+**Design note — `current_seat` keeps its signature.** The spec floated widening it to `Seat | None`,
+which would mean auditing 27 call sites. Instead callers check `is_chance_node` first — the same
+shape as the `is_terminal` guard the codebase already uses before asking whose turn it is. This is
+not a weakening, because `arena.match` **drains chance nodes as part of stepping**: a settled match
+never rests at a node where nobody is to move. The spec explicitly allowed "well-defined or
+explicitly absent".
+
+#### Slice 2 - Transcript turn kinds, load-bearing events, and the wire bump — ✅ COMPLETE (2026-09-23)
+
+- `TurnRecord` and `MatchTurnPayload` gained `kind`; `seat` and `action` are null on a chance turn.
+- `start_match` and `apply_match_action` drain chance nodes, recording each as its own turn, with a
+  `MAX_CONSECUTIVE_CHANCE_STEPS` guard so an engine that never settles raises instead of hanging.
+- **Replay does not re-roll.** `validate_match_transcript` replays only action turns; the drain
+  regenerates the chance turns, and a full recorded-vs-replayed comparison proves they landed in the
+  same positions with the same outcomes.
+- `turn_committed.events` is load-bearing: real serialized domain events instead of the previous
+  hardcoded empty list plus class-name strings. That was harmless while every game was
+  deterministic, because a client could recompute anything it missed. A chance outcome cannot be
+  recomputed, so it has to be on the wire.
+- **Versions bumped to 2:** wire, runtime transcript, runtime status (`arena.ui` cross-checks the
+  last two as a matched pair), and `MATCH_TRANSCRIPT_SCHEMA_VERSION`.
+- **Multi-version decode landed here rather than in Phase 38.** The codec emits
+  `WIRE_SCHEMA_VERSION` but accepts everything in `SUPPORTED_WIRE_SCHEMA_VERSIONS`; the runtime
+  payload validators do the same. A build that can only read what it writes cannot migrate without a
+  flag day. A v1-only client is still refused at `hello` with `4400` — it genuinely cannot parse a
+  v2 transcript — so the SDK advertises `[1, 2]`.
+- Protocol §7 gains a version-history table (§7.1); the doc header states the current version.
+
 #### Slice 3 - Seed provenance and non-disclosure
 #### Slice 4 - Exemplar stochastic game + adapter registrations
+
 
 ---
 

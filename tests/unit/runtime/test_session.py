@@ -350,6 +350,7 @@ def test_runtime_transcript_wraps_match_transcript_and_validates_explicitly() ->
 
 
 def test_session_status_validation_rejects_unknown_schema_version() -> None:
+    # 2 is a supported version as of Phase 37; 99 is the unknown one.
     arena = Arena(id_factory=lambda: MatchId("future-status"))
     session = arena.start_session(
         arena.create_session(
@@ -360,7 +361,7 @@ def test_session_status_validation_rejects_unknown_schema_version() -> None:
         )
     )
     payload = dump_session_status(session)
-    payload["schema_version"] = 2
+    payload["schema_version"] = 99
 
     with pytest.raises(ValueError, match="schema_version"):
         validate_session_status(payload)
@@ -370,8 +371,8 @@ def test_runtime_payload_models_encode_fixed_schema_versions() -> None:
     status_schema = RuntimeSessionStatusPayload.model_json_schema()
     transcript_schema = RuntimeTranscriptPayload.model_json_schema()
 
-    assert status_schema["properties"]["schema_version"]["const"] == 1
-    assert transcript_schema["properties"]["schema_version"]["const"] == 1
+    assert status_schema["properties"]["schema_version"]["enum"] == [1, 2]
+    assert transcript_schema["properties"]["schema_version"]["enum"] == [1, 2]
 
 
 def test_runtime_transcript_validation_rejects_missing_runtime_event_scope() -> None:
@@ -402,7 +403,7 @@ def test_runtime_transcript_validation_rejects_unknown_schema_version() -> None:
         )
     )
     payload = dump_runtime_transcript(finished)
-    payload["schema_version"] = 2
+    payload["schema_version"] = 99
 
     with pytest.raises(ValueError, match="schema_version"):
         validate_runtime_transcript(Connect4GameDefinition, payload)

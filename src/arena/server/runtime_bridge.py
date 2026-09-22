@@ -87,6 +87,7 @@ from arena.adapters.websocket.messages import (
 )
 from arena.core.exceptions import ArenaCoreError
 from arena.match.local_match import apply_match_action
+from arena.match.transcript import dump_domain_event
 from arena.runtime.models import (
     AbortMetadata,
     AbortReason,
@@ -490,17 +491,29 @@ async def _broadcast_turn_committed(
     last_turn = local_match.turns[-1]
     post_snap = last_turn.post_snapshot
     post_snapshot_dict = post_snap.model_dump(mode="json")
+    # Phase 37: events are load-bearing. They used to be class-name strings in
+    # turn_record and an empty list on the body, which was harmless while every
+    # game was deterministic — a client could recompute anything it missed. A
+    # chance outcome cannot be recomputed, so it has to be on the wire.
+    event_payloads = [
+        dump_domain_event(event).model_dump(mode="json") for event in last_turn.events
+    ]
     turn_record_dict = {
         "turn_index": len(local_match.turns) - 1,
+        "kind": last_turn.kind,
         "seat": last_turn.seat,
-        "action": session.definition.serializer.dump_action(last_turn.action),
-        "events": [e.__class__.__name__ for e in last_turn.events],
+        "action": (
+            session.definition.serializer.dump_action(last_turn.action)
+            if last_turn.action is not None
+            else None
+        ),
+        "events": event_payloads,
         "post_snapshot": post_snapshot_dict,
     }
     body = TurnCommittedBody(
         turn_record=turn_record_dict,
         post_snapshot=post_snapshot_dict,
-        events=[],
+        events=event_payloads,
     )
     env = TurnCommittedEnvelope(
         schema_version=WIRE_SCHEMA_VERSION,

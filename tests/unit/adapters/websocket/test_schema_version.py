@@ -13,7 +13,7 @@ def test_unknown_schema_version_raises_schema_version_mismatch() -> None:
     msg = json.dumps(
         {
             "type": "ping",
-            "schema_version": 2,
+            "schema_version": 99,
             "match_id": "abc",
             "payload": {"nonce": "x"},
         }
@@ -21,7 +21,7 @@ def test_unknown_schema_version_raises_schema_version_mismatch() -> None:
     with pytest.raises(SchemaVersionMismatch) as exc_info:
         loads(msg)
 
-    assert exc_info.value.received == 2
+    assert exc_info.value.received == 99
     assert exc_info.value.expected == WIRE_SCHEMA_VERSION
 
 

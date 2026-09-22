@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from arena.core.chance import validate_chance_support
 from arena.core.exceptions import DuplicateGameRegistration, UnknownGame
 from arena.core.game_definition import GameDefinition
 from arena.core.public_view import validate_public_view
@@ -19,6 +20,7 @@ class GameRegistry:
         """Register a game definition by its stable identifier."""
 
         validate_public_view(definition)
+        validate_chance_support(definition)
 
         if definition.game_id in self._definitions:
             raise DuplicateGameRegistration(

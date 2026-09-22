@@ -41,5 +41,13 @@ class GameDefinition(Generic[ConfigModelT, StateT, ActionT, ObservationT, Result
     #: ``arena.core.public_view``; ``GameRegistry.register`` enforces that.
     has_hidden_information: bool = False
 
+    #: Whether the game has chance nodes — points where no seat acts and the
+    #: rules engine resolves a random outcome (Phase 37). A game setting this
+    #: must implement the hooks in ``arena.core.chance``; ``GameRegistry.register``
+    #: enforces that. Randomness must live in serialized state as a ``ChanceRng``,
+    #: never in config: config is broadcast to both seats and embedded in every
+    #: snapshot, so a seed placed there is public.
+    has_chance_nodes: bool = False
+
 
 __all__: Sequence[str] = ["GameDefinition"]

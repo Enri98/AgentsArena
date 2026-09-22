@@ -248,7 +248,7 @@ def test_transcript_mapping_rejects_unknown_runtime_schema_version() -> None:
         _winning_policies(),
     )
     transcript = dump_runtime_transcript(session)
-    transcript["schema_version"] = 2
+    transcript["schema_version"] = 99
 
     with pytest.raises(ValidationError):
         build_match_transcript(transcript)

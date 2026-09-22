@@ -27,6 +27,7 @@ from arena.match import (
     start_match,
     validate_match_transcript,
 )
+from arena.match.transcript import MATCH_TRANSCRIPT_SCHEMA_VERSION
 
 
 def _build_connect4_match() -> LocalMatch[
@@ -88,7 +89,7 @@ def test_dump_match_transcript_is_json_safe_for_an_ongoing_match() -> None:
 
     assert json.dumps(payload)
     assert payload["game_id"] == CONNECT4_GAME_ID
-    assert payload["schema_version"] == 1
+    assert payload["schema_version"] == MATCH_TRANSCRIPT_SCHEMA_VERSION
     assert payload["initial_snapshot"]["game_id"] == CONNECT4_GAME_ID
     assert payload["turns"][0]["action"] == {"column": 0}
     assert payload["turns"][0]["events"][0]["event_type"] == "DiscDropped"
@@ -203,3 +204,53 @@ def test_load_match_transcript_rejects_invalid_and_foreign_game_ids() -> None:
     payload["game_id"] = "different-game"
     with pytest.raises(ValueError, match="does not match"):
         load_match_transcript(Connect4GameDefinition, payload)
+
+
+# ---------------------------------------------------------------------------
+# Phase 37: turn kinds and v1 compatibility
+# ---------------------------------------------------------------------------
+
+
+def test_transcript_schema_bumped_for_turn_kinds() -> None:
+    """Chance turns carry no seat and no action, which an older reader cannot
+    interpret — a shape change, so a version bump rather than an additive field.
+    """
+
+    assert MATCH_TRANSCRIPT_SCHEMA_VERSION == 2
+
+
+def test_action_turns_are_labelled_and_complete() -> None:
+    match = start_match(Connect4GameDefinition, Connect4Config(rows=4, columns=4, connect_length=4))
+    match = apply_match_action(match, 0, DropDisc(column=0))
+
+    payload = dump_match_transcript(match)
+    turn = payload["turns"][0]
+
+    assert turn["kind"] == "action"
+    assert turn["seat"] == 0
+    assert turn["action"] is not None
+
+
+def test_a_version_1_transcript_still_loads() -> None:
+    """v1 predates chance nodes, so every one of its turns is an action turn.
+
+    `kind` defaults and `seat`/`action` stay required in practice, so an archived
+    v1 transcript keeps replaying without rewriting it.
+    """
+
+    match = start_match(Connect4GameDefinition, Connect4Config(rows=4, columns=4, connect_length=4))
+    match = apply_match_action(match, 0, DropDisc(column=0))
+    match = apply_match_action(match, 1, DropDisc(column=1))
+
+    payload = dump_match_transcript(match)
+
+    # Rewrite it as a v1 document: no schema bump, no `kind` on any turn.
+    payload["schema_version"] = 1
+    for turn in payload["turns"]:
+        turn.pop("kind")
+
+    loaded = load_match_transcript(Connect4GameDefinition, payload)
+
+    assert loaded.schema_version == 1
+    assert [turn.kind for turn in loaded.turns] == ["action", "action"]
+    assert validate_match_transcript(Connect4GameDefinition, payload) is not None

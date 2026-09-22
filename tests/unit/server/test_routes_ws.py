@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from arena.adapters.websocket import WIRE_SCHEMA_VERSION
 from arena.server.app import create_app
 from arena.server.rate_limits import RateLimiter
 
@@ -28,7 +29,7 @@ HELLO_TEMPLATE: dict[str, Any] = {
     "payload": {
         "client_name": "test-client",
         "client_version": "0.1.0",
-        "supported_schema_versions": [1],
+        "supported_schema_versions": [1, 2],
         "auth": None,
         "requested_seat": 0,
         "resume_token": None,
@@ -115,7 +116,7 @@ def _spectator_hello() -> dict[str, Any]:
         "payload": {
             "client_name": "test-spectator",
             "client_version": "0.1.0",
-            "supported_schema_versions": [1],
+            "supported_schema_versions": [1, 2],
         },
     }
 
@@ -218,7 +219,7 @@ def test_welcome_envelope_fields() -> None:
         assert p["match_id"] == match_id
         assert p["game_id"] == "connect4"
         assert p["seat"] == 0
-        assert p["negotiated_schema_version"] == 1
+        assert p["negotiated_schema_version"] == WIRE_SCHEMA_VERSION
         assert p["lifecycle"] == "created"
         assert len(p["players"]) == 2
         assert p["resume_token"] is not None

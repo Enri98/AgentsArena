@@ -39,7 +39,7 @@ def _spectator_hello() -> SpectatorHelloEnvelope:
         payload=SpectatorHelloBody(
             client_name="test-spectator",
             client_version="0.1.0",
-            supported_schema_versions=[1],
+            supported_schema_versions=[1, 2],
         ),
     )
 
@@ -134,6 +134,15 @@ def test_spectator_sees_a_whole_match_and_never_gets_seat_only_messages(
 
         # For a perfect-information game the spectator's snapshot is the seats'.
         assert committed[0].payload.post_snapshot is not None
+
+        # Phase 37: events are load-bearing on the wire, not class-name strings.
+        # A chance outcome cannot be recomputed by a client, so it has to arrive
+        # here; this asserts the channel that will carry it.
+        first_events = committed[0].payload.events
+        assert first_events, "turn_committed must carry its domain events"
+        assert first_events[0]["event_type"] == "DiscDropped"
+        assert first_events[0]["payload"]["seat"] == 0
+        assert committed[0].payload.turn_record["kind"] == "action"
 
     asyncio.run(asyncio.wait_for(run(), timeout=60))
 

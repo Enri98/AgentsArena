@@ -37,6 +37,16 @@ class InvalidGameConfig(ConfigError):
     default_code = "invalid_game_config"
 
 
+class IncompleteChanceSupport(ConfigError):
+    """Raised when a game declares chance nodes but cannot resolve one.
+
+    A match would stall at the first chance node, so the inconsistency is
+    rejected at registration rather than discovered mid-game.
+    """
+
+    default_code = "incomplete_chance_support"
+
+
 class IncompletePublicView(ConfigError):
     """Raised when a game declares hidden information but does not redact it.
 
@@ -69,6 +79,12 @@ class GameFinished(RulesError):
     """Raised when a move is attempted after the game has finished."""
 
     default_code = "game_finished"
+
+
+class ChanceResolutionError(RulesError):
+    """Raised when a rules engine fails to make progress out of a chance node."""
+
+    default_code = "chance_resolution_error"
 
 
 class SerializationError(ArenaCoreError):

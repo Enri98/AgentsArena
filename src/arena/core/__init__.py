@@ -1,12 +1,15 @@
 """Core package for shared simulation-layer abstractions."""
 
 from arena.core.actions import Action
+from arena.core.chance import ChanceRng, is_chance_node, resolve_chance
 from arena.core.exceptions import (
     ArenaCoreError,
+    ChanceResolutionError,
     ConfigError,
     DuplicateGameRegistration,
     GameFinished,
     IllegalAction,
+    IncompleteChanceSupport,
     IncompletePublicView,
     InvalidGameConfig,
     RehydrationError,
@@ -43,6 +46,11 @@ __all__ = [
     "DuplicateGameRegistration",
     "Observation",
     "IncompletePublicView",
+    "IncompleteChanceSupport",
+    "ChanceResolutionError",
+    "ChanceRng",
+    "is_chance_node",
+    "resolve_chance",
     "dump_public_state",
     "load_public_state",
     "public_state",

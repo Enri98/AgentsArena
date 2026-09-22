@@ -1,4 +1,7 @@
-# AgentsArena Network Protocol (v1)
+# AgentsArena Network Protocol
+
+Current wire `schema_version`: **2** (Phase 37). Versions 1 and 2 are both accepted on decode;
+see §7.1 for what changed.
 
 This document is the language-agnostic source of truth for the wire protocol that connects remote
 agents to an `arena.server` instance. Every implementation — the reference Python SDK, future
@@ -230,12 +233,28 @@ inside known message types are also ignored.
 - "Unknown fields ignored" applies only to **optional** unknowns. A future version that promotes a
   field from optional to required must bump `schema_version`. SDKs must not silently ignore a field
   whose absence would change protocol semantics; the version bump is the signal.
-- **v1 servers always speak `schema_version=1`.** The `hello.supported_schema_versions` list and
+### 7.1 Version history
+
+| Version | Shipped in | What changed |
+|---------|-----------|--------------|
+| 1 | v1 (Phases 0-35) | Initial protocol. |
+| 2 | Phase 37 | Transcript turns gained a `kind`. A **chance turn** has no seat and no action — nobody chose it — so `turns[].seat` and `turns[].action` became nullable in `match_finished.transcript` and `match_aborted.transcript`. `turn_committed.events` became load-bearing: it used to be an empty list, harmless while every game was deterministic because a client could recompute anything it missed, but a chance outcome cannot be recomputed. |
+
+**Decode and emit are separate.** A server emits its own `schema_version` but accepts every version
+it can still read — see `SUPPORTED_WIRE_SCHEMA_VERSIONS`. A build that can only read what it writes
+cannot migrate without a flag day.
+
+A v1-only client is refused at `hello` with `4400`, and correctly so: it cannot parse a v2
+transcript, so letting it connect would only move the failure later. Clients that read both should
+advertise `[1, 2]`.
+
+- **A server always emits its own `schema_version`.** The `hello.supported_schema_versions` list and
   the negotiation flow exist to give v2+ servers a forward-compatible upgrade path without breaking
   v1 clients. Negotiation rule for any server: pick the highest integer present in both
   `hello.supported_schema_versions` and the server's own supported range; if no overlap, close with
   code `4400` (`schema_version_mismatch`) and a reason string naming the server's supported range.
-  v1 servers reduce this to: accept the connection iff `1` is in `hello.supported_schema_versions`.
+  A server reduces this to: accept the connection iff its emitted version is in
+  `hello.supported_schema_versions`.
 - This policy is **independent** of game-config schema evolution. Each registered game carries its
   own `game_schema_version` (integer) returned by `GET /games` and echoed in `welcome.match_config`.
   Adding an optional Connect 4 config field is a Connect 4 schema bump, not an envelope schema

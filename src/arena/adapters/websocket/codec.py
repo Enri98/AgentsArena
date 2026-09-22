@@ -6,7 +6,14 @@
 Binary input raises WireDecodeError immediately (§3: binary frames must be rejected).
 Unknown type raises UnknownMessageType.
 JSON parse failure or validation failure raises WireDecodeError.
-schema_version != WIRE_SCHEMA_VERSION raises SchemaVersionMismatch.
+A schema_version outside SUPPORTED_WIRE_SCHEMA_VERSIONS raises SchemaVersionMismatch.
+
+Version policy (Phase 37)
+-------------------------
+The wire emits WIRE_SCHEMA_VERSION but *accepts* every version in
+SUPPORTED_WIRE_SCHEMA_VERSIONS. Decode and emit are separate concerns: a server
+that can only read what it writes cannot ever migrate without a flag day, and
+§7 promises negotiation rather than a hard cutover.
 """
 
 from __future__ import annotations
@@ -17,10 +24,17 @@ from collections.abc import Sequence
 from arena.adapters.websocket.envelope import WireEnvelope, decode_envelope
 from arena.adapters.websocket.errors import SchemaVersionMismatch, WireDecodeError
 
-# Single-sourced from ADAPTER_PAYLOAD_SCHEMA_VERSION; both are pinned to 1 in v1.
 # Defined independently here so arena.adapters.websocket does not need to
 # import arena.adapters.in_process at the module level for a mere integer.
-WIRE_SCHEMA_VERSION = 1
+#
+# Bumped to 2 in Phase 37: transcripts carry chance turns, which have no seat and
+# no action. That is a shape change to an existing field (match_finished.transcript,
+# match_aborted.transcript) and §7 requires a bump for it.
+WIRE_SCHEMA_VERSION = 2
+
+#: Versions this build can decode. A v1 client predates chance nodes; every
+#: message it sends is still valid, so there is no reason to refuse it.
+SUPPORTED_WIRE_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2)
 
 
 def dumps(envelope: WireEnvelope) -> str:  # type: ignore[valid-type]
@@ -34,7 +48,7 @@ def loads(text: str | bytes) -> WireEnvelope:  # type: ignore[valid-type]
     Raises:
         WireDecodeError: input is bytes, not valid JSON, or fails Pydantic validation.
         UnknownMessageType: the `type` field names an unrecognised message.
-        SchemaVersionMismatch: schema_version is not WIRE_SCHEMA_VERSION.
+        SchemaVersionMismatch: schema_version is outside SUPPORTED_WIRE_SCHEMA_VERSIONS.
     """
     if isinstance(text, (bytes, bytearray, memoryview)):
         raise WireDecodeError(
@@ -50,7 +64,7 @@ def loads(text: str | bytes) -> WireEnvelope:  # type: ignore[valid-type]
         raise WireDecodeError("Envelope must be a JSON object, not a scalar or array.")
 
     schema_version = obj.get("schema_version")
-    if schema_version is not None and schema_version != WIRE_SCHEMA_VERSION:
+    if schema_version is not None and schema_version not in SUPPORTED_WIRE_SCHEMA_VERSIONS:
         raise SchemaVersionMismatch(received=schema_version, expected=WIRE_SCHEMA_VERSION)
 
     # decode_envelope raises WireDecodeError / UnknownMessageType as appropriate.
@@ -58,6 +72,7 @@ def loads(text: str | bytes) -> WireEnvelope:  # type: ignore[valid-type]
 
 
 __all__: Sequence[str] = [
+    "SUPPORTED_WIRE_SCHEMA_VERSIONS",
     "WIRE_SCHEMA_VERSION",
     "dumps",
     "loads",
