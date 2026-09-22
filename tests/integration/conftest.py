@@ -20,6 +20,7 @@ import pytest
 import uvicorn
 
 from arena.server.app import create_app
+from arena.server.rate_limits import RateLimiter
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,7 @@ def _free_port() -> int:
 @pytest.fixture(scope="module")
 def running_server() -> RunningServer:  # type: ignore[return]
     port = _free_port()
-    app = create_app()
+    app = create_app(rate_limiter=RateLimiter.unlimited())
     # websockets-sansio avoids a cancellation bug in the legacy websockets_impl
     # where cancelling a pending receive_text() task corrupts the ASGI receive
     # state, causing the next receive_text() call from run_match to see a stale

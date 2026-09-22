@@ -16,9 +16,12 @@ from arena.adapters.websocket import WIRE_SCHEMA_VERSION, MatchStateEnvelope, du
 from arena.adapters.websocket.errors import SchemaVersionMismatch, WireProtocolError
 from arena.server.config import HEARTBEAT_MAX_MISSES
 from arena.server.errors import MatchNotFound
+from arena.server.rate_limits import CLOSE_RATE_LIMITED, RateLimiter, RateLimitExceeded
 from arena.server.registry import Match, MatchRegistry
 from arena.server.runtime_bridge import (
+    MatchConnections,
     SeatConnection,
+    _get_match_conns,
     _get_reconnect_conns,
     _get_reconnect_events,
     run_match,
@@ -35,6 +38,7 @@ _CLOSE_UNSUPPORTED_ENDPOINT = 4404
 _CLOSE_SEAT_TAKEN = 4409
 _CLOSE_MATCH_NOT_FOUND = 4410
 _CLOSE_MALFORMED = 4422
+_CLOSE_RATE_LIMITED = CLOSE_RATE_LIMITED
 _CLOSE_SERVER_ERROR = 4500
 
 
@@ -76,9 +80,50 @@ async def spectate_reserved(ws: WebSocket, match_id: str) -> None:
     await _close(ws, _CLOSE_UNSUPPORTED_ENDPOINT, "unsupported_endpoint")
 
 
+def _client_ip(ws: WebSocket) -> str:
+    """Best-effort source address for rate-limit bucketing (protocol §13)."""
+
+    client = ws.client
+    return client.host if client is not None else "unknown"
+
+
 @router.websocket("/matches/{match_id}/play")
 async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
-    """Primary play channel (protocol §5/§8/§10)."""
+    """Primary play channel (protocol §5/§8/§10).
+
+    Thin wrapper holding a protocol §13 connection slot for the lifetime of the
+    session, so every early return inside ``_play_session`` still releases it.
+    """
+
+    limiter: RateLimiter | None = getattr(ws.app.state, "rate_limiter", None)
+    if limiter is None:
+        await _play_session(ws, match_id, seat)
+        return
+
+    ip = _client_ip(ws)
+    try:
+        limiter.acquire_connection(ip=ip, match_id=match_id)
+    except RateLimitExceeded as exc:
+        logger.warning(
+            "rate_limited",
+            match_id=match_id,
+            seat=seat,
+            schema_version=1,
+            scope=exc.scope,
+            detail=exc.message,
+        )
+        await ws.accept()
+        await _close(ws, _CLOSE_RATE_LIMITED, exc.scope)
+        return
+
+    try:
+        await _play_session(ws, match_id, seat)
+    finally:
+        limiter.release_connection(ip=ip, match_id=match_id)
+
+
+async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
+    """Drive one play-channel session; see :func:`play_handler`."""
 
     # 1. Look up match.
     registry: MatchRegistry = ws.app.state.match_registry
@@ -248,10 +293,13 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         conn1 = seat_slots[match_id][1]
         assert conn0 is not None
         assert conn1 is not None
+        conns = MatchConnections(conn0, conn1)
+        _get_match_conns(app_state)[match_id] = conns
+
         try:
             await run_match(
                 match,
-                (conn0, conn1),
+                conns,
                 done_event=done_event,
                 app_state=app_state,
                 heartbeat_interval_s=app_state.heartbeat_interval_ms / 1000.0,
@@ -270,6 +318,7 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         finally:
             done_event.set()
             seat_slots[match_id] = {0: None, 1: None}
+            _get_match_conns(app_state).pop(match_id, None)
     else:
         # Seat 0: wait until run_match signals it's done.
         # Do NOT call receive_text here — run_match receives from ws0 when it's seat 0's turn.

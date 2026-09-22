@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 
 from arena.server.app import create_app
+from arena.server.rate_limits import RateLimiter
 
 # ---------------------------------------------------------------------------
 # Fixture helpers
@@ -12,7 +13,9 @@ from arena.server.app import create_app
 
 
 def _client() -> TestClient:
-    return TestClient(create_app(), raise_server_exceptions=False)
+    return TestClient(
+        create_app(rate_limiter=RateLimiter.unlimited()), raise_server_exceptions=False
+    )
 
 
 # ---------------------------------------------------------------------------

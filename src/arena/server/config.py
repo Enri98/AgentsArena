@@ -17,3 +17,11 @@ WIRE_SCHEMA_VERSION: int = 1
 # Heartbeat defaults (Phase 32).  arena.server owns all deadline/heartbeat logic.
 HEARTBEAT_INTERVAL_MS: int = 20_000
 HEARTBEAT_MAX_MISSES: int = 2
+
+# Match eviction (Phase 36 Slice 0).
+# MatchRegistry held every Match forever, along with the per-match dicts hanging
+# off app.state.  Spectators make that leak worse by holding sockets against
+# dead matches, so eviction had to land before the spectator endpoint opened.
+MATCH_RETENTION_S: float = 3600.0  # terminal matches, kept for late transcript reads
+MATCH_MAX_AGE_S: float = 86_400.0  # non-terminal matches, presumed abandoned
+MAX_TRACKED_MATCHES: int = 1000  # hard ceiling; oldest terminal matches shed first

@@ -22,6 +22,7 @@ from arena.server.config import (
 )
 from arena.server.errors import InvalidConfig, InvalidRequest, MatchNotFound, UnknownGame
 from arena.server.payload_schemas import get_payload_schemas
+from arena.server.rate_limits import RateLimiter, RateLimitExceeded
 from arena.server.registry import MatchRegistry
 
 router = APIRouter()
@@ -60,6 +61,18 @@ def _error_response(status: int, code: str, message: str, details: Any = None) -
     if details is not None:
         body["error"]["details"] = details
     return JSONResponse(status_code=status, content=body)
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort source address for rate-limit bucketing.
+
+    Behind a reverse proxy (the documented deployment shape) this is the proxy
+    unless it is configured to forward the peer address; v1 does not trust
+    ``X-Forwarded-For`` because nothing authenticates it.
+    """
+
+    client = request.client
+    return client.host if client is not None else "unknown"
 
 
 def _validate_range(value: int, lo: int, hi: int, field_name: str) -> None:
@@ -104,6 +117,19 @@ async def create_match_handler(request: Request) -> JSONResponse:
         )
     except InvalidRequest as exc:
         return _error_response(400, "invalid_request", exc.message)
+
+    limiter: RateLimiter | None = getattr(request.app.state, "rate_limiter", None)
+    if limiter is not None:
+        try:
+            limiter.check_match_creation(ip=_client_ip(request))
+        except RateLimitExceeded as exc:
+            logger.warning(
+                "rate_limited",
+                schema_version=WIRE_SCHEMA_VERSION,
+                scope=exc.scope,
+                detail=exc.message,
+            )
+            return _error_response(429, "rate_limited", exc.message)
 
     registry: MatchRegistry = request.app.state.match_registry
 

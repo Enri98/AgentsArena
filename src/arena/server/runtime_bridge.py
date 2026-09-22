@@ -10,10 +10,23 @@ Instead this module drives the session turn-by-turn from a single async coroutin
 (run_match), called from the seat-1 WebSocket handler.  The seat-0 handler idles
 until the match is complete.
 
-Message sends use an asyncio.Lock per connection so that run_match can safely call
-ws.send_text on both WebSocket objects from the seat-1 handler coroutine without
-racing with the seat-0 handler.  (In practice only run_match sends after the match
-starts, so the lock is mostly uncontested.)
+Sending (Phase 36 Slice 2)
+--------------------------
+Recipients live in a MatchConnections registry rather than a fixed 2-tuple, so
+spectators can attach without touching the broadcast helpers.
+
+Each connection owns a bounded outbox drained by its own writer task.  run_match
+enqueues and never awaits a socket.  Before this, _broadcast awaited send_text on
+each connection in turn from inside run_match: one blocked send suspended the
+driver while the per-turn deadline kept running, so a slow or stalled reader
+aborted the match and the abort was attributed to whichever seat was active.
+A recipient that falls OUTBOX_MAXSIZE frames behind has frames dropped rather
+than being allowed to stall the match.
+
+An asyncio.Lock per connection still serialises the actual send_text calls, and
+the writer is the only thing that touches the socket once a match is running.
+Terminal frames are queued like any other, so _close_both drains each outbox
+before closing — otherwise clients would miss match_finished / match_aborted.
 
 Phase 32 features implemented here:
 - Per-turn deadline enforcement: asyncio.wait_for wraps _receive_action per turn.
@@ -29,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import secrets as _secrets
 import uuid
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any
@@ -84,6 +98,7 @@ from arena.runtime.payloads import (
     dump_runtime_transcript,
 )
 from arena.runtime.session import MatchSession
+from arena.server.rate_limits import CLOSE_RATE_LIMITED, RateLimitExceeded
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -93,6 +108,9 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 WS_CLOSE_NORMAL = 1000
+#: Frames a single connection may have in flight before it is considered
+#: too slow. Well above any legitimate burst: one turn produces ~3 frames.
+OUTBOX_MAXSIZE = 64
 HEARTBEAT_CLOSE_CODE = 4408
 
 
@@ -109,6 +127,81 @@ class SeatConnection:
     pending_pong_nonce: str | None = None
     consecutive_heartbeat_misses: int = 0
     heartbeat_timed_out: bool = False
+    # Phase 36 Slice 2: bounded outbox drained by a per-connection writer task,
+    # so one slow reader cannot suspend the match driver.
+    outbox: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=OUTBOX_MAXSIZE))
+    writer_task: "asyncio.Task | None" = None
+    outbox_overflowed: bool = False
+
+
+class MatchConnections:
+    """Live recipient registry for one match (Phase 36 Slice 2).
+
+    Replaces the fixed ``tuple[SeatConnection, SeatConnection]`` that used to be
+    threaded through ``run_match`` and every broadcast helper.
+
+    Two deliberate properties:
+
+    * Seats stay addressable by index, so existing ``conns[active_seat]`` call
+      sites are unchanged.
+    * Iteration yields every broadcast recipient. That is what lets Slice 3
+      attach spectators without editing the broadcast helpers again, and what
+      Phase 38 needs when a broadcast stops being one identical payload.
+
+    Seat membership is fixed at two; spectators come and go. Mutating methods are
+    only ever called from the single event loop that owns the match.
+    """
+
+    __slots__ = ("_seats", "_spectators")
+
+    def __init__(self, seat0: SeatConnection, seat1: SeatConnection) -> None:
+        self._seats: dict[int, SeatConnection] = {0: seat0, 1: seat1}
+        self._spectators: list[Any] = []
+
+    def __getitem__(self, seat: int) -> SeatConnection:
+        return self._seats[seat]
+
+    def __iter__(self) -> "Iterator[Any]":
+        yield from self._seats.values()
+        # Copied: a slow spectator may be dropped mid-broadcast.
+        yield from tuple(self._spectators)
+
+    def __len__(self) -> int:
+        return len(self._seats) + len(self._spectators)
+
+    def seats(self) -> tuple[SeatConnection, ...]:
+        """The two seat connections, in seat order."""
+
+        return (self._seats[0], self._seats[1])
+
+    def replace_seat(self, seat: int, conn: SeatConnection) -> None:
+        """Swap in a reconnected seat's new connection."""
+
+        self._seats[seat] = conn
+
+    def add_spectator(self, conn: Any) -> None:
+        self._spectators.append(conn)
+
+    def remove_spectator(self, conn: Any) -> None:
+        try:
+            self._spectators.remove(conn)
+        except ValueError:
+            pass
+
+    def spectators(self) -> tuple[Any, ...]:
+        return tuple(self._spectators)
+
+
+def _get_match_conns(app_state: Any) -> dict[str, "MatchConnections"]:
+    """Per-match connection registries, keyed by match_id.
+
+    Published on app.state so a spectator handler (Slice 3) can attach to a
+    running match without reaching into the seat handler that started it.
+    Released by create_app's eviction hook.
+    """
+    if not hasattr(app_state, "_ws_match_conns"):
+        app_state._ws_match_conns = {}
+    return app_state._ws_match_conns
 
 
 def _make_resume_token() -> str:
@@ -166,14 +259,85 @@ def _build_transcript_payload(session: MatchSession) -> RuntimeTranscriptPayload
     return RuntimeTranscriptPayload.model_validate(raw)
 
 
-async def _send(conn: SeatConnection, envelope: Any) -> None:
-    """Send one envelope to a single seat, serialised via the connection lock."""
-    text = dumps(envelope)
+async def _send_now(conn: SeatConnection, text: str) -> bool:
+    """Write one frame straight to the socket. Returns whether it went out."""
+
     async with conn.send_lock:
         try:
             await conn.websocket.send_text(text)
+            return True
         except Exception as exc:
             logger.debug("send_failed", seat=conn.seat, error=str(exc))
+            return False
+
+
+async def _writer_loop(conn: SeatConnection) -> None:
+    """Drain one connection's outbox, one frame at a time, in order.
+
+    Exactly one writer per connection, so FIFO per connection is preserved while
+    the match driver is never blocked by a slow reader.
+    """
+
+    while True:
+        text = await conn.outbox.get()
+        if text is None:  # shutdown sentinel
+            return
+        if not await _send_now(conn, text):
+            return
+
+
+def _start_writer(conn: SeatConnection) -> None:
+    if conn.writer_task is None:
+        conn.writer_task = asyncio.create_task(_writer_loop(conn))
+
+
+async def _stop_writer(conn: SeatConnection, *, drain_timeout: float = 2.0) -> None:
+    """Flush anything still queued, then stop the writer.
+
+    Terminal messages (match_finished / match_aborted) are enqueued like any
+    other frame, so the socket must not be closed until the outbox has drained.
+    """
+
+    task = conn.writer_task
+    if task is None:
+        return
+    conn.writer_task = None
+    try:
+        conn.outbox.put_nowait(None)
+    except asyncio.QueueFull:
+        task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), drain_timeout)
+    except (TimeoutError, asyncio.TimeoutError):
+        task.cancel()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def _send(conn: SeatConnection, envelope: Any) -> None:
+    """Queue one envelope for a single connection.
+
+    Before the writer is running (the hello/welcome handshake) this writes
+    inline, so handshake ordering is unchanged. Once the match driver starts,
+    sends are queued: a blocked ``send_text`` used to suspend ``run_match``
+    itself while the per-turn deadline kept ticking, which aborted matches and
+    blamed whichever seat happened to be active.
+    """
+
+    text = dumps(envelope)
+    if conn.writer_task is None:
+        await _send_now(conn, text)
+        return
+    try:
+        conn.outbox.put_nowait(text)
+    except asyncio.QueueFull:
+        conn.outbox_overflowed = True
+        logger.warning(
+            "outbox_overflow",
+            seat=conn.seat,
+            schema_version=1,
+            detail="recipient too slow; frame dropped",
+        )
 
 
 async def _send_to_ws(ws: "WebSocket", envelope: Any) -> None:
@@ -185,7 +349,7 @@ async def _send_to_ws(ws: "WebSocket", envelope: Any) -> None:
         logger.debug("send_to_ws_failed", error=str(exc))
 
 
-async def _broadcast(conns: tuple[SeatConnection, SeatConnection], envelope: Any) -> None:
+async def _broadcast(conns: "MatchConnections", envelope: Any) -> None:
     """Send one envelope to both seats sequentially.
 
     Sends to seat 0 first, then seat 1.  This ordering must be preserved:
@@ -194,17 +358,12 @@ async def _broadcast(conns: tuple[SeatConnection, SeatConnection], envelope: Any
     the next portal scheduling round, which is fine as long as we do not
     close before that happens.
     """
-    text = dumps(envelope)
     for conn in conns:
-        async with conn.send_lock:
-            try:
-                await conn.websocket.send_text(text)
-            except Exception as exc:
-                logger.debug("broadcast_failed", seat=conn.seat, error=str(exc))
+        await _send(conn, envelope)
 
 
 async def _broadcast_match_state(
-    conns: tuple[SeatConnection, SeatConnection],
+    conns: "MatchConnections",
     session: MatchSession,
     *,
     override_lifecycle: str | None = None,
@@ -219,7 +378,7 @@ async def _broadcast_match_state(
 
 
 async def _broadcast_turn_committed(
-    conns: tuple[SeatConnection, SeatConnection],
+    conns: "MatchConnections",
     session: MatchSession,
 ) -> None:
     local_match = session.local_match
@@ -249,7 +408,7 @@ async def _broadcast_turn_committed(
 
 
 async def _broadcast_match_finished(
-    conns: tuple[SeatConnection, SeatConnection],
+    conns: "MatchConnections",
     session: MatchSession,
 ) -> None:
     transcript = _build_transcript_payload(session)
@@ -263,7 +422,7 @@ async def _broadcast_match_finished(
 
 
 async def _broadcast_match_aborted(
-    conns: tuple[SeatConnection, SeatConnection],
+    conns: "MatchConnections",
     session: MatchSession,
 ) -> None:
     transcript = _build_transcript_payload(session)
@@ -283,12 +442,19 @@ async def _broadcast_match_aborted(
 
 
 async def _close_both(
-    conns: tuple[SeatConnection, SeatConnection],
+    conns: "MatchConnections",
     code: int,
     reason: str,
 ) -> None:
-    """Close both WebSocket connections."""
-    for conn in conns:
+    """Close both seat WebSockets.
+
+    Seats only: a spectator connection is owned by its own handler, which closes
+    it when the match reaches a terminal state.
+    """
+    for conn in conns.seats():
+        # Terminal frames are queued like any other; drain before closing or the
+        # client never sees match_finished / match_aborted.
+        await _stop_writer(conn)
         try:
             await conn.websocket.close(code=code, reason=reason)
         except Exception:
@@ -403,6 +569,7 @@ async def _receive_action(
     rejected_turn_ids: set[str],
     *,
     deadline_event: asyncio.Event | None = None,
+    limiter: Any = None,
 ) -> tuple[str | None, ActionResponsePayload | None, str | None]:
     """Wait for a valid action_response frame from the active seat.
 
@@ -411,6 +578,10 @@ async def _receive_action(
     Returns (None, None, "deadline_expired") when deadline_event fires.
     Duplicate turn_ids are silently dropped — returns (None, None, None) meaning retry.
     Pong frames update the heartbeat state and are consumed silently.
+
+    Protocol §13: a seat exceeding the per-match action rate has its connection
+    closed with 4429.  The next receive then fails naturally and the existing
+    disconnect-grace path takes over, so no new abort reason is needed.
 
     Deadline enforcement uses asyncio.wait on a per-receive task so that
     receive_text() is never cancelled mid-call (which can corrupt ASGI state).
@@ -470,6 +641,26 @@ async def _receive_action(
                 return None, None, f"expected action_response, got {envelope.type!r}"
             continue
 
+        if limiter is not None:
+            try:
+                limiter.check_action(match_id=match_id)
+            except RateLimitExceeded as exc:
+                logger.warning(
+                    "rate_limited",
+                    match_id=match_id,
+                    seat=active_conn.seat,
+                    schema_version=1,
+                    scope=exc.scope,
+                    detail=exc.message,
+                )
+                try:
+                    await active_conn.websocket.close(
+                        code=CLOSE_RATE_LIMITED, reason=exc.scope
+                    )
+                except Exception:
+                    pass
+                return None, None, "disconnected"
+
         turn_id = envelope.turn_id or str(uuid.uuid4())
 
         if turn_id in committed_turn_ids or turn_id in rejected_turn_ids:
@@ -520,7 +711,7 @@ def _get_reconnect_conns(app_state: Any) -> dict[str, dict[int, SeatConnection]]
 
 async def run_match(
     match: "Match",
-    conns: tuple[SeatConnection, SeatConnection],
+    conns: "MatchConnections",
     *,
     done_event: asyncio.Event,
     app_state: Any,
@@ -582,6 +773,11 @@ async def run_match(
             except (asyncio.CancelledError, Exception):
                 pass
             hb_task = None
+
+    # One writer task per seat for the life of the match: the driver enqueues and
+    # never blocks on a socket.
+    for _seat_conn in conns.seats():
+        _start_writer(_seat_conn)
 
     try:
         if session.lifecycle is RuntimeLifecycle.ABORTED:
@@ -647,6 +843,7 @@ async def run_match(
                     committed_turn_ids,
                     rejected_turn_ids,
                     deadline_event=deadline_event,
+                    limiter=getattr(app_state, "rate_limiter", None),
                 )
 
                 # --- Per-turn deadline expired ---
@@ -798,10 +995,7 @@ async def run_match(
                         await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
-                    if active_seat == 0:
-                        conns = (new_conn, conns[1])
-                    else:
-                        conns = (conns[0], new_conn)
+                    conns.replace_seat(active_seat, new_conn)
                     active_conn = new_conn
 
                     # Replace heartbeat task for the reconnected seat.
@@ -996,6 +1190,10 @@ async def run_match(
         # Cancel heartbeat task on any exit path.
         # (deadline_timer_task is cancelled inline at each return point via _cancel_task.)
         await _cancel_hb()
+        # Flush and stop writers on every exit path, including the ones that
+        # return without calling _close_both.
+        for _seat_conn in conns.seats():
+            await _stop_writer(_seat_conn)
 
 
 def _make_rejected_env(

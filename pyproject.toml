@@ -24,6 +24,7 @@ mcp = [
 ]
 dev = [
     "pytest>=8",
+    "pytest-timeout>=2.3",
     "ruff>=0.11",
     "fastapi>=0.110",
     "uvicorn>=0.27",
@@ -40,7 +41,10 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# A hung WebSocket test must fail, not block CI forever. thread method because the
+# hangs live in TestClient portal threads, and signal-based timeouts are not
+# available on Windows.
+addopts = "-ra --timeout=120 --timeout-method=thread"
 
 [tool.ruff]
 line-length = 100

@@ -5,6 +5,7 @@ from __future__ import annotations
 import secrets
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -13,6 +14,7 @@ from arena.core.exceptions import UnknownGame as CoreUnknownGame
 from arena.core.registry import GameRegistry
 from arena.runtime.models import PlayerRecord
 from arena.runtime.session import Arena, MatchSession
+from arena.server.config import MATCH_MAX_AGE_S, MATCH_RETENTION_S, MAX_TRACKED_MATCHES
 from arena.server.errors import InvalidConfig, MatchNotFound, UnknownGame
 
 
@@ -36,13 +38,36 @@ class Match:
     resume_tokens: dict[int, str] = field(default_factory=dict)
 
 
-class MatchRegistry:
-    """Thread-safe registry of all active Match records."""
+_TERMINAL_LIFECYCLES = frozenset({"finished", "aborted"})
 
-    def __init__(self, game_registry: GameRegistry) -> None:
+
+class MatchRegistry:
+    """Thread-safe registry of all active Match records.
+
+    Matches are evicted on a sweep triggered by :meth:`create`, so no background
+    task is needed.  Eviction notifies ``on_evict`` so the caller can release
+    whatever else it keys by ``match_id`` — the per-match dicts on ``app.state``
+    and the rate limiter's per-match counters.
+    """
+
+    def __init__(
+        self,
+        game_registry: GameRegistry,
+        *,
+        retention_s: float = MATCH_RETENTION_S,
+        max_age_s: float = MATCH_MAX_AGE_S,
+        max_matches: int = MAX_TRACKED_MATCHES,
+        time_fn: Callable[[], float] = time.monotonic,
+        on_evict: Callable[[str], None] | None = None,
+    ) -> None:
         self._game_registry = game_registry
         self._matches: dict[str, Match] = {}
         self._lock = threading.Lock()
+        self._retention_s = retention_s
+        self._max_age_s = max_age_s
+        self._max_matches = max_matches
+        self._now = time_fn
+        self._on_evict = on_evict
 
     def create(
         self,
@@ -60,6 +85,16 @@ class MatchRegistry:
             definition = self._game_registry.get(game_id)
         except CoreUnknownGame as exc:
             raise UnknownGame(str(exc)) from exc
+
+        # Protocol §11: the v1 wire broadcasts one full snapshot to every seat,
+        # so a game with hidden information would leak it. Phase 38 makes
+        # snapshots per-seat and lifts this gate.
+        if getattr(definition, "has_hidden_information", False):
+            raise InvalidConfig(
+                f"Game '{game_id}' declares hidden information, which the current wire "
+                f"schema cannot serve without leaking private state to both seats.",
+                details={"game_id": game_id, "reason": "hidden_information_unsupported"},
+            )
 
         raw_config = game_config_payload if game_config_payload is not None else {}
         try:
@@ -101,11 +136,13 @@ class MatchRegistry:
             per_turn_deadline_ms=per_turn_deadline_ms,
             per_action_retry_budget=per_action_retry_budget,
             disconnect_grace_ms=disconnect_grace_ms,
-            created_at=time.monotonic(),
+            created_at=self._now(),
         )
 
         with self._lock:
             self._matches[match_id] = match
+
+        self.evict_expired()
 
         return match
 
@@ -119,3 +156,61 @@ class MatchRegistry:
     def list_match_ids(self) -> tuple[str, ...]:
         with self._lock:
             return tuple(self._matches.keys())
+
+    # ── Eviction ───────────────────────────────────────────────────────────
+
+    def delete(self, match_id: str) -> bool:
+        """Drop one match. Returns whether it was present."""
+
+        with self._lock:
+            existed = self._matches.pop(match_id, None) is not None
+        if existed:
+            self._notify_evicted(match_id)
+        return existed
+
+    def evict_expired(self) -> tuple[str, ...]:
+        """Sweep expired matches. Returns the evicted ids.
+
+        Terminal matches are kept for ``retention_s`` so a late reader can still
+        fetch the result; non-terminal ones are presumed abandoned after
+        ``max_age_s``.  If the registry is still over ``max_matches`` afterwards,
+        the oldest matches are shed regardless of lifecycle.
+        """
+
+        now = self._now()
+        with self._lock:
+            doomed: list[str] = []
+            for match_id, match in self._matches.items():
+                age = now - match.created_at
+                terminal = self._is_terminal(match)
+                if terminal and age >= self._retention_s:
+                    doomed.append(match_id)
+                elif not terminal and age >= self._max_age_s:
+                    doomed.append(match_id)
+
+            for match_id in doomed:
+                self._matches.pop(match_id, None)
+
+            overflow = len(self._matches) - self._max_matches
+            if overflow > 0:
+                by_age = sorted(self._matches.items(), key=lambda kv: kv[1].created_at)
+                for match_id, _ in by_age[:overflow]:
+                    self._matches.pop(match_id, None)
+                    doomed.append(match_id)
+
+        for match_id in doomed:
+            self._notify_evicted(match_id)
+        return tuple(doomed)
+
+    @staticmethod
+    def _is_terminal(match: Match) -> bool:
+        lifecycle = getattr(match.session.lifecycle, "value", match.session.lifecycle)
+        return str(lifecycle) in _TERMINAL_LIFECYCLES
+
+    def _notify_evicted(self, match_id: str) -> None:
+        if self._on_evict is None:
+            return
+        try:
+            self._on_evict(match_id)
+        except Exception:  # pragma: no cover - a bad hook must not break eviction
+            pass
