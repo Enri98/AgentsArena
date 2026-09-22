@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 from arena.core.exceptions import ArenaCoreError
+from arena.core.public_view import dump_public_state, load_public_state
 from arena.core.seats import is_seat
 from arena.core.serializer import Serializer
 
@@ -193,6 +194,47 @@ def assert_serialization_round_trip(bundle: GameContractBundle) -> None:
     )
 
 
+def assert_public_view_contract(bundle: GameContractBundle) -> None:
+    """Assert that the game's public view is coherent and round-trips.
+
+    For a perfect-information game the public view must equal the full state:
+    that equality is what lets the spectator channel serve ``dump_state``
+    directly. A game declaring ``has_hidden_information`` must instead redact,
+    and must not simply return the full state under a different name.
+    """
+
+    definition = bundle.definition
+    serializer = definition.serializer
+    state = bundle.near_terminal_state
+
+    public_payload = dump_public_state(serializer, state)
+    assert isinstance(public_payload, dict), (
+        "public view contract failed: dump_public_state must return a JSON mapping"
+    )
+
+    rehydrated = load_public_state(serializer, public_payload)
+    assert rehydrated is not None, (
+        "public view contract failed: load_public_state must rehydrate its own payload"
+    )
+
+    hidden = getattr(definition, "has_hidden_information", False)
+    full_payload = serializer.dump_state(state)
+
+    if not hidden:
+        assert public_payload == full_payload, (
+            "public view contract failed: a game without hidden information must expose "
+            "a public view identical to its full state; if it genuinely redacts, it must "
+            "declare has_hidden_information=True"
+        )
+        return
+
+    assert public_payload != full_payload, (
+        "public view contract failed: a game declaring has_hidden_information=True must "
+        "actually redact — its public view is identical to its full state, which would "
+        "leak private state to every spectator"
+    )
+
+
 def assert_game_contract(bundle: GameContractBundle) -> None:
     """Run the full reusable contract suite against a game bundle."""
 
@@ -202,6 +244,7 @@ def assert_game_contract(bundle: GameContractBundle) -> None:
     assert_state_transition_behavior(bundle)
     assert_terminal_result_consistency(bundle)
     assert_serialization_round_trip(bundle)
+    assert_public_view_contract(bundle)
 
 
 def _state_semantics_match(
@@ -242,6 +285,7 @@ __all__: Sequence[str] = [
     "assert_game_contract",
     "assert_illegal_action_rejection",
     "assert_legal_action_generation",
+    "assert_public_view_contract",
     "assert_serialization_round_trip",
     "assert_state_transition_behavior",
     "assert_terminal_result_consistency",

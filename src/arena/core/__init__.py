@@ -7,6 +7,7 @@ from arena.core.exceptions import (
     DuplicateGameRegistration,
     GameFinished,
     IllegalAction,
+    IncompletePublicView,
     InvalidGameConfig,
     RehydrationError,
     RulesError,
@@ -16,6 +17,12 @@ from arena.core.exceptions import (
 )
 from arena.core.game_definition import GameDefinition
 from arena.core.observations import Observation
+from arena.core.public_view import (
+    dump_public_state,
+    load_public_state,
+    public_state,
+    validate_public_view,
+)
 from arena.core.registry import GameRegistry
 from arena.core.rules_engine import RulesEngine, TransitionResult
 
@@ -35,6 +42,11 @@ __all__ = [
     "UnknownGame",
     "DuplicateGameRegistration",
     "Observation",
+    "IncompletePublicView",
+    "dump_public_state",
+    "load_public_state",
+    "public_state",
+    "validate_public_view",
     "RulesEngine",
     "TransitionResult",
 ]

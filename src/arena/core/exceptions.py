@@ -37,6 +37,16 @@ class InvalidGameConfig(ConfigError):
     default_code = "invalid_game_config"
 
 
+class IncompletePublicView(ConfigError):
+    """Raised when a game declares hidden information but does not redact it.
+
+    Registering such a game would broadcast private state to every seat, so the
+    inconsistency is rejected at registration rather than discovered on the wire.
+    """
+
+    default_code = "incomplete_public_view"
+
+
 class RulesError(ArenaCoreError):
     """Base class for rules- and move-validation errors."""
 

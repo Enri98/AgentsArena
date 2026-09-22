@@ -34,5 +34,12 @@ class GameDefinition(Generic[ConfigModelT, StateT, ActionT, ObservationT, Result
     serializer: Serializer
     result_type: type[ResultT]
 
+    #: Whether seats see different information (Phase 36 Slice 1).
+    #: ``False`` means the public view is the full state, which is what makes
+    #: the spectator channel safe to serve from ``dump_state``. A game setting
+    #: this to ``True`` must implement the redaction hooks in
+    #: ``arena.core.public_view``; ``GameRegistry.register`` enforces that.
+    has_hidden_information: bool = False
+
 
 __all__: Sequence[str] = ["GameDefinition"]
