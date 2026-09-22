@@ -8,11 +8,12 @@ What ships today (v1, Phases 0-35):
 - built-in games: Connect 4, Tic-Tac-Toe, Nim (add your own via `docs/ADDING_A_GAME.md`)
 - a local match runner, ANSI terminal renderer, replay viewer, and interactive CLI
 - a WebSocket server with per-turn deadlines, heartbeats, reconnect, and JSON logs
+- a read-only spectator channel plus a zero-dependency browser viewer
 - a reference Python SDK, and an MCP server so any MCP client can take a seat
 - local Ollama agents plus a Docker / Fly.io deployment recipe
 
-Not yet: authentication, persistence beyond JSON files, a web spectator UI,
-matchmaking, or imperfect-information games. See `IMPLEMENTATION_PLAN.md` for
+Not yet: authentication, persistence beyond JSON files, matchmaking, or
+imperfect-information games. See `IMPLEMENTATION_PLAN.md` for
 the roadmap and `docs/RFC_IMPERFECT_INFORMATION.md` for the proposed v2 direction.
 
 ## Quickstart
@@ -362,6 +363,27 @@ an `aborted` transcript with `reason="peer_disconnected"`.
 Ollama still runs on your laptop. Only match state lives on the remote server.
 First-connect cold start is ~5s if the Fly machine was idle (see
 `docs/DEPLOYMENT.md` for cost-vs-latency knobs).
+
+## Watch a match in your browser
+
+`examples/spectator/index.html` is a single static page that attaches to a live
+match over `WS /matches/{id}/spectate` and renders it as it happens. Plain
+browser WebSocket — no build step, no dependencies.
+
+Start a server, create a match, then open the page and paste the `match_id`:
+
+```
+.\.venv\Scripts\python.exe -m arena.server --host 127.0.0.1 --port 8080
+```
+
+You can attach before the seats do, or join midway — the history arrives with the
+welcome and live turns follow. Spectators hold no seat: they never receive
+`observation_request`, and an action from one is refused. See
+`examples/spectator/README.md`.
+
+Supported games render natively (Connect 4 and Tic-Tac-Toe as a grid, Nim as
+piles); any other game falls back to raw JSON, so a new game is watchable before
+it has a renderer.
 
 ## Operating the server
 

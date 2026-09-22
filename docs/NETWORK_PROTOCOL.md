@@ -17,7 +17,7 @@ TypeScript SDK, MCP wrapper, and the server itself — must conform to it.
 
 ### 1.2 Non-goals (v1)
 - Multiple simultaneous agents per connection
-- Spectator streams (URL shape reserved; behavior deferred to v2)
+- ~~Spectator streams~~ — shipped in Phase 36; see §4 and §8.13
 - Authentication beyond capability-by-match-id
 - Persistence across server restarts
 - Lobby / matchmaking / tournaments
@@ -54,8 +54,11 @@ SDK or server APIs.
 - `GET /matches/{match_id}` — match status (HTTP, JSON, no auth).
 - `GET /games` — list of supported game ids and their config schemas (HTTP, JSON).
 - `WS /matches/{match_id}/play?seat={0|1}` — primary play channel (WebSocket).
-- `WS /matches/{match_id}/spectate` — reserved for v2; servers must respond with close code
-  `4404` (`unsupported_endpoint`) until implemented.
+- `WS /matches/{match_id}/spectate` — read-only spectator channel (WebSocket). Live as of
+  Phase 36. The client opens it, sends `spectator_hello`, and receives `spectator_welcome`
+  followed by the same broadcasts the seats receive, minus `observation_request` and
+  `action_rejected`. No seat, no `resume_token`, and no disconnect grace: a reconnecting
+  spectator simply says hello again and gets fresh history.
 
 The unguessable `match_id` (>=128 bits of entropy via `secrets.token_urlsafe(16)`) is the
 capability. Possession of the URL grants the right to join the match.
@@ -442,6 +445,58 @@ follow this rule). There is no third outcome.
 For protocol-level issues that don't terminate the match (e.g., malformed message). The Client
 should log and continue.
 
+### 8.13 spectator_hello / spectator_welcome (Phase 36)
+
+Added for the spectator channel. New message types rather than widening `hello`/`welcome`,
+because §7 bumps the schema for type or semantic changes to existing fields but explicitly allows
+new message types that older clients can ignore. `WelcomeBody.seat` is `int` under `strict=True`
+and cannot carry `null`, so reusing `welcome` for a seatless client was not possible without a bump.
+
+`spectator_hello` (Client → Server), sent as the first frame on the spectate channel:
+
+```json
+{
+  "type": "spectator_hello",
+  "schema_version": 1,
+  "payload": {
+    "client_name": "my-viewer",
+    "client_version": "0.1.0",
+    "supported_schema_versions": [1]
+  }
+}
+```
+
+No `requested_seat` and no `resume_token`: possession of the `match_id` is the capability, and a
+reconnecting spectator simply says hello again.
+
+`spectator_welcome` (Server → Client) answers it and carries the attach-time history:
+
+```json
+{
+  "type": "spectator_welcome",
+  "schema_version": 1,
+  "match_id": "...",
+  "payload": {
+    "match_id": "...",
+    "game_id": "connect4",
+    "game_schema_version": 1,
+    "lifecycle": "running",
+    "schema_version": 1,
+    "negotiated_schema_version": 1,
+    "players": [{"player_id": "p0", "label": "alice", "seat": 0}],
+    "turn_count": 4,
+    "transcript": { }
+  }
+}
+```
+
+`transcript` is the public transcript, which for a perfect-information game is the full one, and is
+`null` before the match starts. Bundling it into the welcome means a spectator joining mid-match can
+render immediately; there is no separate history message for a running match. It is queued before
+the connection joins the broadcast set, so live frames always follow the history they continue.
+
+If the match is already `finished` or `aborted`, the server sends `spectator_welcome` and closes.
+
 ## 9. Error taxonomy
 
 WebSocket close codes (4000-4999 are application-defined):
@@ -690,13 +745,14 @@ keep `/schemas/payloads` byte-stable for a given `schema_version`; any change is
 
 ## 18. Message broadcast matrix
 
-Who receives each Server → Client message in v1 (no spectators) and the reserved v2 expansion:
+Who receives each Server → Client message. Spectators are live as of Phase 36.
 
-| Message type        | Active seat | Inactive seat | v2 spectators (reserved) |
-|---------------------|-------------|---------------|--------------------------|
-| `welcome`           | recipient only (response to that seat's `hello`) | recipient only | recipient only |
+| Message type        | Active seat | Inactive seat | Spectators |
+|---------------------|-------------|---------------|------------|
+| `welcome`           | recipient only (response to that seat's `hello`) | recipient only | n/a — spectators get `spectator_welcome` |
+| `spectator_welcome` | n/a         | n/a           | recipient only (response to `spectator_hello`) |
 | `match_state`       | yes         | yes           | yes                      |
-| `observation_request` | **yes (only)** | no         | no (server may emit a redacted copy in v2) |
+| `observation_request` | **yes (only)** | no         | **never** |
 | `action_rejected`   | **yes (only)** | no          | no                       |
 | `turn_committed`    | yes         | yes           | yes                      |
 | `match_finished`    | yes         | yes           | yes                      |
@@ -708,7 +764,19 @@ Notes:
 
 - "Inactive seat" includes seats currently in their disconnect grace period that later reconnect:
   the missed broadcasts are reconstructed via transcript replay on resume (§11).
-- v1 has no spectator path; the column documents the contract a v2 spectator implementation must
-  honor, ensuring v1 message semantics are not broken when spectators are added.
+- Spectators receive everything a seat receives except `observation_request` and
+  `action_rejected`, which are addressed to a seat and a spectator holds none. A spectator that
+  sends anything other than `ping`/`pong` gets an `error` with code `protocol_violation` and is
+  disconnected.
+- A spectator that cannot keep up is dropped rather than allowed to slow the match: once its
+  outbound queue overflows the server closes it with `1000 spectator_too_slow`. Seats are never
+  shed this way.
+- Attach-time history rides in `spectator_welcome.transcript` (the public transcript; identical to
+  the full one for a perfect-information game). There is no separate history message for a running
+  match.
+- Adding spectators required **no schema bump**: `spectator_hello` and `spectator_welcome` are new
+  message types, which §7 permits, and spectators receive the existing `post_snapshot`. Phase 38
+  introduces `public_snapshot` and per-seat redaction in the same bump that carries hidden
+  information.
 - `match_state` is the **only** lifecycle-transition signal; SDKs should drive their internal
   state machine off it rather than off `welcome.lifecycle` after the initial handshake.

@@ -3550,14 +3550,47 @@ needed to dodge a portal deadlock.
 fast and stable. **Rule going forward: one WebSocket per TestClient test. Anything needing two
 live sockets belongs in `tests/integration/`.**
 
-#### Slice 3 - Spectator handler
-`spectator_hello` / `spectator_welcome` message types; the spectate handler replacing the `4404`
-stub; subscribe-then-replay with watermark; read loop for pongs; close on all terminal paths;
-protocol doc updates (§4 promoted from reserved, §18 gains a spectator column).
+#### Slice 3 - Spectator handler — ✅ COMPLETE (2026-09-23)
 
-#### Slice 4 - Static viewer page
-`examples/spectator/index.html` rendering `post_snapshot` via the native `WebSocket` API. Manual
-acceptance.
+Shipped:
+- **`spectator_hello` / `spectator_welcome`** message types, bodies, envelopes, and
+  `_ENVELOPE_TYPES` entries. `WIRE_SCHEMA_VERSION` is still `1`. New message types rather than
+  widening `hello`/`welcome`, because `WelcomeBody.seat` is `int` under `strict=True` and cannot
+  carry `null` — reusing `welcome` for a seatless client was impossible without a bump.
+- **`SpectatorConnection`**, deliberately shaped like `SeatConnection` so `_send`, `_writer_loop`
+  and `_stop_writer` work on it unchanged.
+- **The spectate handler** replaces the `4404` stub: match lookup, hello, version negotiation,
+  `spectator_welcome`, subscribe, read loop, and cleanup on every exit path. It holds a §13
+  connection slot exactly like the play channel.
+- **Attach-time history rides in `spectator_welcome.transcript`.** There is no history message for
+  a running match, and inventing one would be a wire addition this phase avoids. The welcome is
+  queued *before* the connection joins the broadcast set, with no suspension in between (`_send`
+  only serialises and calls `put_nowait`), so live frames always follow the history they continue —
+  this is the join race the spec called out, closed without needing a watermark.
+- **Pending spectators**: one attaching before both seats parks in `app.state._ws_pending_spectators`
+  and the seat handler folds it in when it builds the registry.
+- **A spectator that acts is refused** with `protocol_violation` and disconnected; junk frames are
+  ignored, since a spectator must not be able to corrupt a match.
+- **A spectator that falls behind is dropped**, not allowed to slow the match: `_broadcast` sheds
+  any spectator whose outbox overflowed, cancelling rather than draining its writer.
+- Protocol doc: §4 promoted from reserved to live, §18 matrix gains a real spectator column, new
+  §8.13 documents both message types, §1.2 no longer lists spectators as a non-goal.
+- `tests/integration/test_spectator.py` (5 tests, real sockets) plus 3 unit tests.
+
+Acceptance criteria met: a third client receives every committed turn live and never
+`observation_request` or `action_rejected`; seats behave identically with 0, 1, and 3 spectators;
+a late arrival gets the full transcript then a clean close; version mismatch closes `4400`.
+
+#### Slice 4 - Static viewer page — ✅ COMPLETE (2026-09-23)
+
+`examples/spectator/index.html` — one self-contained page, ~120 lines of plain browser `WebSocket`
+glue, no build step and no dependencies. Renders the `board` grid for Connect 4 and Tic-Tac-Toe,
+`piles` for Nim, and raw JSON for anything else, so a new game is watchable before it has a
+renderer. Replays `spectator_welcome.transcript` on attach, then live turns; answers `ping`.
+`examples/spectator/README.md` has the run-through. Manual acceptance; every field it reads was
+checked against the shipped models.
+
+Explicitly not a packaged SDK — Phase 42 may add a TypeScript client once the wire settles.
 
 ---
 

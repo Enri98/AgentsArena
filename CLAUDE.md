@@ -19,7 +19,7 @@ Python 3.11 library powering an agent-vs-agent arena for sequential, determinist
 | UI adapter | `arena.ui` | Pure adapter over runtime payloads. `build_match_status`, `build_match_transcript`, `build_match_screen`. Reshapes envelopes into screen-level payloads, exposes `state_payload` from snapshots without recomputing rules. |
 | CLI | `arena.cli` | Terminal renderer, `python -m arena.cli` replay viewer, `python -m arena.cli.play` interactive driver supporting `human`, `scripted:`, and `ollama:<model>` seats. May depend on `arena.sdk` for `--server-url` remote play. |
 | Local agents | `arena.agents.ollama` | Stdlib HTTP client, generic `OllamaAgent` with retry-with-feedback, per-game prompt builders, typed exceptions, `probe_models`. Surfaces retries via the `PolicyRetried` runtime event. |
-| Server | `arena.server` | Single-process FastAPI + WebSocket server. `MatchRegistry`, `POST /matches`, `GET /games`, `WS /matches/{id}/play`. Owns per-turn deadlines, heartbeats, disconnect grace, structured JSON logging. The **only** layer allowed to instantiate logging at module scope. |
+| Server | `arena.server` | Single-process FastAPI + WebSocket server. `MatchRegistry`, `POST /matches`, `GET /games`, `WS /matches/{id}/play`, `WS /matches/{id}/spectate`. Protocol §13 rate limits, match eviction, per-connection outbound queues. Owns per-turn deadlines, heartbeats, disconnect grace, structured JSON logging. The **only** layer allowed to instantiate logging at module scope. |
 | SDK | `arena.sdk` | Reference Python client for `arena.server`. Both `connect(url, seat, choose=...)` callback form and `Session` loop form. Ships Connect 4 / Tic-Tac-Toe / Nim schemas. Includes `LocalSession` test helper and reconnect helper. Stays silent (no log output) by default. |
 | MCP server | `arena.mcp` | MCP wrapper exposing the SDK via stdio or HTTP/SSE transports. Tools: `join_match`, `get_observation`, `make_move`, `get_history`, `match_status`. Per-game action JSON schemas. May only import `arena.sdk` and `arena.core`. |
 
@@ -93,7 +93,7 @@ Two items moved OUT of the v2 deferral list by owner decision: **transcript pers
 ## Still deferred
 
 - Real authentication, tokens, or accounts
-- A designed web spectator **UI** (Phase 36 ships functional viewer glue, not a product surface)
+- A designed web spectator **UI** (Phase 36 shipped functional viewer glue at `examples/spectator/`, not a product surface)
 - Lobby, matchmaking, tournaments
 - Prometheus metrics endpoint
 - OpenTelemetry tracing

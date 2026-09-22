@@ -1,7 +1,7 @@
 """FastAPI WebSocket routes for arena.server.
 
 WS /matches/{match_id}/play?seat={0|1}  -- primary play channel (§4)
-WS /matches/{match_id}/spectate          -- reserved; closes 4404 (§4)
+WS /matches/{match_id}/spectate          -- read-only spectator channel (§4)
 """
 
 from __future__ import annotations
@@ -12,19 +12,33 @@ from typing import Any
 import structlog
 from fastapi import APIRouter, WebSocket
 
-from arena.adapters.websocket import WIRE_SCHEMA_VERSION, MatchStateEnvelope, dumps, loads
+from arena.adapters.websocket import (
+    WIRE_SCHEMA_VERSION,
+    ErrorEnvelope,
+    MatchStateEnvelope,
+    dumps,
+    loads,
+)
 from arena.adapters.websocket.errors import SchemaVersionMismatch, WireProtocolError
+from arena.adapters.websocket.messages import ErrorBody
 from arena.server.config import HEARTBEAT_MAX_MISSES
 from arena.server.errors import MatchNotFound
 from arena.server.rate_limits import CLOSE_RATE_LIMITED, RateLimiter, RateLimitExceeded
 from arena.server.registry import Match, MatchRegistry
 from arena.server.runtime_bridge import (
+    WS_CLOSE_NORMAL,
     MatchConnections,
     SeatConnection,
+    SpectatorConnection,
     _get_match_conns,
+    _get_pending_spectators,
     _get_reconnect_conns,
     _get_reconnect_events,
+    _send,
+    _start_writer,
+    _stop_writer,
     run_match,
+    send_spectator_welcome,
     send_welcome,
 )
 
@@ -71,13 +85,6 @@ async def _close(ws: WebSocket, code: int, reason: str) -> None:
         await ws.close(code=code, reason=reason)
     except Exception:
         pass
-
-
-@router.websocket("/matches/{match_id}/spectate")
-async def spectate_reserved(ws: WebSocket, match_id: str) -> None:
-    """Reserved endpoint (§4). Accepts then immediately closes with 4404."""
-    await ws.accept()
-    await _close(ws, _CLOSE_UNSUPPORTED_ENDPOINT, "unsupported_endpoint")
 
 
 def _client_ip(ws: WebSocket) -> str:
@@ -296,6 +303,11 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         conns = MatchConnections(conn0, conn1)
         _get_match_conns(app_state)[match_id] = conns
 
+        # Spectators that attached before both seats arrived parked in the
+        # pending list; fold them in now so they receive the opening broadcasts.
+        for pending_spectator in _get_pending_spectators(app_state).pop(match_id, []):
+            conns.add_spectator(pending_spectator)
+
         try:
             await run_match(
                 match,
@@ -319,6 +331,7 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
             done_event.set()
             seat_slots[match_id] = {0: None, 1: None}
             _get_match_conns(app_state).pop(match_id, None)
+            _get_pending_spectators(app_state).pop(match_id, None)
     else:
         # Seat 0: wait until run_match signals it's done.
         # Do NOT call receive_text here — run_match receives from ws0 when it's seat 0's turn.
@@ -408,3 +421,202 @@ async def _safe_receive_text(ws: WebSocket) -> str | None:
         return await ws.receive_text()
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Spectator channel (Phase 36 Slice 3)
+# ---------------------------------------------------------------------------
+
+
+@router.websocket("/matches/{match_id}/spectate")
+async def spectate_handler(ws: WebSocket, match_id: str) -> None:
+    """Read-only view of a match (protocol §4).
+
+    Holds a §13 connection slot for the session, exactly like the play channel:
+    this endpoint is unauthenticated fan-out, which is why those caps had to land
+    before it opened.
+    """
+
+    limiter: RateLimiter | None = getattr(ws.app.state, "rate_limiter", None)
+    if limiter is None:
+        await _spectate_session(ws, match_id)
+        return
+
+    ip = _client_ip(ws)
+    try:
+        limiter.acquire_connection(ip=ip, match_id=match_id)
+    except RateLimitExceeded as exc:
+        logger.warning(
+            "rate_limited",
+            match_id=match_id,
+            seat=None,
+            schema_version=1,
+            scope=exc.scope,
+            detail=exc.message,
+        )
+        await ws.accept()
+        await _close(ws, _CLOSE_RATE_LIMITED, exc.scope)
+        return
+
+    try:
+        await _spectate_session(ws, match_id)
+    finally:
+        limiter.release_connection(ip=ip, match_id=match_id)
+
+
+async def _spectate_session(ws: WebSocket, match_id: str) -> None:
+    """Drive one spectator session; see :func:`spectate_handler`."""
+
+    registry: MatchRegistry = ws.app.state.match_registry
+    try:
+        match: Match = registry.get(match_id)
+    except MatchNotFound:
+        await ws.accept()
+        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_not_found")
+        return
+
+    await ws.accept()
+
+    try:
+        raw = await ws.receive_text()
+    except Exception:
+        await _close(ws, _CLOSE_MALFORMED, "no_hello_received")
+        return
+
+    try:
+        envelope = loads(raw)
+    except SchemaVersionMismatch:
+        await _close(ws, _CLOSE_SCHEMA_MISMATCH, "schema_version_mismatch")
+        return
+    except WireProtocolError:
+        await _close(ws, _CLOSE_MALFORMED, "malformed_envelope")
+        return
+
+    if envelope.type != "spectator_hello":
+        await _close(ws, _CLOSE_MALFORMED, f"expected_spectator_hello_got_{envelope.type}")
+        return
+
+    if WIRE_SCHEMA_VERSION not in envelope.payload.supported_schema_versions:
+        await _close(ws, _CLOSE_SCHEMA_MISMATCH, "schema_version_mismatch")
+        return
+
+    app_state = ws.app.state
+    conn = SpectatorConnection(websocket=ws)
+    _start_writer(conn)
+
+    # Order matters, and there must be no suspension between these two steps:
+    # the welcome (which carries the attach-time history) has to be queued before
+    # the connection joins the broadcast set, or a turn committing in between
+    # would be delivered ahead of the history that should precede it. _send only
+    # serialises and calls put_nowait, so it does not yield.
+    try:
+        await send_spectator_welcome(conn, match)
+    except Exception:
+        await _stop_writer(conn)
+        await _close(ws, _CLOSE_SERVER_ERROR, "server_error")
+        return
+
+    if match.session.lifecycle.value in ("finished", "aborted"):
+        # Nothing further will be broadcast; the welcome already carried the
+        # whole public transcript.
+        await _stop_writer(conn)
+        await _close(ws, WS_CLOSE_NORMAL, "match_over")
+        return
+
+    conns = _get_match_conns(app_state).get(match_id)
+    if conns is not None:
+        conns.add_spectator(conn)
+    else:
+        # No connection registry yet because both seats have not arrived. Park;
+        # the seat handler folds pending spectators in when it builds one.
+        _get_pending_spectators(app_state).setdefault(match_id, []).append(conn)
+
+    logger.info(
+        "spectator_connected",
+        match_id=match_id,
+        seat=None,
+        schema_version=1,
+    )
+
+    done_events = _get_done_events(app_state)
+    if match_id not in done_events:
+        done_events[match_id] = asyncio.Event()
+    done_event = done_events[match_id]
+
+    try:
+        await _spectator_read_loop(ws, conn, match_id, done_event)
+    finally:
+        live = _get_match_conns(app_state).get(match_id)
+        if live is not None:
+            live.remove_spectator(conn)
+        pending = _get_pending_spectators(app_state).get(match_id)
+        if pending is not None and conn in pending:
+            pending.remove(conn)
+        await _stop_writer(conn)
+        try:
+            await ws.close(code=WS_CLOSE_NORMAL, reason="match_over")
+        except Exception:
+            pass
+        logger.info(
+            "spectator_disconnected",
+            match_id=match_id,
+            seat=None,
+            schema_version=1,
+        )
+
+
+async def _spectator_read_loop(
+    ws: WebSocket,
+    conn: SpectatorConnection,
+    match_id: str,
+    done_event: asyncio.Event,
+) -> None:
+    """Consume a spectator's inbound frames until the match ends or it leaves.
+
+    A spectator may send ping/pong; anything that tries to influence the match is
+    answered with an error and the connection is closed. Reading also detects a
+    departed spectator promptly, so it stops receiving broadcasts.
+    """
+
+    while not done_event.is_set():
+        recv_task = asyncio.create_task(_safe_receive_text(ws))
+        done_task = asyncio.create_task(done_event.wait())
+        finished, pending = await asyncio.wait(
+            {recv_task, done_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        if recv_task not in finished or recv_task.cancelled():
+            return  # match over
+
+        raw = recv_task.result()
+        if raw is None:
+            return  # spectator disconnected
+
+        try:
+            envelope = loads(raw)
+        except WireProtocolError:
+            continue  # a spectator cannot corrupt a match; ignore junk
+
+        if envelope.type in ("ping", "pong"):
+            continue
+
+        # Anything else is an attempt to act, which a spectator may not do.
+        await _send(
+            conn,
+            ErrorEnvelope(
+                schema_version=WIRE_SCHEMA_VERSION,
+                match_id=match_id,
+                payload=ErrorBody(
+                    code="protocol_violation",
+                    message="Spectators may not send " + repr(envelope.type) + ".",
+                ),
+            ),
+        )
+        return

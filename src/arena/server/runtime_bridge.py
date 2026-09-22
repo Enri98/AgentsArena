@@ -65,6 +65,7 @@ from arena.adapters.websocket import (
     MatchStateEnvelope,
     ObservationRequestEnvelope,
     PingEnvelope,
+    SpectatorWelcomeEnvelope,
     TurnCommittedEnvelope,
     WelcomeEnvelope,
     dumps,
@@ -80,6 +81,7 @@ from arena.adapters.websocket.messages import (
     ObservationRequestBody,
     PingBody,
     PlayerInfoBody,
+    SpectatorWelcomeBody,
     TurnCommittedBody,
     WelcomeBody,
 )
@@ -129,6 +131,26 @@ class SeatConnection:
     heartbeat_timed_out: bool = False
     # Phase 36 Slice 2: bounded outbox drained by a per-connection writer task,
     # so one slow reader cannot suspend the match driver.
+    outbox: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=OUTBOX_MAXSIZE))
+    writer_task: "asyncio.Task | None" = None
+    outbox_overflowed: bool = False
+
+
+@dataclass
+class SpectatorConnection:
+    """A read-only attachment to a match (Phase 36 Slice 3).
+
+    Deliberately shaped like SeatConnection so _send, _writer_loop and
+    _stop_writer work on it unchanged; ``seat`` is None because a spectator
+    holds none, and the send path only uses it for logging.
+
+    Spectators are never sent observation_request or action_rejected, and an
+    overflowing spectator is dropped rather than allowed to slow the match.
+    """
+
+    websocket: "WebSocket"
+    seat: int | None = None
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     outbox: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=OUTBOX_MAXSIZE))
     writer_task: "asyncio.Task | None" = None
     outbox_overflowed: bool = False
@@ -202,6 +224,59 @@ def _get_match_conns(app_state: Any) -> dict[str, "MatchConnections"]:
     if not hasattr(app_state, "_ws_match_conns"):
         app_state._ws_match_conns = {}
     return app_state._ws_match_conns
+
+
+def _get_pending_spectators(app_state: Any) -> dict[str, list["SpectatorConnection"]]:
+    """Spectators that attached before the match had a connection registry.
+
+    A spectator may arrive before both seats do, at which point there is no
+    MatchConnections yet. It parks here and the seat handler folds it in when it
+    builds the registry. Released by create_app's eviction hook.
+    """
+    if not hasattr(app_state, "_ws_pending_spectators"):
+        app_state._ws_pending_spectators = {}
+    return app_state._ws_pending_spectators
+
+
+async def send_spectator_welcome(
+    conn: "SpectatorConnection",
+    match: "Match",
+) -> None:
+    """Send spectator_welcome, carrying the attach-time history.
+
+    Bundling the transcript into the welcome means a spectator joining mid-match
+    can render immediately. There is no separate "history so far" message for a
+    running match, and inventing one would be a wire addition this phase avoids.
+    """
+
+    session = match.session
+    local_match = session.local_match
+    turn_count = len(local_match.turns) if local_match is not None else 0
+
+    transcript: RuntimeTranscriptPayload | None = None
+    if local_match is not None:
+        try:
+            transcript = _build_transcript_payload(session)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("spectator_transcript_failed", error=str(exc))
+
+    body = SpectatorWelcomeBody(
+        match_id=match.match_id,
+        game_id=match.game_id,
+        game_schema_version=1,
+        lifecycle=session.lifecycle.value,
+        schema_version=WIRE_SCHEMA_VERSION,
+        negotiated_schema_version=WIRE_SCHEMA_VERSION,
+        players=_build_player_info(match),
+        turn_count=turn_count,
+        transcript=transcript,
+    )
+    env = SpectatorWelcomeEnvelope(
+        schema_version=WIRE_SCHEMA_VERSION,
+        match_id=match.match_id,
+        payload=body,
+    )
+    await _send(conn, env)
 
 
 def _make_resume_token() -> str:
@@ -349,6 +424,33 @@ async def _send_to_ws(ws: "WebSocket", envelope: Any) -> None:
         logger.debug("send_to_ws_failed", error=str(exc))
 
 
+async def _shed_overflowed_spectators(conns: "MatchConnections") -> None:
+    """Drop spectators that fell behind.
+
+    A spectator is a guest: it never gets to slow a match down. Its writer is
+    cancelled rather than drained, because a drain on a stuck socket is exactly
+    the block being avoided.
+    """
+
+    for spectator in conns.spectators():
+        if not spectator.outbox_overflowed:
+            continue
+        conns.remove_spectator(spectator)
+        task = spectator.writer_task
+        spectator.writer_task = None
+        if task is not None:
+            task.cancel()
+        try:
+            await spectator.websocket.close(code=WS_CLOSE_NORMAL, reason="spectator_too_slow")
+        except Exception:
+            pass
+        logger.warning(
+            "spectator_dropped",
+            schema_version=1,
+            detail="outbox overflow; spectator could not keep up",
+        )
+
+
 async def _broadcast(conns: "MatchConnections", envelope: Any) -> None:
     """Send one envelope to both seats sequentially.
 
@@ -360,6 +462,7 @@ async def _broadcast(conns: "MatchConnections", envelope: Any) -> None:
     """
     for conn in conns:
         await _send(conn, envelope)
+    await _shed_overflowed_spectators(conns)
 
 
 async def _broadcast_match_state(

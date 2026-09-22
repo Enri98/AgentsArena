@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AgentsArena Spectator</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfaf8;
+    --panel: #ffffff;
+    --ink: #1a1a1a;
+    --muted: #6b6b6b;
+    --line: #e2e0dc;
+    --accent: #2f6f4f;
+    --p0: #c2533a;
+    --p1: #2f5d92;
+    --empty: #ece9e4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171a;
+      --panel: #1f1f23;
+      --ink: #ecead6;
+      --muted: #9a978f;
+      --line: #32323a;
+      --accent: #6aab86;
+      --p0: #e0765b;
+      --p1: #6b9ed6;
+      --empty: #2a2a30;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding-block: 28px;
+    padding-inline: 20px;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 22px; font-size: 13px; }
+  form {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px; margin-bottom: 18px;
+  }
+  input {
+    flex: 1 1 220px; min-width: 0; padding: 8px 10px;
+    border: 1px solid var(--line); border-radius: 7px;
+    background: var(--bg); color: var(--ink); font: inherit; font-size: 14px;
+  }
+  button {
+    padding: 8px 16px; border: 0; border-radius: 7px;
+    background: var(--accent); color: #fff; font: inherit; font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .status {
+    display: flex; gap: 14px; flex-wrap: wrap; align-items: baseline;
+    border: 1px solid var(--line); border-radius: 10px;
+    background: var(--panel); padding: 12px 14px; margin-bottom: 16px;
+  }
+  .status b { font-weight: 600; }
+  .status .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .board { display: grid; gap: 6px; justify-content: start; margin-bottom: 16px; }
+  .cell {
+    width: 44px; height: 44px; border-radius: 50%;
+    background: var(--empty); display: grid; place-items: center;
+  }
+  .cell.sq { border-radius: 8px; }
+  .cell.p0 { background: var(--p0); }
+  .cell.p1 { background: var(--p1); }
+  .piles { display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 16px; }
+  .pile { text-align: center; }
+  .pile .n { font-size: 26px; font-weight: 700; }
+  .pile .l { color: var(--muted); font-size: 12px; }
+  .log {
+    border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+    padding: 10px 12px; max-height: 220px; overflow-y: auto;
+    font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .log div { border-bottom: 1px solid var(--line); padding: 2px 0; }
+  .log div:last-child { border-bottom: 0; }
+  .muted { color: var(--muted); }
+  .seat0 { color: var(--p0); font-weight: 600; }
+  .seat1 { color: var(--p1); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>AgentsArena Spectator</h1>
+  <p class="sub">
+    Read-only view of a live match over <code>WS /matches/{id}/spectate</code>.
+    Plain browser WebSocket — no SDK, no build step.
+  </p>
+
+  <form id="f">
+    <input id="server" value="ws://127.0.0.1:8080" aria-label="Server WebSocket base URL" />
+    <input id="match" placeholder="match_id" aria-label="Match id" />
+    <button id="go" type="submit">Watch</button>
+  </form>
+
+  <div class="status">
+    <span><span class="k">Game</span> <b id="s-game">—</b></span>
+    <span><span class="k">State</span> <b id="s-life">not connected</b></span>
+    <span><span class="k">Turns</span> <b id="s-turns">0</b></span>
+    <span><span class="k">Players</span> <b id="s-players">—</b></span>
+  </div>
+
+  <div id="view"></div>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var socket = null;
+  var gameId = null;
+
+  var el = function (id) { return document.getElementById(id); };
+  var view = el("view");
+  var logBox = el("log");
+
+  function log(msg, cls) {
+    var row = document.createElement("div");
+    if (cls) { row.className = cls; }
+    row.textContent = msg;
+    logBox.appendChild(row);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  function seatSpan(seat) {
+    return seat === 0 ? "seat0" : "seat1";
+  }
+
+  // ---- rendering -----------------------------------------------------
+  // A snapshot is {game_id, schema_version, config, state}. Grid games put
+  // board[row][col] with 0 empty / 1 seat 0 / 2 seat 1; Nim puts piles[].
+
+  function render(snapshot) {
+    if (!snapshot || !snapshot.state) { return; }
+    var state = snapshot.state;
+    view.innerHTML = "";
+
+    if (Array.isArray(state.board)) {
+      var rows = state.board;
+      var cols = rows[0] ? rows[0].length : 0;
+      var grid = document.createElement("div");
+      grid.className = "board";
+      grid.style.gridTemplateColumns = "repeat(" + cols + ", 44px)";
+      var square = snapshot.game_id === "tictactoe";
+      rows.forEach(function (row) {
+        row.forEach(function (v) {
+          var c = document.createElement("div");
+          c.className = "cell" + (square ? " sq" : "") + (v === 1 ? " p0" : v === 2 ? " p1" : "");
+          grid.appendChild(c);
+        });
+      });
+      view.appendChild(grid);
+      return;
+    }
+
+    if (Array.isArray(state.piles)) {
+      var wrap = document.createElement("div");
+      wrap.className = "piles";
+      state.piles.forEach(function (n, i) {
+        var p = document.createElement("div");
+        p.className = "pile";
+        p.innerHTML = '<div class="n">' + n + '</div><div class="l">pile ' + i + "</div>";
+        wrap.appendChild(p);
+      });
+      view.appendChild(wrap);
+      return;
+    }
+
+    var pre = document.createElement("pre");
+    pre.textContent = JSON.stringify(state, null, 2);
+    view.appendChild(pre);
+  }
+
+  function renderTranscript(transcript) {
+    if (!transcript || !transcript.match_transcript) { return; }
+    var turns = transcript.match_transcript.turns || [];
+    turns.forEach(function (t, i) {
+      log("turn " + i + " · seat " + t.seat + " · " + JSON.stringify(t.action), seatSpan(t.seat));
+    });
+    if (turns.length) {
+      render(turns[turns.length - 1].post_snapshot);
+    }
+  }
+
+  // ---- protocol ------------------------------------------------------
+
+  function handle(env) {
+    var p = env.payload || {};
+
+    if (env.type === "spectator_welcome") {
+      gameId = p.game_id;
+      el("s-game").textContent = p.game_id;
+      el("s-life").textContent = p.lifecycle;
+      el("s-turns").textContent = p.turn_count;
+      el("s-players").textContent = (p.players || [])
+        .map(function (x) { return "seat " + x.seat + " " + (x.label || "?"); })
+        .join(" · ") || "—";
+      log("connected as spectator", "muted");
+      if (p.transcript) {
+        log("replaying " + p.turn_count + " turn(s) of history", "muted");
+        renderTranscript(p.transcript);
+      }
+      return;
+    }
+
+    if (env.type === "turn_committed") {
+      var rec = p.turn_record || {};
+      log("turn " + rec.turn_index + " · seat " + rec.seat + " · " + JSON.stringify(rec.action),
+          seatSpan(rec.seat));
+      el("s-turns").textContent = (rec.turn_index || 0) + 1;
+      render(p.post_snapshot);
+      return;
+    }
+
+    if (env.type === "match_state") {
+      el("s-life").textContent = p.lifecycle;
+      return;
+    }
+
+    if (env.type === "match_finished") {
+      el("s-life").textContent = "finished";
+      log("match finished: " + JSON.stringify(p.result), "muted");
+      return;
+    }
+
+    if (env.type === "match_aborted") {
+      el("s-life").textContent = "aborted";
+      log("match aborted: " + JSON.stringify(p.abort || p), "muted");
+      return;
+    }
+
+    if (env.type === "error") {
+      log("error: " + (p.message || JSON.stringify(p)), "muted");
+      return;
+    }
+
+    if (env.type === "ping") {
+      socket.send(JSON.stringify({
+        type: "pong", schema_version: 1, payload: { nonce: p.nonce }
+      }));
+    }
+  }
+
+  el("f").addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    var base = el("server").value.replace(/\/+$/, "");
+    var matchId = el("match").value.trim();
+    if (!matchId) { return; }
+
+    if (socket) { socket.close(); }
+    logBox.innerHTML = "";
+    view.innerHTML = "";
+    el("go").disabled = true;
+
+    socket = new WebSocket(base + "/matches/" + encodeURIComponent(matchId) + "/spectate");
+
+    socket.onopen = function () {
+      socket.send(JSON.stringify({
+        type: "spectator_hello",
+        schema_version: 1,
+        payload: {
+          client_name: "browser-spectator",
+          client_version: "0.1.0",
+          supported_schema_versions: [1]
+        }
+      }));
+    };
+
+    socket.onmessage = function (m) {
+      try { handle(JSON.parse(m.data)); }
+      catch (e) { log("could not parse frame: " + e, "muted"); }
+    };
+
+    socket.onclose = function (e) {
+      log("disconnected (" + e.code + (e.reason ? " " + e.reason : "") + ")", "muted");
+      el("go").disabled = false;
+    };
+
+    socket.onerror = function () {
+      log("connection failed — is the server running?", "muted");
+    };
+  });
+})();
+</script>
+</body>
+</html>

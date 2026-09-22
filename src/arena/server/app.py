@@ -59,6 +59,7 @@ def create_app(
         "_ws_reconnect_events",
         "_ws_reconnect_conns",
         "_ws_match_conns",
+        "_ws_pending_spectators",
     )
 
     def _release_match_state(match_id: str) -> None:

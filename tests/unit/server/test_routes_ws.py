@@ -108,13 +108,60 @@ def test_unknown_match_closes_4410() -> None:
                 ws.receive_json()
 
 
-def test_spectate_reserved_closes_4404() -> None:
+def _spectator_hello() -> dict[str, Any]:
+    return {
+        "type": "spectator_hello",
+        "schema_version": 1,
+        "payload": {
+            "client_name": "test-spectator",
+            "client_version": "0.1.0",
+            "supported_schema_versions": [1],
+        },
+    }
+
+
+def test_spectator_welcome_before_the_match_starts() -> None:
+    """A spectator may attach before either seat arrives.
+
+    The endpoint used to be reserved and close 4404; Phase 36 Slice 3 made it
+    real. With no seats connected there is no connection registry yet, so the
+    spectator parks until the seat handler builds one.
+    """
+
+    client = _client()
+    match_id = _post_match(
+        client, "connect4", players=[{"label": "alice"}, {"label": "bob"}]
+    )
+
+    with client.websocket_connect(f"/matches/{match_id}/spectate") as ws:
+        ws.send_json(_spectator_hello())
+        welcome = ws.receive_json()
+
+    assert welcome["type"] == "spectator_welcome"
+    assert welcome["payload"]["match_id"] == match_id
+    assert welcome["payload"]["game_id"] == "connect4"
+    assert welcome["payload"]["lifecycle"] == "created"
+    assert welcome["payload"]["turn_count"] == 0
+    assert welcome["payload"]["transcript"] is None
+    assert [p["seat"] for p in welcome["payload"]["players"]] == [0, 1]
+
+
+def test_spectator_without_hello_is_rejected() -> None:
     client = _client()
     match_id = _post_match(client, "connect4")
+
     with client.websocket_connect(f"/matches/{match_id}/spectate") as ws:
+        # A seat's hello is not a spectator's hello.
+        ws.send_json(_hello(0))
         with pytest.raises(Exception):
-            for _ in range(5):
-                ws.receive_json()
+            ws.receive_json()
+
+
+def test_spectator_on_unknown_match_closes_4410() -> None:
+    client = _client()
+    with client.websocket_connect("/matches/does-not-exist/spectate") as ws:
+        with pytest.raises(Exception):
+            ws.receive_json()
 
 
 def test_malformed_hello_closes_4422() -> None:
