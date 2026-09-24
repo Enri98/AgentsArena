@@ -87,9 +87,13 @@ from arena.adapters.websocket.messages import (
     WelcomeBody,
 )
 from arena.core.exceptions import ArenaCoreError
-from arena.core.public_view import Viewer, dump_config_for_seat
+from arena.core.public_view import Viewer, dump_config_for_seat, dump_config_for_viewer
 from arena.match.local_match import apply_match_action, build_snapshot_for_viewer
-from arena.match.transcript import turn_record_for_viewer
+from arena.match.transcript import (
+    MATCH_TRANSCRIPT_SCHEMA_VERSION,
+    transcript_view_for,
+    turn_record_for_viewer,
+)
 from arena.runtime.models import (
     AbortMetadata,
     AbortReason,
@@ -137,6 +141,10 @@ class SeatConnection:
     outbox: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=OUTBOX_MAXSIZE))
     writer_task: "asyncio.Task | None" = None
     outbox_overflowed: bool = False
+    #: Set when a reconnect replaces this connection. Its handler then returns,
+    #: releasing its protocol 13 connection slot instead of holding it until the
+    #: match ends (the third reconnect in a match used to be refused 4429).
+    superseded: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass
@@ -214,9 +222,11 @@ class MatchConnections:
         """
 
         old = self._seats.get(seat)
-        if old is not None and old is not conn and old.writer_task is not None:
-            old.writer_task.cancel()
-            old.writer_task = None
+        if old is not None and old is not conn:
+            if old.writer_task is not None:
+                old.writer_task.cancel()
+                old.writer_task = None
+            old.superseded.set()
         self._seats[seat] = conn
         _start_writer(conn)
 
@@ -350,12 +360,68 @@ def _dump_abort_dict(abort: AbortMetadata) -> dict:
     return payload.model_dump(mode="json")
 
 
-#: Recently built transcripts, keyed by what determines their content. Building
-#: one is linear in match length (~0.5 s at the turn cap), and a client can loop
-#: attach/detach as a spectator, or reconnect, against a long match; without a
-#: cache each loop blocks the event loop and stalls every match on the server.
-_TRANSCRIPT_CACHE: "OrderedDict[tuple, RuntimeTranscriptPayload]" = OrderedDict()
-_TRANSCRIPT_CACHE_SIZE = 32
+@dataclass
+class _ViewTranscript:
+    """One viewer's match transcript of one match, grown one turn at a time."""
+
+    base: dict[str, Any]
+    turns: list[dict[str, Any]]
+
+
+#: Incremental per-(match, viewer) transcripts. Turns are append-only, so each
+#: turn is rendered for a viewer exactly once, however often a spectator
+#: attaches or a seat reconnects. A per-attach rebuild is linear in match length,
+#: about a second at the turn cap, and let one client stall every match on the
+#: server by looping attach/detach. Bounded LRU; dropped on match eviction.
+_VIEW_TRANSCRIPTS: "OrderedDict[tuple[str, Viewer], _ViewTranscript]" = OrderedDict()
+_VIEW_TRANSCRIPTS_MAX = 12
+
+
+def forget_match_transcripts(match_id: str) -> None:
+    """Drop cached transcripts for an evicted match."""
+
+    for key in [k for k in _VIEW_TRANSCRIPTS if k[0] == match_id]:
+        del _VIEW_TRANSCRIPTS[key]
+
+
+def _match_transcript_for(session: MatchSession, viewer: Viewer) -> dict[str, Any]:
+    local_match = session.local_match
+    assert local_match is not None
+    definition = session.definition
+    hidden = definition.has_hidden_information
+    # A perfect-information transcript is the full one for every viewer, and
+    # the public rendering of a turn equals its authoritative one.
+    render_as: Viewer = viewer if hidden else None
+    key = (session.match_id, render_as)
+    cached = _VIEW_TRANSCRIPTS.get(key)
+    if cached is None:
+        view, viewer_seat = transcript_view_for(definition, viewer)
+        serializer = definition.serializer
+        cached = _ViewTranscript(
+            base={
+                "game_id": definition.game_id,
+                "schema_version": MATCH_TRANSCRIPT_SCHEMA_VERSION,
+                "config": dump_config_for_viewer(serializer, local_match.config, render_as),
+                "initial_snapshot": build_snapshot_for_viewer(
+                    definition,
+                    local_match.config,
+                    local_match.rules_engine.initial_state(local_match.config),
+                    render_as,
+                ).model_dump(mode="json"),
+                "view": view,
+                "viewer_seat": viewer_seat,
+            },
+            turns=[],
+        )
+        _VIEW_TRANSCRIPTS[key] = cached
+    for index in range(len(cached.turns), len(local_match.turns)):
+        cached.turns.append(
+            turn_record_for_viewer(local_match, index, render_as).model_dump(mode="json")
+        )
+    _VIEW_TRANSCRIPTS.move_to_end(key)
+    while len(_VIEW_TRANSCRIPTS) > _VIEW_TRANSCRIPTS_MAX:
+        _VIEW_TRANSCRIPTS.popitem(last=False)
+    return {**cached.base, "turns": list(cached.turns)}
 
 
 def _build_transcript_payload(session: MatchSession, viewer: Viewer) -> RuntimeTranscriptPayload:
@@ -364,19 +430,19 @@ def _build_transcript_payload(session: MatchSession, viewer: Viewer) -> RuntimeT
     Never the full one: for a hidden-information game that exists only here.
     """
 
-    turns = len(session.local_match.turns) if session.local_match is not None else -1
-    key = (session.match_id, viewer, turns, session.lifecycle.value, len(session.events))
-    cached = _TRANSCRIPT_CACHE.get(key)
-    if cached is not None:
-        _TRANSCRIPT_CACHE.move_to_end(key)
-        return cached
-    payload = RuntimeTranscriptPayload.model_validate(
-        dump_runtime_transcript(session, viewer=viewer)
+    if session.local_match is None:
+        return RuntimeTranscriptPayload.model_validate(
+            dump_runtime_transcript(session, viewer=viewer)
+        )
+    # Dump and validate only the small envelope (a placeholder stands in for the
+    # match transcript), then attach the cached match transcript, which was
+    # built from validated turn payloads. Dumping or re-validating a long one
+    # would cost the very linear pass the cache exists to avoid.
+    raw = dump_runtime_transcript(session, viewer=viewer, match_transcript={})
+    envelope = RuntimeTranscriptPayload.model_validate(raw)
+    return envelope.model_copy(
+        update={"match_transcript": _match_transcript_for(session, viewer)}
     )
-    _TRANSCRIPT_CACHE[key] = payload
-    while len(_TRANSCRIPT_CACHE) > _TRANSCRIPT_CACHE_SIZE:
-        _TRANSCRIPT_CACHE.popitem(last=False)
-    return payload
 
 
 async def _send_now(conn: SeatConnection, text: str) -> bool:
@@ -915,8 +981,10 @@ async def _receive_action(
         if limiter is not None:
             # Protocol 13: throttle, don't disconnect. Waiting bounds the work
             # the loop does per match exactly as closing did, but a fast,
-            # legitimate agent is no longer shed. The wait still honours the
-            # per-turn deadline.
+            # legitimate agent is no longer shed. The frame already arrived, so
+            # the wait is the server's, not the seat's: it is not charged
+            # against the per-turn deadline (the window is shared by both seats,
+            # so charging it would expire a seat for its opponent's speed).
             delay = limiter.reserve_action(match_id=match_id)
             if delay > 0:
                 logger.info(
@@ -926,14 +994,7 @@ async def _receive_action(
                     schema_version=1,
                     delay_ms=int(delay * 1000),
                 )
-                if deadline_event is not None:
-                    try:
-                        await asyncio.wait_for(deadline_event.wait(), timeout=delay)
-                        return None, None, _DEADLINE_EXPIRED
-                    except asyncio.TimeoutError:
-                        pass
-                else:
-                    await asyncio.sleep(delay)
+                await asyncio.sleep(delay)
 
         turn_id = envelope.turn_id or str(uuid.uuid4())
 

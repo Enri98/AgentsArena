@@ -612,7 +612,11 @@ negotiation in v1.
   equivalent state** to one that never disconnected. Framing is not byte-identical; the resulting
   state is. The server then sends `match_state` and, if the reconnecting seat is the active seat,
   re-sends the in-flight `observation_request`, so the client always knows what to act on.
-- **The reconnected connection takes over immediately**, active seat or not. The server builds the
+- **A resume is only for a running match.** Before both seats have joined there is nothing to
+  resume: a `hello` with a `resume_token` closes with `4409 match_not_started`, and the client
+  should send a fresh `hello`.
+- **The reconnected connection takes over immediately**, active seat or not. The old socket, if
+  still open (half-open TCP), is closed with `1000 superseded`. The server builds the
   replay transcript and swaps the connection into the broadcast set in one uninterrupted step, so
   every turn is either in `welcome.transcript` or delivered live afterwards, never both and never
   neither.
@@ -677,9 +681,9 @@ information.
 > with `4429` at 2 actions per second. Two scripted or fast bots exceed that within one move each,
 > and every real-server demo then aborted as `peer_disconnected`, blaming a seat that did nothing
 > wrong. CI never saw it because tests run unlimited. The server now delays reading the next action
-> until the window has room, which bounds the loop's work just as closing did. A flooding seat only
-> slows itself, because it is the active seat and its own per-turn deadline keeps running. The cap
-> is 10 per second.
+> until the window has room, which bounds the loop's work just as closing did. The delay is the
+> server's, not the seat's: an action that has arrived counts as on time, and the wait is not charged
+> against the per-turn deadline (the window is shared by both seats). The cap is 10 per second.
 
 - Max concurrent WebSocket connections per source IP: **8**.
 - Max match creations per source IP per minute: **5**.

@@ -3776,7 +3776,7 @@ to add `3` to the supported sets.
 
 ---
 
-### Phase 38 - Imperfect-information contract and wire `schema_version=3`
+### Phase 38 - Imperfect-information contract and wire `schema_version=3` — ✅ COMPLETE (2026-09-24)
 
 Objective:
 - make per-seat information asymmetry a first-class contract
@@ -3980,6 +3980,29 @@ two reasons:
 
 After both fixes, two Ollama agents played Pig to completion through `examples/run_remote_demo.py`
 against a real `python -m arena.server`, and both seats' transcripts validated.
+
+#### Third adversarial review (of the fix commit) — fixes landed (2026-09-24)
+
+A reviewer attacked the concurrency changes in `198fc6c`. Every confirmed finding is fixed with a
+test in `tests/integration/test_reconnect_hardening.py` or `tests/unit/server/test_transcript_cache.py`:
+
+- **Half-open takeover.** A reconnect while the old socket was still open swapped the connection,
+  but the driver kept reading the old socket, and the match expired blaming the seat. The reconnect
+  handler now closes the superseded socket, so the driver's normal disconnect path takes over with
+  the new connection.
+- **Reconnect before the match starts** was silently lost or wedged the match. It is refused
+  (`4409 match_not_started`); a fresh `hello` is the right path. The leaked writer task is fixed.
+- **Superseded handlers held their protocol 13 connection slot** until the match ended, so the
+  third reconnect in a match was refused `4429`. A superseded connection's handler now returns.
+- **Throttle vs. deadline.** The action window is shared by both seats, and its wait was charged
+  to the acting seat's deadline. An action that has arrived now counts as on time.
+- **Transcript cache.** Keyed per turn, it neither bounded CPU nor memory. It is replaced by
+  incremental per-(match, viewer) transcripts: each turn is rendered for a viewer once, a warm
+  rebuild does no per-turn work, the LRU is bounded, and entries are dropped on match eviction.
+- `uvicorn>=0.35`: sansio is absent in older versions. The narrow first-seat slot race is closed.
+
+After these fixes the real server again completed a fast-bot match and a two-agent Ollama Pig
+match. 918 tests pass.
 
 Still open, documented: a buggy engine whose chance resolution raises after an action is reported
 against the acting seat; `examples/run_remote_demo.py` assumes identical, replayable seat

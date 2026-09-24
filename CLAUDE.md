@@ -120,6 +120,11 @@ Two items moved OUT of the v2 deferral list by owner decision: **transcript pers
   portal threads across the session.
 - **Pass short `per_turn_deadline_ms` / `disconnect_grace_ms` in tests.** At the 30 s production
   default, a test that abandons a match leaves `run_match` parked for 30 s.
+- **Integration tests cannot catch entry-point bugs: run the real stack after server changes.** Every
+  test server uses uvicorn `ws="websockets-sansio"`; `python -m arena.server` (and the Dockerfile) used
+  the default implementation, which corrupts receives on cancellation, and aborted *every* real match
+  until Phase 38. The entry point now pins `UVICORN_WS_IMPL`. Check with `python -m arena.server` plus
+  `examples/run_remote_demo.py --game pig` against local Ollama.
 - `pytest-timeout` is configured in `pyproject.toml` (`--timeout=120 --timeout-method=thread`) so a
   hang fails instead of blocking CI forever. The thread method is required: signal-based timeouts
   do not exist on Windows.

@@ -202,6 +202,7 @@ def dump_runtime_transcript(
     session: MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT],
     *,
     viewer: Viewer | FullView = FULL_VIEW,
+    match_transcript: JSONMapping | None = None,
 ) -> JSONMapping:
     """Dump a runtime transcript envelope without validating replay.
 
@@ -209,12 +210,15 @@ def dump_runtime_transcript(
     ``None``. The default is the full transcript, which only the server should
     hold for a hidden-information game. A perfect-information game's transcript
     is full for every viewer.
+
+    ``match_transcript`` lets a caller that builds the viewer's match transcript
+    incrementally (the server, which must not rebuild a long one per attach)
+    supply it. It must be exactly what this function would compute.
     """
 
     view, viewer_seat = _view_of(session.definition, viewer)
     local_match = session.local_match
-    match_transcript: JSONMapping | None = None
-    if local_match is not None:
+    if local_match is not None and match_transcript is None:
         match_transcript = (
             dump_match_transcript(local_match)
             if view == VIEW_FULL

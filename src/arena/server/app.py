@@ -16,6 +16,7 @@ from arena.server.rate_limits import RateLimiter
 from arena.server.registry import MatchRegistry
 from arena.server.routes_http import router as http_router
 from arena.server.routes_ws import router as ws_router
+from arena.server.runtime_bridge import forget_match_transcripts
 
 
 def create_app(
@@ -73,6 +74,7 @@ def create_app(
             if isinstance(container, dict):
                 container.pop(match_id, None)
         limiter.forget_match(match_id)
+        forget_match_transcripts(match_id)
 
     app.state.match_registry = MatchRegistry(game_registry, on_evict=_release_match_state)
     app.state.heartbeat_interval_ms = (

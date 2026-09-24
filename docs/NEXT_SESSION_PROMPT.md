@@ -4,7 +4,9 @@ Paste this into a fresh Claude or Codex session:
 
 > Continue work in `C:\Users\Enrico\Desktop\AgentsArena`. Follow `AGENTS.md`, `IMPLEMENTATION_PLAN.md`, and `docs/NETWORK_PROTOCOL.md` strictly. Use the same workflow as prior sessions: inspect the current baseline, expand only the current slice, delegate bounded coding slices to cheaper subagents where available, review their diffs, then run verification yourself before moving on.
 >
-> **Current status (verified 2026-09-24): Phases 0-38 complete.** Phase 38 moved the wire to `schema_version=3`. Every payload is now built per recipient: a viewer is a seat, or `None` for the public. Snapshots, chance outcomes, events (`DomainEvent.visible_to`), transcripts (`view`: full/seat/public), and welcome config are all redacted per viewer, and a reconnect replays the seat's own history. The shared contract proves redaction by indistinguishability (`PrivateVariant`). TEST_COUNT tests pass. **Next up: Phase 39, Liar's Dice (no wire bump).**
+> **Current status (verified 2026-09-24): Phases 0-38 complete.** Phase 38 moved the wire to `schema_version=3`. Every payload is now built per recipient: a viewer is a seat, or `None` for the public. Snapshots, chance outcomes, events (`DomainEvent.visible_to`), transcripts (`view`: full/seat/public), and welcome config are all redacted per viewer, and a reconnect replays the seat's own history. The shared contract proves redaction by indistinguishability (`PrivateVariant`). 918 tests pass. **Next up: Phase 39, Liar's Dice (no wire bump).**
+>
+> **Also run the real stack after server changes** (`python -m arena.server`, then `examples/run_remote_demo.py --game pig` with local Ollama): every integration test uses a sansio test server, so it cannot catch entry-point regressions. That is how Phase 38 found `python -m arena.server` had been aborting every match.
 >
 > **Owner rule: after each slice, dispatch adversarial reviewer subagents over it and fix confirmed findings before starting the next.** The first rounds caught real leaks and bugs; see the "Adversarial review" notes under Phase 38 in the plan.
 >

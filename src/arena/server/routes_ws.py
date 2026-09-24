@@ -295,6 +295,12 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
 
             if recv_task in done and not recv_task.cancelled():
                 result = recv_task.result()
+                if result is None and ready_event.is_set():
+                    # Closed in the same instant the opponent arrived: the
+                    # match has already taken this connection. Keep the slot so
+                    # nobody else can claim the seat; the driver sees the
+                    # disconnect and runs the normal grace path.
+                    break
                 if result is None:
                     # WebSocket closed before second seat arrived.
                     seat_slots[match_id][seat] = None
@@ -353,11 +359,12 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         # Seat 0: wait until run_match signals it's done.
         # Do NOT call receive_text here — run_match receives from ws0 when it's seat 0's turn.
         try:
-            await done_event.wait()
+            await _wait_done_or_superseded(done_event, conn)
         except Exception:
             pass
         finally:
-            seat_slots[match_id][seat] = None
+            if seat_slots[match_id].get(seat) is conn:
+                seat_slots[match_id][seat] = None
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +410,19 @@ async def _handle_reconnect(
     # send_welcome rotates the resume_token in match.resume_tokens[seat] atomically.
     # Phase 38: the welcome carries the seat's own transcript so far (§11), so a
     # reconnecting client recovers everything it missed and nothing more.
-    from arena.server.runtime_bridge import _build_match_state_body, _send, _start_writer
+    from arena.server.runtime_bridge import (
+        _build_match_state_body,
+        _send,
+        _start_writer,
+        _stop_writer,
+    )
+
+    live = _get_match_conns(app_state).get(match_id)
+    if live is None:
+        # The match has not started. There is nothing to resume: a client whose
+        # socket dropped while waiting for its opponent says a fresh hello.
+        await _close(ws, _CLOSE_SEAT_TAKEN, "match_not_started")
+        return
 
     new_conn = SeatConnection(websocket=ws, seat=seat)
     # With its writer running, every send below only queues: nothing from here
@@ -413,6 +432,7 @@ async def _handle_reconnect(
     try:
         await send_welcome(new_conn, match, with_transcript=True)
     except Exception:
+        await _stop_writer(new_conn)
         await _close(ws, _CLOSE_SERVER_ERROR, "server_error")
         return
 
@@ -426,9 +446,17 @@ async def _handle_reconnect(
         ),
     )
 
-    live = _get_match_conns(app_state).get(match_id)
-    if live is not None:
-        live.replace_seat(seat, new_conn)
+    old_conn = live[seat]
+    live.replace_seat(seat, new_conn)
+    # The old socket may still be open (a half-open TCP session is exactly what
+    # resume tokens are for). Close it: if this seat is the active one, the
+    # driver is waiting on that socket, and closing it hands the turn to the
+    # new connection through the normal disconnect path.
+    if old_conn is not new_conn:
+        try:
+            await old_conn.websocket.close(code=WS_CLOSE_NORMAL, reason="superseded")
+        except Exception:
+            pass
 
     # Register new connection so run_match can pick it up.
     reconnect_conns = _get_reconnect_conns(app_state)
@@ -448,12 +476,13 @@ async def _handle_reconnect(
         reconnect=True,
     )
 
-    # Wait until the match finishes before letting this handler return.
+    # Wait until the match finishes, or until this connection is itself
+    # superseded by a later reconnect, before letting this handler return.
     done_events = _get_done_events(app_state)
     done_event = done_events.get(match_id)
     if done_event:
         try:
-            await done_event.wait()
+            await _wait_done_or_superseded(done_event, new_conn)
         except Exception:
             pass
 
@@ -464,6 +493,16 @@ async def _safe_receive_text(ws: WebSocket) -> str | None:
         return await ws.receive_text()
     except Exception:
         return None
+
+
+async def _wait_done_or_superseded(done_event: asyncio.Event, conn: SeatConnection) -> None:
+    waiters = {
+        asyncio.create_task(done_event.wait()),
+        asyncio.create_task(conn.superseded.wait()),
+    }
+    _, pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+    for task in pending:
+        task.cancel()
 
 
 def _match_closed(match: Match, app_state: Any) -> bool:
