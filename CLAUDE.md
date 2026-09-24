@@ -19,7 +19,7 @@ Python 3.11 library powering an agent-vs-agent arena for sequential two-seat gam
 | UI adapter | `arena.ui` | Pure adapter over runtime payloads. `build_match_status`, `build_match_transcript`, `build_match_screen`. Reshapes envelopes into screen-level payloads, exposes `state_payload` from snapshots without recomputing rules. |
 | CLI | `arena.cli` | Terminal renderer, `python -m arena.cli` replay viewer, `python -m arena.cli.play` interactive driver supporting `human`, `scripted:`, and `ollama:<model>` seats. May depend on `arena.sdk` for `--server-url` remote play. |
 | Local agents | `arena.agents.ollama` | Stdlib HTTP client, generic `OllamaAgent` with retry-with-feedback, per-game prompt builders, typed exceptions, `probe_models`. Surfaces retries via the `PolicyRetried` runtime event. |
-| Server | `arena.server` | Single-process FastAPI + WebSocket server. `MatchRegistry`, `POST /matches`, `GET /games`, `WS /matches/{id}/play`, `WS /matches/{id}/spectate`. Protocol §13 rate limits, match eviction, per-connection outbound queues. Owns per-turn deadlines, heartbeats, disconnect grace, structured JSON logging. The **only** layer allowed to instantiate logging at module scope. |
+| Server | `arena.server` | Single-process FastAPI + WebSocket server. `MatchRegistry`, `POST /matches`, `GET /games`, `GET /matches/{id}/public-transcript`, `WS /matches/{id}/play`, `WS /matches/{id}/spectate`. Protocol §13 rate limits, match eviction, per-connection outbound queues, the public-transcript store (Phase 40). Owns per-turn deadlines, heartbeats, disconnect grace, structured JSON logging. The **only** layer allowed to instantiate logging at module scope. |
 | SDK | `arena.sdk` | Reference Python client for `arena.server`. Both `connect(url, seat, choose=...)` callback form and `Session` loop form. Ships Connect 4 / Tic-Tac-Toe / Nim schemas. Includes `LocalSession` test helper and reconnect helper. Stays silent (no log output) by default. |
 | MCP server | `arena.mcp` | MCP wrapper exposing the SDK via stdio or HTTP/SSE transports. Tools: `join_match`, `get_observation`, `make_move`, `get_history`, `match_status`. Per-game action JSON schemas. May only import `arena.sdk` and `arena.core`. |
 
@@ -80,7 +80,13 @@ per-recipient broadcast, seat-scoped transcripts, reconnect replay, server turn 
 Phase 39 ✅ (2026-09-24): Liar's Dice (`arena.games.liarsdice`), hidden information plus chance,
 proven over the wire and with real Ollama agents.
 
-**Active phase: 40**: transcript persistence and `GET /matches/{id}/public-transcript`.
+Phase 40 ✅ (2026-09-25): public transcripts of ended matches persist
+(`arena.server.transcript_store`: memory by default, `file:` / `sqlite:` durable) and are served
+at `GET /matches/{id}/public-transcript`. Only the public view is ever stored. A pre-phase
+adversarial review fixed a seat-hijack leak, MCP cross-client reads, unbounded turn deadlines,
+and a dozen robustness gaps (see the plan's Phase 40 Slice 0).
+
+**Active phase: 41**: the generalized turn loop (simultaneous moves, **wire bump to 4**).
 
 **Owner rule (2026-09-24): dispatch adversarial reviewer subagents between one feature and the
 next**, and fix confirmed findings before moving on.
@@ -128,6 +134,9 @@ Two items moved OUT of the v2 deferral list by owner decision: **transcript pers
   the default implementation, which corrupts receives on cancellation, and aborted *every* real match
   until Phase 38. The entry point now pins `UVICORN_WS_IMPL`. Check with `python -m arena.server` plus
   `examples/run_remote_demo.py --game pig` against local Ollama.
+- **`/schemas/payloads` is pinned by a golden file** (`tests/unit/server/golden/`). Tightening a
+  payload model with a `Literal` or a bound changes the published JSON Schema, which must stay
+  byte-stable within a wire version: validate in a validator instead, or bump the version.
 - `pytest-timeout` is configured in `pyproject.toml` (`--timeout=120 --timeout-method=thread`) so a
   hang fails instead of blocking CI forever. The thread method is required: signal-based timeouts
   do not exist on Windows.

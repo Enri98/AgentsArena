@@ -385,6 +385,26 @@ Supported games render natively (Connect 4 and Tic-Tac-Toe as a grid, Nim as
 piles); any other game falls back to raw JSON, so a new game is watchable before
 it has a renderer.
 
+## Fetch a finished match's transcript
+
+Once a match ends, finished or aborted, its public transcript stays available over
+HTTP after every socket has closed: exactly what a spectator saw, with nothing hidden
+(no Liar's Dice hand until its showdown).
+
+```
+curl http://127.0.0.1:8080/matches/<match_id>/public-transcript
+```
+
+By default the server keeps these in memory for 7 days (bounded). To keep them across
+restarts, give it a durable store:
+
+```
+.\.venv\Scripts\python.exe -m arena.server --transcript-store sqlite:arena.sqlite3
+```
+
+`file:DIR` works too. See `docs/DEPLOYMENT.md` for retention settings and a Fly volume,
+and `docs/NETWORK_PROTOCOL.md` §4.1 for the response and error codes.
+
 ## Operating the server
 
 The server emits structured JSON logs to stdout. One line per significant event.
