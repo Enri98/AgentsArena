@@ -4176,6 +4176,54 @@ Acceptance criteria:
 - retention is enforced; an expired match returns `404`
 - ruff + pytest green
 
+Owner decisions (2026-09-24):
+- **Store the public transcript only**: exactly what a spectator receives in
+  `match_finished`/`match_aborted`. No hidden hand ever reaches the store, so a store or read bug
+  cannot leak one. Seat-scoped transcripts over HTTP stay out of scope.
+- **Memory by default, durability opt-in**: `create_app()` and `python -m arena.server` keep a
+  bounded in-memory store; `--transcript-store file:DIR | sqlite:PATH` makes it durable.
+- **SQLite ships too**, against the same contract tests as the file backend.
+- **Retention defaults: 7 days from the match's end, 10,000 records**, plus a byte cap (1 GiB
+  durable, 64 MiB in memory) so long matches cannot fill a disk. All configurable.
+
+#### Slice 0 - Pre-phase adversarial review fixes
+
+Three reviewers audited `main` at `e28259e` before Phase 40 started, covering hidden-information
+leakage, server robustness and protocol conformance, and core/transcript/replay correctness.
+Confirmed findings are fixed here, before any persistence code depends on them.
+
+#### Slice 1 - Transcript store interface and backends
+
+`arena.server.transcript_store`:
+- the `TranscriptStore` protocol and `RetentionPolicy` (TTL, entry cap, byte cap);
+- `MemoryTranscriptStore`, `FileTranscriptStore` (one file per match, end time in the file name,
+  atomic rename) and `SqliteTranscriptStore`;
+- `open_transcript_store("memory" | "file:DIR" | "sqlite:PATH")`.
+
+Stores refuse any audience but the public, and any id that isn't `token_urlsafe`-shaped, before it
+reaches a path or a query. One contract test suite runs against all three backends.
+
+#### Slice 2 - Persist on match end, serve `GET /matches/{id}/public-transcript`
+
+- **Saving.** The server saves the public transcript before it broadcasts `match_finished` or
+  `match_aborted`, so a client that has seen the terminal frame can fetch it. Disk I/O runs in a
+  worker thread.
+- **Responses.**
+  - `200` returns the stored JSON.
+  - `409 transcript_not_ready` while the match is live, or its save is in flight.
+  - `404 match_not_found` for an unknown id, an expired transcript, or one never stored.
+- **Rate limit.** Reads are capped per IP (§13).
+
+#### Slice 3 - Configuration, durability, docs
+
+- **Configuration.** `python -m arena.server` flags and `ARENA_TRANSCRIPT_*` environment
+  variables.
+- **Restart test.** The file and SQLite backends serve the transcript after a restart.
+- **Docs.**
+  - `docs/DEPLOYMENT.md`: persistence, and a Fly volume.
+  - `docs/NETWORK_PROTOCOL.md`: the new endpoint and its error codes.
+- **Real-stack run.**
+
 ---
 
 ### Phase 41 - Generalized turn loop (simultaneous moves)
