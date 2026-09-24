@@ -235,6 +235,63 @@ def assert_public_view_contract(bundle: GameContractBundle) -> None:
     )
 
 
+#: Steps a chance-contract playout takes before stopping; enough to reach
+#: several chance nodes in any small game without making the suite slow.
+_CHANCE_PLAYOUT_STEPS = 60
+
+
+def _first_legal_playout(definition: object, seed: int) -> object:
+    from arena.match import apply_match_action, start_match
+
+    match = start_match(definition, definition.config_type(), seed=seed)
+    engine = match.rules_engine
+    for _ in range(_CHANCE_PLAYOUT_STEPS):
+        if engine.is_terminal(match.state):
+            break
+        seat = engine.current_seat(match.state)
+        match = apply_match_action(match, seat, engine.legal_actions(match.state, seat)[0])
+    return match
+
+
+def assert_chance_contract(bundle: GameContractBundle) -> None:
+    """Assert determinism under a seed, replay without it, and seed secrecy.
+
+    A no-op for a game without chance nodes. For one with them (Phase 37):
+
+    * the same seed and the same actions reproduce the same transcript;
+    * the transcript validates by replaying recorded outcomes — no seed needed;
+    * the seed appears nowhere in the transcript, which carries every snapshot
+      and event a seat or spectator would receive.
+    """
+
+    import json
+
+    from arena.match import dump_match_transcript, validate_match_transcript
+
+    definition = bundle.definition
+    if not getattr(definition, "has_chance_nodes", False):
+        return
+
+    seed = 0x5EED_0FAC_0177_E570_1234_5678_9ABC_DEF0
+    first = dump_match_transcript(_first_legal_playout(definition, seed))
+    second = dump_match_transcript(_first_legal_playout(definition, seed))
+
+    assert first == second, (
+        "chance contract failed: the same seed and actions produced different transcripts"
+    )
+    assert any(turn["kind"] == "chance" for turn in first["turns"]), (
+        "chance contract failed: a first-legal-action playout reached no chance node"
+    )
+
+    validate_match_transcript(definition, first)
+
+    text = json.dumps(first)
+    for fragment in (str(seed), f"{seed:x}", f"{seed:X}"):
+        assert fragment not in text, (
+            "chance contract failed: the seed is visible in the transcript"
+        )
+
+
 def assert_game_contract(bundle: GameContractBundle) -> None:
     """Run the full reusable contract suite against a game bundle."""
 
@@ -245,6 +302,7 @@ def assert_game_contract(bundle: GameContractBundle) -> None:
     assert_terminal_result_consistency(bundle)
     assert_serialization_round_trip(bundle)
     assert_public_view_contract(bundle)
+    assert_chance_contract(bundle)
 
 
 def _state_semantics_match(

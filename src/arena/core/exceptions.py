@@ -82,7 +82,11 @@ class GameFinished(RulesError):
 
 
 class ChanceResolutionError(RulesError):
-    """Raised when a rules engine fails to make progress out of a chance node."""
+    """Raised when a chance node cannot be resolved correctly.
+
+    Covers an engine that never settles, an outcome applied where no chance node
+    is pending, and a seat acting while one is.
+    """
 
     default_code = "chance_resolution_error"
 

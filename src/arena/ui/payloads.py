@@ -61,13 +61,19 @@ class UIScreenRuntimeEventPayload(BaseModel):
 
 
 class UIScreenTurnPayload(BaseModel):
-    """Accepted game turn data for transcript/history screens."""
+    """Accepted game turn data for transcript/history screens.
+
+    A chance turn (Phase 37) has no seat and no action; it carries the recorded
+    `outcome` instead, and `kind` tells the two apart.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     turn_index: int = Field(ge=1)
-    seat: int = Field(ge=0)
-    action: JSONMapping
+    kind: str = "action"
+    seat: int | None = Field(default=None, ge=0)
+    action: JSONMapping | None = None
+    outcome: JSONMapping | None = None
     events: list[JSONMapping]
     result: UIScreenResultPayload | None
     post_snapshot: JSONMapping
@@ -101,7 +107,8 @@ class _MatchTurnPayload(BaseModel):
     """Mirrors arena.match.MatchTurnPayload for validation at the UI boundary.
 
     Phase 37: a chance turn has no seat and no action, so both are optional and
-    `kind` distinguishes them. Defaults keep a v1 transcript valid.
+    `kind` distinguishes them; it carries the recorded `outcome` instead.
+    Defaults keep a v1 transcript valid.
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -112,6 +119,7 @@ class _MatchTurnPayload(BaseModel):
     result: _MatchResultPayload | None
     post_snapshot: _SnapshotPayload
     kind: str = "action"
+    outcome: JSONMapping | None = None
 
 
 class _MatchTranscriptPayload(BaseModel):
@@ -305,8 +313,10 @@ def _dump_turn(*, turn_index: int, turn: _MatchTurnPayload) -> UIScreenTurnPaylo
     post_snapshot = turn.post_snapshot.model_dump(mode="json")
     return UIScreenTurnPayload(
         turn_index=turn_index,
+        kind=turn.kind,
         seat=turn.seat,
         action=turn.action,
+        outcome=turn.outcome,
         events=[event.model_dump(mode="json") for event in turn.events],
         result=_dump_match_result(
             turn.result.model_dump(mode="json") if turn.result is not None else None

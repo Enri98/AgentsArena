@@ -1,9 +1,7 @@
-"""Chance nodes and reproducible randomness (Phase 37 Slice 1).
+"""Chance nodes and reproducible randomness (Phase 37).
 
-Two things have to hold for chance to be safe on the wire: the same seed must
-produce the same game on any machine, and the generator must survive being
-serialized into game state — transcript validation compares post-state snapshots
-exactly on every turn.
+The same seed must produce the same draws on any machine, and the seed must never
+leak: the generator is owned by the match, not by broadcast state or config.
 """
 
 from __future__ import annotations
@@ -15,14 +13,18 @@ import pytest
 
 from arena.core.chance import (
     ChanceRng,
+    apply_chance,
+    dump_chance_outcome,
     is_chance_node,
-    resolve_chance,
+    load_chance_outcome,
     rules_engine_declares_chance,
+    sample_chance,
     validate_chance_support,
 )
 from arena.core.exceptions import IncompleteChanceSupport, InvalidGameConfig
 from arena.core.registry import GameRegistry
 from arena.games import build_default_registry
+from arena.testing.chance_factory import CoinOutcome, build_coin_game_definition
 from arena.testing.factories import build_fake_game_bundle
 
 # ---------------------------------------------------------------------------
@@ -43,10 +45,7 @@ def test_different_seeds_diverge() -> None:
 
 
 def test_drawing_is_pure() -> None:
-    """A draw returns the advanced generator rather than mutating in place.
-
-    This is what lets the generator live inside frozen game state.
-    """
+    """A draw returns the advanced generator rather than mutating in place."""
 
     rng = ChanceRng(seed=7)
     value, advanced = rng.draw(6)
@@ -120,16 +119,21 @@ def test_malformed_payloads_are_rejected(payload: dict) -> None:
 
 
 def test_the_generator_compares_equal_after_a_round_trip() -> None:
-    """Transcript validation compares snapshots exactly, so this must hold."""
-
     rng = ChanceRng(seed=3)
     _, advanced = rng.draw(20)
     assert ChanceRng.load(advanced.dump()) == advanced
     assert ChanceRng.load(advanced.dump()).draw(20) == advanced.draw(20)
 
 
+def test_repr_does_not_reveal_the_seed() -> None:
+    """A seed that reached a log line or an exception message would be public."""
+
+    rng = ChanceRng(seed=987654321987654321)
+    assert "987654321987654321" not in repr(rng)
+
+
 # ---------------------------------------------------------------------------
-# Engine hooks
+# Engine and serializer hooks
 # ---------------------------------------------------------------------------
 
 
@@ -137,14 +141,24 @@ class _ChanceEngine:
     def is_chance_node(self, state: object) -> bool:
         return state == "pending"
 
-    def resolve_chance(self, state: object) -> str:
-        return "resolved"
+    def sample_chance(self, state: object, rng: ChanceRng) -> tuple[int, ChanceRng]:
+        return rng.draw(6)
+
+    def apply_chance(self, state: object, outcome: int) -> str:
+        return f"rolled {outcome}"
+
+
+class _BadSampler(_ChanceEngine):
+    def sample_chance(self, state: object, rng: ChanceRng) -> tuple[int, object]:  # type: ignore[override]
+        return 1, "not a generator"
 
 
 def test_games_without_hooks_are_never_at_a_chance_node() -> None:
     """Every existing caller keeps its current behaviour."""
 
     for definition in build_default_registry().list():
+        if definition.has_chance_nodes:
+            continue
         engine = definition.rules_engine
         state = engine.initial_state(definition.config_type())
         assert not rules_engine_declares_chance(engine)
@@ -156,13 +170,34 @@ def test_declared_hooks_are_used() -> None:
     assert rules_engine_declares_chance(engine)
     assert is_chance_node(engine, "pending") is True
     assert is_chance_node(engine, "settled") is False
-    assert resolve_chance(engine, "pending") == "resolved"
+
+    outcome, rng = sample_chance(engine, "pending", ChanceRng(seed=1))
+    assert 0 <= outcome < 6
+    assert rng.counter > 0
+    assert apply_chance(engine, "pending", outcome) == f"rolled {outcome}"
+
+
+def test_sampling_must_return_a_generator() -> None:
+    with pytest.raises(TypeError):
+        sample_chance(_BadSampler(), "pending", ChanceRng(seed=1))
 
 
 def test_resolving_without_support_is_an_error() -> None:
     bundle = build_fake_game_bundle()
+    engine = bundle.definition.rules_engine
     with pytest.raises(IncompleteChanceSupport):
-        resolve_chance(bundle.definition.rules_engine, bundle.initial_state)
+        sample_chance(engine, bundle.initial_state, ChanceRng(seed=1))
+    with pytest.raises(IncompleteChanceSupport):
+        apply_chance(engine, bundle.initial_state, 3)
+    with pytest.raises(IncompleteChanceSupport):
+        dump_chance_outcome(bundle.definition.serializer, 3)
+
+
+def test_outcomes_round_trip_through_the_serializer() -> None:
+    serializer = build_coin_game_definition().serializer
+    payload = dump_chance_outcome(serializer, CoinOutcome(face=1))
+    assert payload == {"face": 1}
+    assert load_chance_outcome(serializer, payload) == CoinOutcome(face=1)
 
 
 # ---------------------------------------------------------------------------
@@ -184,13 +219,27 @@ def test_declaring_chance_without_hooks_is_rejected() -> None:
 
     missing = exc.value.details["missing"]
     assert "rules_engine.is_chance_node" in missing
-    assert "rules_engine.resolve_chance" in missing
+    assert "rules_engine.sample_chance" in missing
+    assert "rules_engine.apply_chance" in missing
+    assert "serializer.dump_chance_outcome" in missing
+    assert "serializer.load_chance_outcome" in missing
+
+
+def test_an_engine_alone_is_not_enough() -> None:
+    """Without serializer hooks a chance turn could be recorded but never replayed."""
+
+    with pytest.raises(IncompleteChanceSupport) as exc:
+        validate_chance_support(
+            _definition(has_chance_nodes=True, rules_engine=_ChanceEngine())
+        )
+    assert exc.value.details["missing"] == [
+        "serializer.dump_chance_outcome",
+        "serializer.load_chance_outcome",
+    ]
 
 
 def test_fully_implemented_chance_game_validates() -> None:
-    validate_chance_support(
-        _definition(has_chance_nodes=True, rules_engine=_ChanceEngine())
-    )
+    validate_chance_support(build_coin_game_definition())
 
 
 def test_registry_rejects_an_unbacked_chance_declaration() -> None:
@@ -200,6 +249,8 @@ def test_registry_rejects_an_unbacked_chance_declaration() -> None:
     assert registry.list() == ()
 
 
-def test_shipped_games_declare_no_chance_nodes() -> None:
+def test_deterministic_games_declare_no_chance_nodes() -> None:
+    deterministic = {"connect4", "tictactoe", "nim"}
     for definition in build_default_registry().list():
-        assert definition.has_chance_nodes is False
+        if definition.game_id in deterministic:
+            assert definition.has_chance_nodes is False

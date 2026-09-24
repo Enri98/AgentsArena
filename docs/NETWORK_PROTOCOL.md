@@ -238,7 +238,7 @@ inside known message types are also ignored.
 | Version | Shipped in | What changed |
 |---------|-----------|--------------|
 | 1 | v1 (Phases 0-35) | Initial protocol. |
-| 2 | Phase 37 | Transcript turns gained a `kind`. A **chance turn** has no seat and no action — nobody chose it — so `turns[].seat` and `turns[].action` became nullable in `match_finished.transcript` and `match_aborted.transcript`. `turn_committed.events` became load-bearing: it used to be an empty list, harmless while every game was deterministic because a client could recompute anything it missed, but a chance outcome cannot be recomputed. |
+| 2 | Phase 37 | Transcript turns gained a `kind`. A **chance turn** has no seat and no action — nobody chose it — so `turns[].seat` and `turns[].action` became nullable in `match_finished.transcript` and `match_aborted.transcript`. `turn_committed.events` became load-bearing: it used to be an empty list, harmless while every game was deterministic because a client could recompute anything it missed, but a chance outcome cannot be recomputed. A chance turn carries the recorded `outcome` (game-specific JSON; null on action turns). Replay applies it and never re-rolls, so a transcript validates without the seed. **The seed is never sent**: the server's match object holds it, and it appears in no config, state, snapshot, event, or transcript. |
 
 **Decode and emit are separate.** A server emits its own `schema_version` but accepts every version
 it can still read — see `SUPPORTED_WIRE_SCHEMA_VERSIONS`. A build that can only read what it writes
@@ -405,7 +405,11 @@ already-known, otherwise replied with an `error` of code `match_already_finished
 }
 ```
 
-Sent after every accepted action. Both seats receive it. Spectators (v2) will receive it too.
+Sent once per committed turn. Both seats and every spectator receive it.
+
+Since v2 one step can commit several turns. An accepted action is followed by one `turn_committed`
+for each chance node it leads to (for example the die roll after a Pig `roll`). A game that opens at
+a chance node sends those turns before the first `match_state`. Each carries its own `turn_index`.
 
 ### 8.8 `match_finished` (Server → Client, broadcast)
 
@@ -752,8 +756,10 @@ keep `/schemas/payloads` byte-stable for a given `schema_version`; any change is
 - `DomainErrorPayload`: `{code, message, details}`. `code` is the simulation-layer exception's
   canonical name (e.g. `"illegal_action"`, `"wrong_player"`, `"game_finished"`,
   `"invalid_config"`); `details` carries arbitrary JSON-safe metadata.
-- `TurnRecordPayload`: `{turn_index, seat, action, events, post_snapshot}` mirroring
-  `arena.match.TurnRecord`. `post_snapshot` is a full game-specific snapshot envelope.
+- `TurnRecordPayload`: `{turn_index, kind, seat, action, outcome, events, post_snapshot}`
+  mirroring `arena.match.TurnRecord`. `kind` is `"action"` or `"chance"` (v2). An action turn has
+  `seat` and `action` and a null `outcome`; a chance turn has null `seat` and `action` and a
+  game-specific `outcome`. `post_snapshot` is a full game-specific snapshot envelope.
 - `SnapshotPayload`: `{schema_version, game_id, state, terminal, result}` from
   `Serializer.dump_snapshot(...)`. Required to rehydrate.
 - `ResultPayload`: `{kind: "win"|"draw", winner_seat, ...}` mirroring `arena.core.results`.

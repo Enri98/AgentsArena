@@ -85,8 +85,9 @@ from arena.adapters.websocket.messages import (
     TurnCommittedBody,
     WelcomeBody,
 )
+from arena.core.chance import dump_chance_outcome
 from arena.core.exceptions import ArenaCoreError
-from arena.match.local_match import apply_match_action
+from arena.match.local_match import TURN_KIND_CHANCE, apply_match_action
 from arena.match.transcript import dump_domain_event
 from arena.runtime.models import (
     AbortMetadata,
@@ -481,30 +482,49 @@ async def _broadcast_match_state(
     await _broadcast(conns, env)
 
 
-async def _broadcast_turn_committed(
+async def _broadcast_turns_committed(
     conns: "MatchConnections",
     session: MatchSession,
+    *,
+    since: int,
 ) -> None:
+    """Broadcast one ``turn_committed`` per turn from index ``since`` onward.
+
+    Phase 37: one step can commit several turns — an action followed by the
+    chance nodes it leads to, or the chance nodes a match opens with. Sending
+    only the last one would drop the action itself.
+    """
+
     local_match = session.local_match
-    if local_match is None or not local_match.turns:
+    if local_match is None:
         return
-    last_turn = local_match.turns[-1]
-    post_snap = last_turn.post_snapshot
-    post_snapshot_dict = post_snap.model_dump(mode="json")
+    for turn_index in range(since, len(local_match.turns)):
+        await _broadcast(conns, _build_turn_committed_env(session, turn_index))
+
+
+def _build_turn_committed_env(session: MatchSession, turn_index: int) -> Any:
+    local_match = session.local_match
+    assert local_match is not None
+    turn = local_match.turns[turn_index]
+    serializer = session.definition.serializer
+    post_snapshot_dict = turn.post_snapshot.model_dump(mode="json")
     # Phase 37: events are load-bearing. They used to be class-name strings in
     # turn_record and an empty list on the body, which was harmless while every
     # game was deterministic — a client could recompute anything it missed. A
     # chance outcome cannot be recomputed, so it has to be on the wire.
     event_payloads = [
-        dump_domain_event(event).model_dump(mode="json") for event in last_turn.events
+        dump_domain_event(event).model_dump(mode="json") for event in turn.events
     ]
     turn_record_dict = {
-        "turn_index": len(local_match.turns) - 1,
-        "kind": last_turn.kind,
-        "seat": last_turn.seat,
+        "turn_index": turn_index,
+        "kind": turn.kind,
+        "seat": turn.seat,
         "action": (
-            session.definition.serializer.dump_action(last_turn.action)
-            if last_turn.action is not None
+            serializer.dump_action(turn.action) if turn.action is not None else None
+        ),
+        "outcome": (
+            dump_chance_outcome(serializer, turn.outcome)
+            if turn.kind == TURN_KIND_CHANCE
             else None
         ),
         "events": event_payloads,
@@ -515,12 +535,11 @@ async def _broadcast_turn_committed(
         post_snapshot=post_snapshot_dict,
         events=event_payloads,
     )
-    env = TurnCommittedEnvelope(
+    return TurnCommittedEnvelope(
         schema_version=WIRE_SCHEMA_VERSION,
         match_id=session.match_id,
         payload=body,
     )
-    await _broadcast(conns, env)
 
 
 async def _broadcast_match_finished(
@@ -902,6 +921,9 @@ async def run_match(
             await _close_both(conns, WS_CLOSE_NORMAL, "match_aborted")
             return
 
+        # A game that opens at a chance node — a deal, an opening roll — has
+        # committed turns before any seat acts; their outcomes go out first.
+        await _broadcast_turns_committed(conns, session, since=0)
         await _broadcast_match_state(conns, session)
 
         committed_turn_ids: set[str] = set()
@@ -920,6 +942,9 @@ async def run_match(
 
             active_seat = local_match.rules_engine.current_seat(local_match.state)
             active_conn = conns[active_seat]
+            # One accepted action may commit several turns (Phase 37 chance
+            # nodes); everything from here on is broadcast once it lands.
+            turns_before = len(local_match.turns)
 
             # Start heartbeat only for this turn's active seat.
             await _cancel_hb()
@@ -1254,7 +1279,7 @@ async def run_match(
                     TurnAccepted(
                         match_id=session.match_id,
                         seat=active_seat,
-                        turn_index=len(next_match.turns),
+                        turn_index=turns_before + 1,
                     ),
                 )
                 new_lifecycle = RuntimeLifecycle.RUNNING
@@ -1275,10 +1300,10 @@ async def run_match(
                     match_id=session.match_id,
                     seat=active_seat,
                     schema_version=1,
-                    turn_index=len(next_match.turns) - 1,
+                    turn_index=turns_before,
                     turn_id=turn_id,
                 )
-                await _broadcast_turn_committed(conns, session)
+                await _broadcast_turns_committed(conns, session, since=turns_before)
                 await _broadcast_match_state(conns, session)
 
         # Match reached terminal state.

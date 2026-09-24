@@ -4,7 +4,9 @@ from arena.match.local_match import (
     LocalMatch,
     TurnRecord,
     apply_match_action,
+    apply_match_chance,
     start_match,
+    start_replay_match,
 )
 from arena.match.policy import Policy, apply_policy_turn, run_local_match
 from arena.match.transcript import (
@@ -34,10 +36,12 @@ __all__ = [
     "Policy",
     "TurnRecord",
     "apply_match_action",
+    "apply_match_chance",
     "apply_policy_turn",
     "dump_match_transcript",
     "load_match_transcript",
     "run_local_match",
     "validate_match_transcript",
     "start_match",
+    "start_replay_match",
 ]

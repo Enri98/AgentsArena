@@ -3628,10 +3628,10 @@ Scope:
   `RuntimeTranscriptPayload.schema_version` widens from `Literal[1]`.
 - `turn_committed.events` becomes load-bearing: chance outcomes are serialized domain events, not
   class-name strings. This replaces the hardcoded `events=[]` at `runtime_bridge.py:241`.
-- **seeded RNG lives in serialized state, not config.** `_ensure_snapshot_matches`
-  (`transcript.py:312`) compares `post_snapshot.state` dicts exactly every turn, so the RNG
-  representation must round-trip through `dump_state`/`load_state` and compare equal — use a
-  seed-plus-counter, not `Random.getstate()`'s 625-int tuple.
+- ~~**seeded RNG lives in serialized state, not config.**~~ **Superseded by Slice 3:** state is
+  broadcast as `post_snapshot` just like config is, so a generator in state is equally public — a
+  seat could run it forward and predict every roll. The generator lives on `LocalMatch` instead;
+  see Slice 3.
 - **the seed must not be reachable from config.** `send_welcome` dumps the full `match_config` to
   both seats (`runtime_bridge.py:1021, 1046`) and `_build_snapshot` embeds
   `serializer.dump_config(config)` in *every* `SnapshotEnvelope` (`local_match.py:99-105`), which is
@@ -3660,7 +3660,8 @@ Acceptance criteria:
 #### Slice 1 - Chance-node contract and seeded RNG — ✅ COMPLETE (2026-09-23)
 
 - `arena.core.chance`: `ChanceRng` (a frozen `(seed, counter)` pair), the `is_chance_node` /
-  `resolve_chance` hooks, and `validate_chance_support`.
+  `resolve_chance` hooks (replaced in Slice 3 by `sample_chance` / `apply_chance`), and
+  `validate_chance_support`.
 - `GameDefinition.has_chance_nodes`, enforced at registration like the public-view declaration.
 - `ChanceRng` draws are hash-based and rejection-sampled: reproducible across processes and Python
   builds, and unbiased. A `random.Random` could not be used — its 625-int internal state is
@@ -3695,7 +3696,44 @@ explicitly absent".
   v2 transcript — so the SDK advertises `[1, 2]`.
 - Protocol §7 gains a version-history table (§7.1); the doc header states the current version.
 
-#### Slice 3 - Seed provenance and non-disclosure
+#### Slice 3 - Seed provenance and non-disclosure — ✅ COMPLETE (2026-09-24)
+
+**The Slice 1/2 design leaked the seed.** It put `ChanceRng(seed, counter)` in game state, reasoning
+that only config was broadcast. But every `post_snapshot` carries `dump_state(...)` to both seats and
+every spectator, so anyone could run the generator forward and predict every future roll. Moving the
+seed out of config fixed nothing. **Owner decision (2026-09-24): chance becomes nature's action.**
+
+- Engine hooks are now `is_chance_node(state)`, `sample_chance(state, rng) -> (outcome, rng)`, and
+  `apply_chance(state, outcome) -> TransitionResult`. `apply_chance` revalidates the outcome, the
+  same way `apply_action` revalidates an action. `resolve_chance` is gone.
+- Serializer hooks `dump_chance_outcome` / `load_chance_outcome`. `validate_chance_support` requires
+  all five hooks at registration; an engine without them could record a turn it can't replay.
+- **The generator lives on `LocalMatch.rng`** (`repr=False, compare=False`), never in state or
+  config. `ChanceRng.__repr__` hides the seed too, so it can't reach a log line.
+  `start_match(..., seed=None)` mints `secrets.randbits(128)` for a chance game, because a
+  predictable default seed would be public. `Arena.start_session(..., seed=)` passes it through. The
+  seed is never serialized anywhere.
+- Chance turns record `outcome` (`TurnRecord.outcome`, `MatchTurnPayload.outcome`, the UI mirror, and
+  `turn_committed.turn_record.outcome`). **Replay applies the recorded outcome:**
+  `start_replay_match` never samples; it waits at each chance node for `apply_match_chance`. A
+  transcript validates without the seed. Tampered or impossible outcomes are rejected, the latter by
+  the engine itself.
+- Still `schema_version=2`. The v2 shape was unreleased, so adding the optional `outcome` field before
+  the phase closes costs no bump.
+- `assert_chance_contract` in `arena.testing` (and in `assert_game_contract`): same seed → same
+  transcript, replay without the seed validates, and the seed never appears in the transcript.
+- `arena.testing.chance_factory`: a coin-flip fixture game that opens at a chance node and returns
+  to one after every move.
+
+**Two Slice 2 bugs fixed along the way:**
+- The server broadcast `turn_committed` only for `turns[-1]`. When an action was followed by chance
+  turns, **the action's own `turn_committed` was never sent**, and neither were opening chance turns.
+  Now `_broadcast_turns_committed(since=...)` sends every committed turn, opening ones included.
+  `TurnAccepted.turn_index` is the action's own index, not the post-step turn count.
+- `UIScreenTurnPayload` required `seat` and `action`, so the replay viewer would have crashed on
+  any chance turn. Both are now optional, with `kind` and `outcome` added; the CLI history renders
+  chance turns.
+
 #### Slice 4 - Exemplar stochastic game + adapter registrations
 
 

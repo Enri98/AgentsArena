@@ -9,6 +9,7 @@ from typing import Generic, TypeVar, cast
 from pydantic import BaseModel, ConfigDict, Field
 
 from arena.core.actions import Action
+from arena.core.chance import dump_chance_outcome, load_chance_outcome
 from arena.core.config import BaseGameConfig
 from arena.core.events import DomainEvent
 from arena.core.game_definition import GameDefinition
@@ -21,7 +22,8 @@ from arena.match.local_match import (
     TURN_KIND_CHANCE,
     LocalMatch,
     apply_match_action,
-    start_match,
+    apply_match_chance,
+    start_replay_match,
 )
 
 ConfigT = TypeVar("ConfigT", bound=BaseGameConfig)
@@ -61,9 +63,10 @@ class MatchResultPayload(BaseModel):
 class MatchTurnPayload(BaseModel):
     """JSON-safe payload for one match turn.
 
-    ``seat`` and ``action`` are null on a chance turn: no seat chose it. They
-    default to null and ``kind`` defaults to ``"action"`` so a v1 transcript,
-    which predates chance nodes, still validates.
+    ``seat`` and ``action`` are null on a chance turn: no seat chose it. It
+    carries ``outcome`` instead — the recorded result replay applies, so a
+    transcript validates without the seed. Every new field defaults so a v1
+    transcript, which predates chance nodes, still validates.
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -74,6 +77,7 @@ class MatchTurnPayload(BaseModel):
     result: MatchResultPayload | None
     post_snapshot: SnapshotEnvelope
     kind: str = TURN_KIND_ACTION
+    outcome: JSONMapping | None = None
 
 
 class MatchTranscriptPayload(BaseModel):
@@ -100,6 +104,7 @@ class LoadedMatchTurn(Generic[StateT, ActionT]):
     post_state: StateT
     post_snapshot: SnapshotEnvelope
     kind: str = TURN_KIND_ACTION
+    outcome: object = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +140,11 @@ def dump_match_transcript(
                     else None
                 ),
                 kind=turn.kind,
+                outcome=(
+                    dump_chance_outcome(match.definition.serializer, turn.outcome)
+                    if turn.kind == TURN_KIND_CHANCE
+                    else None
+                ),
                 events=[
                     _dump_domain_event(event)
                     for event in turn.events
@@ -170,6 +180,11 @@ def load_match_transcript(
         LoadedMatchTurn[StateT, ActionT](
             seat=turn_payload.seat,
             kind=turn_payload.kind,
+            outcome=(
+                load_chance_outcome(definition.serializer, turn_payload.outcome)
+                if turn_payload.outcome is not None
+                else None
+            ),
             action=(
                 cast(ActionT, definition.serializer.load_action(turn_payload.action))
                 if turn_payload.action is not None
@@ -214,7 +229,9 @@ def validate_match_transcript(
     """Validate a transcript by replaying it against a fresh local match."""
 
     loaded_transcript = load_match_transcript(definition, payload)
-    replay_match = start_match(definition, loaded_transcript.config)
+    # A replay match never samples: it waits at each chance node for the
+    # recorded outcome. Validation therefore needs no seed.
+    replay_match = start_replay_match(definition, loaded_transcript.config)
 
     _ensure_snapshot_matches(
         expected=loaded_transcript.initial_snapshot,
@@ -227,14 +244,21 @@ def validate_match_transcript(
         context="Initial",
     )
 
-    # Chance turns are NOT replayed: start_match and apply_match_action resolve
-    # chance nodes themselves, so replaying the action turns regenerates them in
-    # place. Reproducing the recorded outcome is the point — the generator lives
-    # in serialized state, so a faithful replay re-derives it rather than
-    # re-rolling. The full comparison below is what proves it.
+    # Replay never re-rolls: a chance turn applies its recorded outcome, which
+    # the engine revalidates just as it revalidates a recorded action. The full
+    # comparison below then proves every post-state, snapshot, and event matches.
     for loaded_turn in loaded_transcript.turns:
         if loaded_turn.kind == TURN_KIND_CHANCE:
+            if loaded_turn.outcome is None:
+                raise ValueError(
+                    "Transcript validation failed: a chance turn must carry its outcome."
+                )
+            replay_match = apply_match_chance(replay_match, loaded_turn.outcome)
             continue
+        if loaded_turn.kind != TURN_KIND_ACTION:
+            raise ValueError(
+                f"Transcript validation failed: unknown turn kind {loaded_turn.kind!r}."
+            )
         if loaded_turn.seat is None or loaded_turn.action is None:
             raise ValueError(
                 "Transcript validation failed: an action turn must carry both a seat "

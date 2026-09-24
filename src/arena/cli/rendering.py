@@ -133,6 +133,10 @@ def _render_turn_history(transcript: Mapping[str, Any]) -> str:
         return "Turn history: (none)"
     lines = ["Turn history:"]
     for turn in turns:
+        if turn.get("kind") == "chance":
+            outcome_str = json.dumps(turn.get("outcome"), sort_keys=True)
+            lines.append(f"  #{turn['turn_index']} chance outcome={outcome_str}")
+            continue
         action_str = json.dumps(turn["action"], sort_keys=True)
         lines.append(f"  #{turn['turn_index']} seat={turn['seat']} action={action_str}")
     return "\n".join(lines)

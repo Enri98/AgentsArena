@@ -2,6 +2,7 @@
 
 from arena.testing.contracts import (
     GameContractBundle,
+    assert_chance_contract,
     assert_game_contract,
     assert_illegal_action_rejection,
     assert_legal_action_generation,
@@ -27,6 +28,7 @@ __all__ = [
     "FakeObservation",
     "FakeState",
     "GameContractBundle",
+    "assert_chance_contract",
     "assert_game_contract",
     "assert_illegal_action_rejection",
     "assert_legal_action_generation",

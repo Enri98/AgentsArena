@@ -1,7 +1,7 @@
 """Core package for shared simulation-layer abstractions."""
 
 from arena.core.actions import Action
-from arena.core.chance import ChanceRng, is_chance_node, resolve_chance
+from arena.core.chance import ChanceRng, apply_chance, is_chance_node, sample_chance
 from arena.core.exceptions import (
     ArenaCoreError,
     ChanceResolutionError,
@@ -49,8 +49,9 @@ __all__ = [
     "IncompleteChanceSupport",
     "ChanceResolutionError",
     "ChanceRng",
+    "apply_chance",
     "is_chance_node",
-    "resolve_chance",
+    "sample_chance",
     "dump_public_state",
     "load_public_state",
     "public_state",
