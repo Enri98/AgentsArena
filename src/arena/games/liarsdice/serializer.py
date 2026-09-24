@@ -76,11 +76,11 @@ class ShowdownPayload(BaseModel):
 class _PublicFields(BaseModel):
     model_config = _STRICT
 
-    dice_counts: list[int] = Field(min_length=2, max_length=2)
+    dice_counts: list[Annotated[int, Field(ge=0)]] = Field(min_length=2, max_length=2)
     bids: list[_BidBody]
     current_seat: int = Field(ge=0, le=1)
     round_number: int = Field(ge=0)
-    faces: int = Field(ge=2)
+    faces: int = Field(ge=2, le=9)
     last_showdown: ShowdownPayload | None = None
 
 
@@ -147,7 +147,7 @@ class LiarsDiceSerializer:
     def dump_public_state(self, state: object) -> JSONMapping:
         s = _expect(state, LiarsDiceState)
         return LiarsDicePublicStatePayload(
-            **_public_fields(s), roll_pending=s.dice is None
+            **_public_fields(s), roll_pending=_roll_pending(s)
         ).model_dump(mode="json")
 
     def load_public_state(self, payload: JSONMapping) -> object:
@@ -166,7 +166,7 @@ class LiarsDiceSerializer:
         s = _expect(state, LiarsDiceState)
         return LiarsDiceSeatStatePayload(
             **_public_fields(s),
-            roll_pending=s.dice is None,
+            roll_pending=_roll_pending(s),
             seat=seat,
             my_dice=list(s.dice[seat]) if s.dice is not None else [],
         ).model_dump(mode="json")
@@ -222,12 +222,19 @@ class LiarsDiceSerializer:
         return Roll(dice=(tuple(p.dice[0]), tuple(p.dice[1])))
 
     def dump_chance_outcome_for_seat(self, outcome: object, seat: Seat) -> JSONMapping:
+        if type(seat) is not int or seat not in (0, 1):
+            raise ValueError(f"A roll is split for seat 0 or 1, not {seat!r}.")
         roll = _expect(outcome, Roll)
         return {"my_dice": list(roll.dice[seat])}
 
     def dump_public_chance_outcome(self, outcome: object) -> JSONMapping:
         roll = _expect(outcome, Roll)
         return {"dice_counts": [len(hand) for hand in roll.dice]}
+
+
+def _roll_pending(s: LiarsDiceState) -> bool:
+    # Not just "no dice": a finished match has none either, and no roll coming.
+    return s.dice is None and min(s.dice_counts) > 0
 
 
 def _public_fields(s: LiarsDiceState) -> dict:

@@ -11,7 +11,7 @@ Python 3.11 library powering an agent-vs-agent arena for sequential two-seat gam
 | Layer | Package | Responsibility |
 |-------|---------|---------------|
 | Simulation core | `arena.core` | Types, seats, exceptions, events, actions, observations, results, config, `GameDefinition`, `RulesEngine`, `Serializer`, `Registry`. Pure, immutable, no I/O. |
-| Games | `arena.games.connect4`, `arena.games.tictactoe`, `arena.games.nim`, `arena.games.pig` | Concrete game vertical slices (config, state, action, observation, events, rules, serializer, definition). All registered via `build_default_registry()`. Pig (Phase 37) has chance nodes. |
+| Games | `arena.games.connect4`, `arena.games.tictactoe`, `arena.games.nim`, `arena.games.pig`, `arena.games.liarsdice` | Concrete game vertical slices (config, state, action, observation, events, rules, serializer, definition). All registered via `build_default_registry()`. Pig (Phase 37) has chance nodes; Liar's Dice (Phase 39) has hidden information and chance. |
 | Local match | `arena.match` | `LocalMatch`, `TurnRecord`, `start_match` / `apply_match_action`, transcript dump/load/validate, in-process `Policy` protocol, `run_local_match`. Per-match isolated rules engine copy. |
 | In-process adapter | `arena.adapters.in_process` | Serialized payload contract: `ObservationRequestPayload`, `ActionResponsePayload`, domain-error payloads, `apply_payload_policy_turn`, `TypedPayloadPolicyAdapter` + `InProcessAgent` for typed local agents. |
 | WebSocket adapter | `arena.adapters.websocket` | Pure typed wire-envelope contract for WebSocket transport. Pydantic envelope models, message-type discriminated unions, JSON encode/decode helpers. No I/O. Reuses `arena.adapters.in_process` payload bodies verbatim. |
@@ -77,7 +77,10 @@ nodes, `kind`/`outcome` transcript turns, multi-version decode, and Pig.
 Phase 38 ✅ (2026-09-24, wire `schema_version=3`): per-seat views, event visibility,
 per-recipient broadcast, seat-scoped transcripts, reconnect replay, server turn cap.
 
-**Active phase: 39** — Liar's Dice (no wire bump).
+Phase 39 ✅ (2026-09-24): Liar's Dice (`arena.games.liarsdice`), hidden information plus chance,
+proven over the wire and with real Ollama agents.
+
+**Active phase: 40**: transcript persistence and `GET /matches/{id}/public-transcript`.
 
 **Owner rule (2026-09-24): dispatch adversarial reviewer subagents between one feature and the
 next**, and fix confirmed findings before moving on.

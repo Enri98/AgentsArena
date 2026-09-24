@@ -10,6 +10,7 @@ from typing import Any
 import mcp.types as types
 from mcp.server import Server
 
+from arena.mcp.schemas import game_action_schema
 from arena.mcp.session_registry import SessionRegistry
 from arena.sdk._events import (
     ErrorEvent,
@@ -120,7 +121,11 @@ def build_server(registry: SessionRegistry | None = None) -> Server:
                         "seat": {"type": "integer"},
                         "action": {
                             "type": "object",
-                            "description": "Game-specific action dict (e.g. {\"column\": 3}).",
+                            "description": (
+                                "Game-specific action dict; its JSON Schema is the "
+                                "action_schema returned by join_match (e.g. "
+                                "{\"column\": 3} for connect4)."
+                            ),
                         },
                         "turn_id": {"type": "string", "description": "Optional turn UUID."},
                     },
@@ -221,6 +226,8 @@ async def _join_match(
         "match_id": match_id,
         "seat": seat,
         "game_id": handle.session.game_id,
+        # The shape make_move's `action` must take for this game.
+        "action_schema": game_action_schema(handle.session.game_id),
         "welcome": welcome_dict,
     })
 

@@ -70,17 +70,31 @@ class LiarsDicePromptBuilder:
                 f"{showdown.bid.face}; there were {showdown.count}; "
                 f"seat {showdown.loser} lost a die."
             )
-        if standing is not None:
+        # Legality is stated from the actual legal actions, never re-derived: a
+        # prompt that invites an impossible bid makes a small model burn every
+        # retry (e.g. at the maximum bid, where only a call remains).
+        legal_bids = [a for a in observation.legal_actions if isinstance(a, Bid)]
+        if not legal_bids and can_call:
             lines.append(
-                f"A legal bid must beat {standing.quantity} x {standing.face}: more than "
-                f"{standing.quantity} dice, or {standing.quantity} dice of a face above "
-                f"{standing.face}. At most {sum(counts)} dice."
+                f"No higher bid exists ({sum(counts)} dice in play, faces up to "
+                f"{observation.faces}). Your ONLY legal move is to call."
             )
-        options = '"bid"' + (' or "call"' if can_call else "")
-        lines.append(
-            f'Respond with JSON: {{"thought": "<one sentence>", "action": {options}, '
-            '"quantity": <int, for a bid>, "face": <int, for a bid>}'
-        )
+            lines.append('Respond with JSON: {"thought": "<one sentence>", "action": "call"}')
+        else:
+            smallest = ", ".join(f"{b.quantity} x {b.face}" for b in legal_bids[:3])
+            cap = f"A bid can claim at most {sum(counts)} dice (all dice in play)."
+            if standing is not None:
+                lines.append(
+                    f"A bid must beat {standing.quantity} x {standing.face}: more dice, or "
+                    f"as many dice of a higher face. {cap} Smallest legal raises: {smallest}."
+                )
+            else:
+                lines.append(f"{cap} Smallest legal bids: {smallest}.")
+            options = '"bid"' + (' or "call"' if can_call else "")
+            lines.append(
+                f'Respond with JSON: {{"thought": "<one sentence>", "action": {options}, '
+                '"quantity": <int, for a bid>, "face": <int, for a bid>}'
+            )
         if retry_feedback:
             items = "\n".join(f" - {f}" for f in retry_feedback)
             lines.append(f"Previous attempts were rejected:\n{items}")
@@ -129,7 +143,8 @@ class LiarsDicePromptBuilder:
     def describe_invalid(self, raw_content: str) -> str:
         return (
             "Response was not a legal move: a bid must raise the standing bid (more dice, "
-            "or as many of a higher face), and you can only call a standing bid. "
+            "or as many of a higher face) without claiming more dice than are in play, "
+            "and you can only call a standing bid. "
             f"Raw content: {raw_content[:200]}"
         )
 

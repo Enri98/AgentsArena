@@ -166,3 +166,65 @@ def test_the_observation_shows_only_the_seats_own_hand() -> None:
     assert obs.my_dice == (5, 5, 1)
     assert not hasattr(obs, "dice")
     assert obs.legal_actions == ()  # seat 0 is to move
+
+
+# -- adversarial review of Slice 1 ------------------------------------------
+
+
+def test_a_finished_match_has_no_pending_roll_and_the_winner_holds_the_table() -> None:
+    from arena.games.liarsdice import LiarsDiceSerializer
+
+    state = _state(dice=((6,), (5, 5)), dice_counts=(1, 2), bids=(Bid(quantity=3, face=5),),
+                   current_seat=1)
+    final = ENGINE.apply_action(state, 1, Call()).state
+    assert ENGINE.is_terminal(final)
+    assert final.current_seat == 1  # the winner, not the eliminated seat
+    assert ENGINE.public_state(final).roll_pending is False
+    serializer = LiarsDiceSerializer()
+    assert serializer.dump_public_state(final)["roll_pending"] is False
+    assert serializer.dump_state_for_seat(final, 0)["roll_pending"] is False
+
+
+@pytest.mark.parametrize("seat", [-1, 2, True])
+def test_observations_are_only_for_real_seats(seat: object) -> None:
+    with pytest.raises(ValueError):
+        ENGINE.observation(_state(), seat)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "roll",
+    [
+        Roll(dice=((1, 2, 3), 5)),  # type: ignore[arg-type]
+        Roll(dice=[[1, 2, 3], [4, 5, 6]]),  # type: ignore[arg-type]
+        Roll(dice=((1, 2, 3),)),  # type: ignore[arg-type]
+    ],
+)
+def test_malformed_rolls_are_domain_errors(roll: Roll) -> None:
+    with pytest.raises(ChanceResolutionError):
+        ENGINE.apply_chance(ENGINE.initial_state(LiarsDiceConfig()), roll)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda p: p.update(faces=1000),
+        lambda p: p.update(bids=[{"quantity": 99, "face": 2}]),
+        lambda p: p.update(bids=[{"quantity": 2, "face": 3}, {"quantity": 1, "face": 6}]),
+        lambda p: p.update(round_number=0),
+        lambda p: p.update(dice_counts=[-1, 3]),
+        lambda p: p.update(
+            last_showdown={"caller": 0, "bid": {"quantity": 1, "face": 2},
+                           "dice": [[1], [2, 3]], "count": 99, "loser": 1}
+        ),
+    ],
+)
+def test_impossible_states_do_not_load(mutate) -> None:
+    from pydantic import ValidationError as PydanticValidationError
+
+    from arena.games.liarsdice import LiarsDiceSerializer
+
+    serializer = LiarsDiceSerializer()
+    payload = serializer.dump_state(_state())
+    mutate(payload)
+    with pytest.raises((ValueError, PydanticValidationError)):
+        serializer.load_state(payload)

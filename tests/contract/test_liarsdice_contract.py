@@ -18,6 +18,7 @@ from arena.games.liarsdice import (
     LiarsDiceGameDefinition,
     LiarsDiceState,
     Roll,
+    Showdown,
 )
 from arena.testing import PrivateVariant, assert_game_contract
 
@@ -47,6 +48,19 @@ def build_liarsdice_contract_bundle() -> LiarsDiceContractBundle:
     opening = engine.apply_chance(engine.initial_state(config), opening_roll).state
 
     bid_standing = replace(opening, bids=(Bid(quantity=2, face=5),), current_seat=1)
+    previous = Showdown(
+        caller=0, bid=Bid(quantity=3, face=2), dice=((2, 4, 4), (2, 6, 1)), count=2, loser=1
+    )
+    # Round 2, after a showdown, several bids in: seat 1 lost a die in round 1.
+    later = LiarsDiceState(
+        dice=((1, 4, 4), (3, 3)),
+        dice_counts=(3, 2),
+        bids=(Bid(quantity=1, face=3), Bid(quantity=2, face=4), Bid(quantity=2, face=6)),
+        current_seat=0,
+        round_number=2,
+        faces=6,
+        last_showdown=previous,
+    )
     near_terminal = LiarsDiceState(
         dice=((6,), (5, 5)),
         dice_counts=(1, 2),
@@ -54,6 +68,9 @@ def build_liarsdice_contract_bundle() -> LiarsDiceContractBundle:
         current_seat=1,
         round_number=3,
         faces=6,
+        last_showdown=Showdown(
+            caller=1, bid=Bid(quantity=2, face=3), dice=((3, 1), (3, 5)), count=2, loser=1
+        ),
     )
 
     def swap(state: LiarsDiceState, seat: int, hand: tuple[int, ...]) -> LiarsDiceState:
@@ -65,7 +82,17 @@ def build_liarsdice_contract_bundle() -> LiarsDiceContractBundle:
     for state in (opening, bid_standing):
         variants.append(PrivateVariant(state, swap(state, 1, (6, 6, 6)), blind_seat=0))
         variants.append(PrivateVariant(state, swap(state, 0, (1, 1, 4)), blind_seat=1))
+    variants.append(PrivateVariant(later, swap(later, 1, (6, 6)), blind_seat=0))
+    variants.append(PrivateVariant(later, swap(later, 0, (5, 5, 5)), blind_seat=1))
     variants.append(PrivateVariant(near_terminal, swap(near_terminal, 0, (2,)), blind_seat=1))
+    variants.append(PrivateVariant(near_terminal, swap(near_terminal, 1, (1, 2)), blind_seat=0))
+
+    # A later chance node: after round 1's showdown, seat 1 down to two dice.
+    later_roll_state = LiarsDiceState(
+        dice=None, dice_counts=(3, 2), bids=(), current_seat=1, round_number=1, faces=6,
+        last_showdown=previous,
+    )
+    later_roll = Roll(dice=((1, 4, 4), (3, 3)))
 
     return LiarsDiceContractBundle(
         definition=definition,
@@ -78,10 +105,10 @@ def build_liarsdice_contract_bundle() -> LiarsDiceContractBundle:
         terminal_action=Call(),
         opening_outcomes=(opening_roll,),
         private_variants=tuple(variants),
-        chance_state=engine.initial_state(config),
+        chance_state=later_roll_state,
         private_outcome_variants=(
-            PrivateVariant(opening_roll, Roll(dice=((2, 3, 5), (6, 6, 6))), blind_seat=0),
-            PrivateVariant(opening_roll, Roll(dice=((1, 1, 4), (5, 5, 1))), blind_seat=1),
+            PrivateVariant(later_roll, Roll(dice=((1, 4, 4), (6, 6))), blind_seat=0),
+            PrivateVariant(later_roll, Roll(dice=((2, 2, 2), (3, 3))), blind_seat=1),
         ),
         revealing_actions=(Call(),),
     )

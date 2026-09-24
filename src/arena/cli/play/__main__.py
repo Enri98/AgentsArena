@@ -260,7 +260,17 @@ def _bounded(low: int, high: int) -> Any:
     return parse
 
 
+def _tolerate_unencodable_output() -> None:
+    """Boards use glyphs like ● that a cp1252 Windows console cannot encode;
+    replace them rather than crash mid-match."""
+
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _tolerate_unencodable_output()
     parser = argparse.ArgumentParser(prog="python -m arena.cli.play")
     parser.add_argument("--game", choices=sorted(cli_game_ids()), required=True)
     parser.add_argument("--seat-0", required=True, dest="seat_0")

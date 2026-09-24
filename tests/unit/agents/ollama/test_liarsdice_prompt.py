@@ -59,3 +59,29 @@ def test_format_spec_and_registration() -> None:
     spec = BUILDER.format_spec()
     assert spec["properties"]["action"]["enum"] == ["bid", "call"]
     assert get_ollama_adapter("liarsdice").prompt_builder_factory is LiarsDicePromptBuilder
+
+
+def test_at_the_maximum_bid_the_prompt_says_only_call_is_legal() -> None:
+    """Review of Slice 2: the prompt used to invite an impossible raise here, and a
+    small model burned every retry and aborted the match."""
+
+    state = LiarsDiceState(
+        dice=((6,), (2, 3)),
+        dice_counts=(1, 2),
+        bids=(Bid(quantity=3, face=6),),
+        current_seat=1,
+        round_number=2,
+        faces=6,
+    )
+    obs = ENGINE.observation(state, 1)
+    assert obs.legal_actions == (Call(),)
+    user = BUILDER.build_messages(obs)[-1]["content"]
+    assert "ONLY legal move is to call" in user
+    assert '"bid"' not in user
+
+
+def test_prompts_state_the_dice_cap_and_smallest_raises() -> None:
+    opening = BUILDER.build_messages(_obs(seat=0))[-1]["content"]
+    assert "at most 6 dice" in opening and "Smallest legal bids: 1 x 1, 1 x 2, 1 x 3" in opening
+    raised = BUILDER.build_messages(_obs(bids=(Bid(quantity=2, face=5),)))[-1]["content"]
+    assert "Smallest legal raises: 2 x 6, 3 x 1, 3 x 2" in raised

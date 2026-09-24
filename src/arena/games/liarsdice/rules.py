@@ -141,11 +141,14 @@ class LiarsDiceRulesEngine:
             ),
             DieLost(seat=loser, remaining=counts[loser]),
         ]
+        # The loser opens the next round; at the end, the winner is shown to
+        # hold the table rather than an eliminated seat.
+        opener = loser if counts[loser] > 0 else _other(loser)
         next_state = LiarsDiceState(
             dice=None,  # a new roll is pending, unless the match is over
             dice_counts=counts,
             bids=(),
-            current_seat=loser,
+            current_seat=opener,
             round_number=state.round_number,
             faces=state.faces,
             last_showdown=Showdown(
@@ -175,9 +178,15 @@ class LiarsDiceRulesEngine:
     ) -> TransitionResult[LiarsDiceState, DomainEvent, None]:
         if not self.is_chance_node(state):
             raise ChanceResolutionError("No roll is pending.")
-        if not isinstance(outcome, Roll) or len(outcome.dice) != 2:
-            raise ChanceResolutionError("A roll deals one hand per seat.")
-        for hand, count in zip(outcome.dice, state.dice_counts):
+        hands = getattr(outcome, "dice", None)
+        if (
+            not isinstance(outcome, Roll)
+            or not isinstance(hands, tuple)
+            or len(hands) != 2
+            or not all(isinstance(hand, tuple) for hand in hands)
+        ):
+            raise ChanceResolutionError("A roll deals one tuple of dice per seat.")
+        for hand, count in zip(hands, state.dice_counts):
             if len(hand) != count or any(
                 type(d) is not int or not 1 <= d <= state.faces for d in hand
             ):
@@ -206,6 +215,9 @@ class LiarsDiceRulesEngine:
         return None
 
     def observation(self, state: LiarsDiceState, seat: Seat) -> LiarsDiceObservation:
+        if type(seat) is not int or seat not in (0, 1):
+            # dice[-1] would be the other seat's hand.
+            raise ValueError(f"An observation is for seat 0 or 1, not {seat!r}.")
         return LiarsDiceObservation(
             seat=seat,
             my_dice=state.dice[seat] if state.dice is not None else (),
@@ -226,7 +238,7 @@ class LiarsDiceRulesEngine:
             round_number=state.round_number,
             faces=state.faces,
             last_showdown=state.last_showdown,
-            roll_pending=state.dice is None,
+            roll_pending=self.is_chance_node(state),
         )
 
 

@@ -44,7 +44,17 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _tolerate_unencodable_output() -> None:
+    """Boards use glyphs like ● that a cp1252 Windows console cannot encode;
+    replace them rather than crash mid-match."""
+
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="replace")
+
+
 def main(argv: list[str] | None = None) -> None:
+    _tolerate_unencodable_output()
     args = _build_parser().parse_args(argv)
     if args.all_frames:
         print(render_all_frames(args.status, args.transcript, seat=args.seat))

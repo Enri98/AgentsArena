@@ -108,10 +108,13 @@ rounds found real problems:
 - MCP `make_move` confirmed a stale turn;
 - the browser spectator had been refused since Phase 37.
 
-Active phase: **39 — Liar's Dice**. No wire bump. Everything it needs exists: chance nodes for the
-roll, per-seat redaction, private events, and the indistinguishability contract. Its CLI adapter
-must render the live game from the human seat's view; the local `arena.cli.play` still shows full
-state.
+**Phase 39 is complete** (2026-09-24): Liar's Dice (`arena.games.liarsdice`), the first game
+with hidden information and chance. Two Ollama agents finish matches locally and over the server,
+and no client ever receives a hand it may not see (wire tests plus the demo's audit). The live CLI
+renders from the human seat's view. Running real agents also found and fixed two SDK bugs:
+`action_rejected` crashed clients, and a slow `choose()` froze the heartbeat.
+
+Active phase: **40**, transcript persistence and `GET /matches/{id}/public-transcript`.
 
 The Phase 36-38 specs were revised on 2026-09-22 after an adversarial review that checked every
 claim against the code. Three findings are worth carrying forward, because each is easy to

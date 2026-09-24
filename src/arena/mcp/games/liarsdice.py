@@ -6,6 +6,7 @@ from arena.games.liarsdice.definition import LIARSDICE_GAME_ID
 from arena.mcp._adapters import McpGameAdapter, register_mcp_adapter
 
 LIARSDICE_ACTION_SCHEMA: dict[str, object] = {
+    "type": "object",
     "oneOf": [
         {
             "type": "object",

@@ -1,12 +1,53 @@
 """High-level connect() callback form."""
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from typing import Any, Callable
 
-from arena.sdk._events import MatchAbortedEvent, MatchFinishedEvent, ObservationEvent
+from arena.sdk._events import (
+    ActionRejectedEvent,
+    MatchAbortedEvent,
+    MatchFinishedEvent,
+    ObservationEvent,
+)
 from arena.sdk._session import Session
 from arena.sdk.errors import MatchAbortedError
+
+
+async def _next_event(session: object, backlog: list[asyncio.Future[Any]]) -> Any:
+    if backlog:
+        return backlog.pop(0).result()  # re-raises what the receive raised
+    return await session.recv()  # type: ignore[union-attr]
+
+
+async def _choose_while_serving(
+    session: object,
+    choose: Callable[[Any], dict[str, Any]],
+    observation: Any,
+    backlog: list[asyncio.Future[Any]],
+) -> dict[str, Any]:
+    """Run the synchronous choose() in a worker thread while still receiving.
+
+    An LLM agent can think for longer than the server's heartbeat allows. Called
+    inline, choose() froze the event loop: pings went unanswered and the server
+    dropped a perfectly healthy seat. Receiving concurrently lets the session
+    answer pings (Session.recv replies to them itself). An event that does
+    arrive meanwhile, such as an abort, is kept and handed back in order.
+    """
+
+    decision = asyncio.ensure_future(asyncio.to_thread(choose, observation))
+    receiving = asyncio.ensure_future(session.recv())  # type: ignore[union-attr]
+    await asyncio.wait({decision, receiving}, return_when=asyncio.FIRST_COMPLETED)
+    if receiving.done():
+        backlog.append(receiving)
+        return await decision
+    receiving.cancel()
+    try:
+        await receiving
+    except (asyncio.CancelledError, Exception):
+        pass
+    return decision.result()
 
 
 async def _run_session(
@@ -33,13 +74,22 @@ async def _run_session(
     ------
     MatchAbortedError: if the match aborts before reaching a result.
     """
+    obs: Any = None
+    backlog: list[asyncio.Future[Any]] = []
     while True:
-        event = await session.recv()  # type: ignore[union-attr]
+        event = await _next_event(session, backlog)
 
         if isinstance(event, ObservationEvent):
             obs = event.body.observation_request
-            action = choose(obs)
+            action = await _choose_while_serving(session, choose, obs, backlog)
             await session.send_action(action)  # type: ignore[union-attr]
+
+        elif isinstance(event, ActionRejectedEvent):
+            # The turn is still open and no new observation comes: choose again.
+            # The server's retry budget decides when to stop.
+            if obs is not None:
+                action = await _choose_while_serving(session, choose, obs, backlog)
+                await session.send_action(action)  # type: ignore[union-attr]
 
         elif isinstance(event, MatchFinishedEvent):
             return event.body.result, event.body.transcript

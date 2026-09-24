@@ -4010,7 +4010,7 @@ transcripts and needs adapting for Liar's Dice (Phase 39).
 
 ---
 
-### Phase 39 - Liar's Dice
+### Phase 39 - Liar's Dice — ✅ COMPLETE (2026-09-24)
 
 Objective:
 - prove Phases 37 and 38 together with a game that is unplayable without both
@@ -4081,7 +4081,57 @@ Acceptance criteria:
 - **Ollama:** `LiarsDicePromptBuilder` is built from the observation, so it only knows the seat's
   own hand. It gives per-face tallies, the standing bid and the last showdown. `format_spec` uses
   an action enum, and the parser rejects bool/str quantities and non-raising bids.
-#### Slice 3 - Wire acceptance, demo, and real agent runs
+#### Adversarial reviews of Slices 1-2 — fixes landed (2026-09-24)
+
+- **Slice 1** (the game): **no leak and no rules bug.** The reviewer checked 300 counterfactual
+  matches (5,924 viewer comparisons, zero differences) and 2,000 rule-fuzzed matches with 9,721
+  calls. Low findings, all fixed with tests:
+  - a finished match claimed a roll was pending, and marked the eliminated seat as to move;
+  - `observation(state, -1)` returned seat 1's hand;
+  - `load_state` accepted impossible states (unbounded faces, bids above the dice in play,
+    inconsistent showdowns: `Showdown` now validates its count and loser);
+  - `apply_chance` could store list-valued hands.
+
+  The contract bundle gained variants after a showdown and at a later chance node.
+- **Slice 2** (adapters): **no leak.** The reviewer checked that a fake Ollama opponent writing its
+  hand into its thoughts and retries never reached the human's screen. Fixed:
+  - the prompt invited an impossible raise when only a call was legal, so small models burned their
+    retries (legality is now stated from the actual legal actions);
+  - MCP clients were never told a game's action schema (`join_match` now returns it);
+  - Connect 4's `●` crashed cp1252 consoles (the CLI entry points now replace unencodable
+    characters);
+  - **pre-existing SDK bug:** `action_rejected` was an unhandled envelope type, so any rejected
+    move killed an SDK client. It is now an event, and the callback loop chooses again.
+
+#### Slice 3 - Wire acceptance, demo, and real agent runs — ✅ COMPLETE (2026-09-24)
+
+- `arena.games.liarsdice.audit.leaked_hand_paths`: a structural check for hands a viewer may not
+  see, used by the tests and the demo.
+- `tests/integration/test_liarsdice_wire.py`, over real TCP:
+  - no frame to either seat or a spectator carries a hidden hand;
+  - against the server's full transcript, every hand a seat is shown is its own, for the current
+    round;
+  - the spectator sees every bid and every reveal;
+  - the full transcript replays, opening roll included;
+  - two matches differing only in seat 1's hand look identical to seat 0 and to the spectator until
+    the first showdown;
+  - a mid-round reconnect replays exactly the turns the seat saw live, and nothing hidden.
+- `examples/run_liarsdice_demo.py` has two Ollama seats and a spectator. It audits each seat's
+  transcript and the spectator stream instead of replaying: seat transcripts are views, and differ
+  by design.
+- **Two agent-facing bugs found by running real agents:**
+  1. **The SDK ran the synchronous `choose()` on the event loop.** An LLM thinking past the
+     heartbeat window left pings unanswered, and the server dropped a healthy seat. `choose()` now
+     runs in a worker thread while a concurrent receive answers pings.
+  2. **`probe_models` rejected untagged names** (`llama3.2` vs `llama3.2:latest`).
+- **Acceptance, real stack:**
+  - Over the server, two `llama3.2` agents finished a four-round match: 0 leaks in either seat
+    transcript, and the spectator saw 17 bids and 4 reveals with 0 leaks.
+  - Locally, `arena.cli.play` with two agents showed the public view, and the saved full transcript
+    replays.
+  - The demo defaults to temperature 0.5, so a retry isn't the same illegal answer again, and to a
+    5-minute turn deadline for local models.
+- 988 tests pass.
 
 ---
 
