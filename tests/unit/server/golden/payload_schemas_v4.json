@@ -671,6 +671,21 @@
          "default": null,
          "title": "Abort"
         },
+        "acting_seats": {
+         "anyOf": [
+          {
+           "items": {
+            "type": "integer"
+           },
+           "type": "array"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Acting Seats"
+        },
         "current_seat": {
          "anyOf": [
           {

@@ -110,3 +110,16 @@ def test_a_rejected_move_is_reported_at_once() -> None:
     error = asyncio.run(run())
     assert error["code"] == "action_rejected"
     assert "column full" in error["message"] and "2 retries remaining" in error["message"]
+
+
+def test_a_joint_turn_with_this_seats_action_is_its_own() -> None:
+    from arena.mcp.server import _is_own_action
+    from arena.sdk._events import TurnCommittedEvent
+
+    class Body:
+        turn_record = {"kind": "joint", "seat": None, "actions": {"0": {}, "1": {}}}
+
+    event = TurnCommittedEvent(body=Body())  # type: ignore[arg-type]
+    assert _is_own_action(event, 0) and _is_own_action(event, 1)
+    Body.turn_record = {"kind": "joint", "seat": None, "actions": {"1": {}}}
+    assert not _is_own_action(event, 0)
