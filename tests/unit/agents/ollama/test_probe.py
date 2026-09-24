@@ -24,3 +24,8 @@ def test_a_missing_model_is_still_reported() -> None:
         probe_models("h", ["mistral"], client=_client(["llama3.2:latest"]))
     with pytest.raises(OllamaModelMissingError):
         probe_models("h", ["llama3.2:1b"], client=_client(["llama3.2:latest"]))
+
+
+def test_a_registry_port_is_not_mistaken_for_a_tag() -> None:
+    installed = _client(["registry.local:5000/llama3.2:latest"])
+    probe_models("h", ["registry.local:5000/llama3.2"], client=installed)

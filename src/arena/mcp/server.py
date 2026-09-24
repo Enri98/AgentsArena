@@ -13,6 +13,7 @@ from mcp.server import Server
 from arena.mcp.schemas import game_action_schema
 from arena.mcp.session_registry import SessionRegistry
 from arena.sdk._events import (
+    ActionRejectedEvent,
     ErrorEvent,
     MatchAbortedEvent,
     MatchFinishedEvent,
@@ -277,6 +278,11 @@ async def _get_observation(
                 for e in deferred:
                     await handle.queue.put(e)
                 return _ok_result(_event_to_dict(event))
+            elif isinstance(event, ActionRejectedEvent):
+                # No new observation follows a rejection: the turn is still open.
+                for e in deferred:
+                    await handle.queue.put(e)
+                return _rejected_result(event)
             elif isinstance(event, TurnCommittedEvent):
                 # Already recorded in handle.history. Re-queueing it would make a
                 # later make_move return this old turn as its own confirmation.
@@ -292,6 +298,18 @@ async def _get_observation(
                 deferred.append(event)
     except Exception as exc:
         return _error_result("internal_error", str(exc))
+
+
+def _rejected_result(event: ActionRejectedEvent) -> types.CallToolResult:
+    """The move was refused; the turn stays open for another make_move."""
+
+    body = event.body
+    return _error_result(
+        "action_rejected",
+        f"{body.error.code}: {body.error.message} "
+        f"({body.retries_remaining} retries remaining; call make_move again with a "
+        f"legal action for the same observation).",
+    )
 
 
 def _is_own_action(event: TurnCommittedEvent, seat: int) -> bool:
@@ -352,6 +370,10 @@ async def _make_move(
             if isinstance(event, TurnCommittedEvent) and not _is_own_action(event, seat):
                 # Someone else's turn, or a chance turn: in history already.
                 continue
+            if isinstance(event, ActionRejectedEvent):
+                for e in deferred:
+                    await handle.queue.put(e)
+                return _rejected_result(event)
             if isinstance(event, ObservationEvent):
                 # Asked to act again before our move was confirmed: the move was
                 # not taken, most likely because it was sent out of turn (the

@@ -97,11 +97,12 @@ def test_retry_budget_exhaustion_aborts_with_documented_ordering(
             assert (await recv_envelope(ws1)).type == "match_state"
             assert (await recv_envelope(ws0)).type == "observation_request"
 
-            # Attempt 1: rejected, budget spent.
+            # Attempt 1: rejected; the budget of 1 allows one more attempt (§8.6:
+            # retries_remaining counts the attempts still allowed).
             await send_envelope(ws0, _illegal_action(0))
             rejected_1 = await recv_envelope(ws0)
             assert rejected_1.type == "action_rejected"
-            assert rejected_1.payload.retries_remaining == 0
+            assert rejected_1.payload.retries_remaining == 1
 
             # Attempt 2: no budget left -> terminate.
             await send_envelope(ws0, _illegal_action(0))

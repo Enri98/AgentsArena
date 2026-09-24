@@ -110,6 +110,21 @@ def _full(app: Any, match_id: str) -> dict:
     return dump_runtime_transcript(app.state.match_registry.get(match_id).session)
 
 
+def _state_views(value: Any) -> list[dict]:
+    """Every dict carrying a hand and its round: seat state views and observations."""
+
+    found: list[dict] = []
+    if isinstance(value, dict):
+        if "my_dice" in value and "round_number" in value:
+            found.append(value)
+        for item in value.values():
+            found.extend(_state_views(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.extend(_state_views(item))
+    return found
+
+
 def _hands_by_round(full: dict) -> list[list[list[int]]]:
     return [
         turn["outcome"]["dice"]
@@ -139,9 +154,12 @@ def test_no_client_ever_sees_a_hand_it_may_not(ld_server) -> None:
             record = frame["payload"]["turn_record"] if committed else None
             if record is not None and record["kind"] == "chance":
                 shown.append(record["outcome"]["my_dice"])
-            if frame["type"] == "observation_request":
-                obs = frame["payload"]["observation_request"]["observation"]
-                assert obs["my_dice"] in [h[viewer] for h in hands]
+            # Every state view anywhere in the frame (live snapshots, the
+            # observation, each turn of the final transcript) names its round:
+            # its hand must be exactly this seat's hand for that round.
+            for view in _state_views(frame):
+                if view["my_dice"]:
+                    assert view["my_dice"] == hands[view["round_number"] - 1][viewer], name
         assert shown == [h[viewer] for h in hands], name
 
     # The spectator saw the bids and every reveal.

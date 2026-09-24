@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Sequence
 from typing import Any, Callable
 
@@ -12,7 +13,7 @@ from arena.sdk._events import (
     ObservationEvent,
 )
 from arena.sdk._session import Session
-from arena.sdk.errors import MatchAbortedError
+from arena.sdk.errors import MatchAbortedError, ProtocolError, SdkError
 
 
 async def _next_event(session: object, backlog: list[asyncio.Future[Any]]) -> Any:
@@ -21,33 +22,103 @@ async def _next_event(session: object, backlog: list[asyncio.Future[Any]]) -> An
     return await session.recv()  # type: ignore[union-attr]
 
 
+def _run_in_daemon_thread(fn: Callable[[Any], Any], arg: Any) -> asyncio.Future[Any]:
+    """Run ``fn(arg)`` on a daemon thread, resolving a future on this loop.
+
+    Not ``asyncio.to_thread``: its executor threads are joined at shutdown, so
+    cancelling ``connect()`` (a timeout, Ctrl+C) would still wait out a model
+    call of up to minutes. A daemon thread is simply abandoned.
+    """
+
+    loop = asyncio.get_running_loop()
+    future: asyncio.Future[Any] = loop.create_future()
+
+    def settle(result: Any, error: BaseException | None) -> None:
+        if future.done():
+            return
+        if error is not None:
+            future.set_exception(error)
+        else:
+            future.set_result(result)
+
+    def work() -> None:
+        try:
+            result, error = fn(arg), None
+        except BaseException as exc:  # noqa: BLE001 - handed to the awaiting task
+            result, error = None, exc
+        try:
+            loop.call_soon_threadsafe(settle, result, error)
+        except RuntimeError:
+            pass  # the loop is gone: nobody is waiting any more
+
+    threading.Thread(target=work, name="arena-sdk-choose", daemon=True).start()
+    return future
+
+
 async def _choose_while_serving(
     session: object,
     choose: Callable[[Any], dict[str, Any]],
     observation: Any,
     backlog: list[asyncio.Future[Any]],
-) -> dict[str, Any]:
-    """Run the synchronous choose() in a worker thread while still receiving.
+) -> dict[str, Any] | None:
+    """Run the synchronous choose() off the loop while still receiving.
 
     An LLM agent can think for longer than the server's heartbeat allows. Called
     inline, choose() froze the event loop: pings went unanswered and the server
-    dropped a perfectly healthy seat. Receiving concurrently lets the session
-    answer pings (Session.recv replies to them itself). An event that does
-    arrive meanwhile, such as an abort, is kept and handed back in order.
+    dropped a healthy seat. Receiving concurrently lets the session answer pings
+    (Session.recv replies to them itself); any other event is kept, in order, for
+    the caller.
+
+    Returns None when the match ended while choosing (an abort, or the connection
+    failing): there is nothing left to send, and the caller reads the kept event
+    next.
     """
 
-    decision = asyncio.ensure_future(asyncio.to_thread(choose, observation))
-    receiving = asyncio.ensure_future(session.recv())  # type: ignore[union-attr]
-    await asyncio.wait({decision, receiving}, return_when=asyncio.FIRST_COMPLETED)
-    if receiving.done():
-        backlog.append(receiving)
-        return await decision
-    receiving.cancel()
+    decision = _run_in_daemon_thread(choose, observation)
+    receiving: asyncio.Future[Any] | None = None
     try:
-        await receiving
-    except (asyncio.CancelledError, Exception):
+        while not decision.done():
+            receiving = asyncio.ensure_future(session.recv())  # type: ignore[union-attr]
+            await asyncio.wait({decision, receiving}, return_when=asyncio.FIRST_COMPLETED)
+            if not receiving.done():
+                break  # decided; the finally cancels the pending receive
+            backlog.append(receiving)
+            # Only an abort or a lost connection can end a match while this seat
+            # is deciding; anything else (including a scripted LocalSession
+            # running ahead) is handed back after the action is sent.
+            error = receiving.exception()
+            ended = isinstance(error, SdkError) or (
+                error is None and isinstance(receiving.result(), MatchAbortedEvent)
+            )
+            receiving = None
+            if ended:
+                return None  # the decision is abandoned; its thread is a daemon
+        return decision.result()
+    finally:
+        if receiving is not None and not receiving.done():
+            receiving.cancel()
+            try:
+                await receiving
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
+async def _decide_and_send(
+    session: object,
+    choose: Callable[[Any], dict[str, Any]],
+    observation: Any,
+    backlog: list[asyncio.Future[Any]],
+) -> None:
+    action = await _choose_while_serving(session, choose, observation, backlog)
+    if action is None:
+        return
+    try:
+        await session.send_action(action)  # type: ignore[union-attr]
+    except ProtocolError:
+        # The server closed first (an abort racing our move). Its terminal frame,
+        # if it arrived, is read next, so the caller learns why, not just that
+        # the socket is gone.
         pass
-    return decision.result()
 
 
 async def _run_session(
@@ -62,7 +133,8 @@ async def _run_session(
         Any object implementing recv() / send_action() — Session or LocalSession.
     choose:
         Callable that accepts ObservationRequestPayload (from event.body.observation_request)
-        and returns a raw action dict.
+        and returns a raw action dict. It runs on a worker thread, so a slow agent
+        does not stall the connection.
 
     Returns
     -------
@@ -81,15 +153,13 @@ async def _run_session(
 
         if isinstance(event, ObservationEvent):
             obs = event.body.observation_request
-            action = await _choose_while_serving(session, choose, obs, backlog)
-            await session.send_action(action)  # type: ignore[union-attr]
+            await _decide_and_send(session, choose, obs, backlog)
 
         elif isinstance(event, ActionRejectedEvent):
-            # The turn is still open and no new observation comes: choose again.
-            # The server's retry budget decides when to stop.
-            if obs is not None:
-                action = await _choose_while_serving(session, choose, obs, backlog)
-                await session.send_action(action)  # type: ignore[union-attr]
+            # The turn is still open and no new observation comes: choose again,
+            # unless the retry budget is spent (the abort follows).
+            if obs is not None and event.body.retries_remaining > 0:
+                await _decide_and_send(session, choose, obs, backlog)
 
         elif isinstance(event, MatchFinishedEvent):
             return event.body.result, event.body.transcript

@@ -4131,7 +4131,24 @@ Acceptance criteria:
     replays.
   - The demo defaults to temperature 0.5, so a retry isn't the same illegal answer again, and to a
     5-minute turn deadline for local models.
-- 988 tests pass.
+- **The adversarial review of Slice 3 found five issues, fixed with tests** (mostly in
+  `tests/integration/test_sdk_slow_agents.py`, against a real server):
+  - **SDK error reporting.** An abort arriving while the agent decides was masked as
+    `ProtocolError`; it is now `MatchAbortedError`.
+  - **Retry budget.** A spent budget still triggered another (possibly minutes-long) decision.
+    The server's `action_rejected.retries_remaining` was **one too low on every non-final
+    rejection**, contradicting protocol §8.6, so a compliant client stopped one attempt early.
+    The server now reports the attempts still allowed; `0` appears only right before the abort.
+  - **Cancellation.** Cancelling `connect()` waited out a running decision; decisions now run on
+    a daemon thread.
+  - **MCP.** An illegal `make_move` waited out its timeout with no reason; it now returns the
+    rejection with its reason and remaining retries.
+  - **Probe.** `probe_models` misread `registry:port/model` names.
+
+  The wire test's ground truth now checks every hand a seat receives (live snapshots,
+  observations, and each turn of the final transcript) against that seat's actual hand for that
+  round.
+- 994 tests pass.
 
 ---
 

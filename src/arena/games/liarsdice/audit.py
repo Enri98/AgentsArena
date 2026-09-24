@@ -8,9 +8,14 @@ client actually received. Hands may legitimately appear in exactly three places:
 * the viewer's own ``DiceDealt`` event.
 
 Anything else carrying a hand (a ``dice`` key, another seat's ``DiceDealt``, or
-``my_dice`` in a payload built for the public) is reported. This is a structural
-check. The tests pair it with ground truth from the server's full transcript,
-which proves that ``my_dice`` really is the viewer's own hand.
+``my_dice`` in a payload built for the public) is reported.
+
+This is a *structural* check with known limits: it trusts that ``my_dice`` is
+the viewer's own hand, and it only knows the key names this game uses (a hand
+under an unexpected key would pass). The wire tests close the first gap with
+ground truth from the server's full transcript, checking every ``my_dice`` a
+seat receives against that seat's actual hand for that round; the
+indistinguishability test closes the second for round 1 of a scripted match.
 """
 
 from __future__ import annotations

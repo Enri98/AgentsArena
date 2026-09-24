@@ -39,7 +39,8 @@ def probe_models(
 
 
 def _with_tag(name: str) -> str:
-    return name if ":" in name else f"{name}:latest"
+    # The tag is after the last "/": "registry.local:5000/llama3.2" has none.
+    return name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest"
 
 
 __all__: tuple[str, ...] = ("probe_models",)
