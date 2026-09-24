@@ -40,6 +40,7 @@ Phase 32 features implemented here:
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets as _secrets
 import uuid
 from collections import OrderedDict
@@ -91,6 +92,7 @@ from arena.core.public_view import Viewer, dump_config_for_seat, dump_config_for
 from arena.match.local_match import apply_match_action, build_snapshot_for_viewer
 from arena.match.transcript import (
     MATCH_TRANSCRIPT_SCHEMA_VERSION,
+    VIEW_PUBLIC,
     transcript_view_for,
     turn_record_for_viewer,
 )
@@ -468,6 +470,62 @@ def _build_transcript_payload(session: MatchSession, viewer: Viewer) -> RuntimeT
     return envelope.model_copy(
         update={"match_transcript": _match_transcript_for(session, viewer)}
     )
+
+
+def _encode_transcript(payload: RuntimeTranscriptPayload) -> bytes:
+    return json.dumps(payload.model_dump(mode="json")).encode("utf-8")
+
+
+async def persist_public_transcript(app_state: Any, match: "Match") -> None:
+    """Store the match's public transcript (Phase 40). Never raises.
+
+    Called before ``match_finished`` / ``match_aborted`` go out, so a client
+    that has seen the terminal frame can fetch the transcript at once. The
+    stored body is exactly the transcript a spectator receives in that frame:
+    the public view of a hidden-information game, the full transcript of a
+    perfect-information one (which has nothing to hide). Encoding and disk I/O
+    run in a worker thread.
+
+    A failure is logged and swallowed: the match must still end properly for
+    its seats. ``match.transcript_settled`` is set either way.
+    """
+
+    from arena.server.transcript_store import PUBLIC_AUDIENCE, TranscriptRejected
+
+    store = getattr(app_state, "transcript_store", None)
+    session = match.session
+    try:
+        if store is None or session.local_match is None:
+            return
+        payload = _build_transcript_payload(session, None)
+        if session.definition.has_hidden_information and payload.view != VIEW_PUBLIC:
+            raise RuntimeError(f"refusing to store a {payload.view!r} view")
+        body = await asyncio.to_thread(_encode_transcript, payload)
+        await asyncio.to_thread(store.put, match.match_id, body, audience=PUBLIC_AUDIENCE)
+        logger.info(
+            "transcript_stored",
+            match_id=match.match_id,
+            seat=None,
+            schema_version=1,
+            bytes=len(body),
+        )
+    except TranscriptRejected as exc:
+        logger.warning(
+            "transcript_not_stored",
+            match_id=match.match_id,
+            seat=None,
+            schema_version=1,
+            detail=str(exc),
+        )
+    except Exception:
+        logger.exception(
+            "transcript_store_failed",
+            match_id=match.match_id,
+            seat=None,
+            schema_version=1,
+        )
+    finally:
+        match.transcript_settled = True
 
 
 async def _send_now(conn: SeatConnection, text: str) -> bool:
@@ -1182,6 +1240,7 @@ async def run_match(
         nonlocal session
         session = arena.abort_session(session, reason=reason, message=message)
         match.session = session
+        await persist_public_transcript(app_state, match)
         await _broadcast_match_state(conns, session)
         await _broadcast_match_aborted(conns, session)
         logger.info(
@@ -1200,6 +1259,7 @@ async def run_match(
 
     try:
         if session.lifecycle is RuntimeLifecycle.ABORTED:
+            await persist_public_transcript(app_state, match)
             await _broadcast_match_state(conns, session)
             await _broadcast_match_aborted(conns, session)
             await _close_both(conns, WS_CLOSE_NORMAL, "match_aborted")
@@ -1585,6 +1645,7 @@ async def run_match(
                     return
 
         # Match reached terminal state.
+        await persist_public_transcript(app_state, match)
         if session.lifecycle is RuntimeLifecycle.FINISHED:
             logger.info(
                 "match_finished",
@@ -1635,6 +1696,8 @@ async def run_match(
                 await _close_both(conns, WS_CLOSE_SERVER_ERROR, "server_error")
 
     finally:
+        # However the driver ended, a transcript GET must stop answering 409.
+        match.transcript_settled = True
         # Cancel heartbeat task on any exit path.
         # (deadline_timer_task is cancelled inline at each return point via _cancel_task.)
         await _cancel_hb()

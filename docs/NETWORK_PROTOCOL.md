@@ -64,6 +64,8 @@ SDK or server APIs.
 
 - `POST /matches` — create a match (HTTP).
 - `GET /matches/{match_id}` — match status (HTTP, JSON, no auth).
+- `GET /matches/{match_id}/public-transcript` — the public transcript of an ended match (HTTP,
+  JSON, no auth; Phase 40).
 - `GET /games` — list of supported game ids and their config schemas (HTTP, JSON).
 - `WS /matches/{match_id}/play?seat={0|1}` — primary play channel (WebSocket).
 - `WS /matches/{match_id}/spectate` — read-only spectator channel (WebSocket). Live as of
@@ -168,6 +170,32 @@ Success (`HTTP 200`):
 Errors:
 
 - `HTTP 404` `{"error": {"code": "match_not_found", "message": "..."}}`.
+
+#### `GET /matches/{match_id}/public-transcript` (Phase 40)
+
+Success (`HTTP 200`): the `RuntimeTranscriptPayload` (§17) of an ended match, **exactly the
+transcript a spectator received** in `match_finished` or `match_aborted`. For a
+hidden-information game that is the public view (`view: "public"`): no hand, no private event,
+and the chance outcomes as the public saw them. A perfect-information game has nothing to hide,
+so its transcript is the full one (`view: "full"`). Finished and aborted matches are both
+served. The response carries `Cache-Control: private, no-store`: the URL is a capability.
+
+The server keeps these transcripts in a store that outlives the WebSocket connections and the
+registry's own retention. With a durable store configured (see `docs/DEPLOYMENT.md`), it also
+outlives a restart. Only the public transcript is ever stored or served: holding the `match_id`
+is not holding a seat, and seat-scoped transcripts are not available over HTTP.
+
+Retention is a server setting: by default a transcript is kept for 7 days from the end of the
+match, and at most 10,000 transcripts (plus a byte cap) are kept, oldest dropped first.
+
+Errors:
+
+- `HTTP 404` `{"error": {"code": "match_not_found", ...}}`: unknown or malformed id, expired,
+  or never stored (the store refused or failed; the match itself ended normally).
+- `HTTP 409` `{"error": {"code": "transcript_not_ready", ...}}`: the match is still running, or
+  has just ended and its transcript is being stored. It is available by the time
+  `match_finished` / `match_aborted` has been sent; retry.
+- `HTTP 429` `{"error": {"code": "rate_limited", ...}}`: per-IP read cap (§13).
 
 #### `GET /games`
 

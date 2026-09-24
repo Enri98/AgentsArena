@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from arena.server.config import (
@@ -31,6 +32,7 @@ from arena.server.errors import (
 from arena.server.payload_schemas import get_payload_schemas
 from arena.server.rate_limits import RateLimiter, RateLimitExceeded
 from arena.server.registry import MatchRegistry
+from arena.server.transcript_store import TranscriptStore, is_valid_match_id
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -284,6 +286,60 @@ def get_match(match_id: str, request: Request) -> JSONResponse:
             "result": None,
             "abort": abort_out,
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /matches/{match_id}/public-transcript (Phase 40)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/matches/{match_id}/public-transcript")
+async def get_public_transcript(match_id: str, request: Request) -> Response:
+    """The public transcript of an ended match.
+
+    Exactly what a spectator received in ``match_finished`` / ``match_aborted``.
+    Served from the transcript store, so it outlives the connections, the
+    registry's retention, and (with a durable store) a restart. Nothing
+    seat-scoped is ever served here: holding the ``match_id`` is not holding a
+    seat.
+    """
+
+    limiter: RateLimiter | None = getattr(request.app.state, "rate_limiter", None)
+    if limiter is not None:
+        try:
+            limiter.check_transcript_read(ip=_client_ip(request))
+        except RateLimitExceeded as exc:
+            return _error_response(429, "rate_limited", exc.message)
+
+    store: TranscriptStore = request.app.state.transcript_store
+    if is_valid_match_id(match_id):
+        record = await asyncio.to_thread(store.get, match_id)
+        if record is not None:
+            return Response(
+                content=record.body,
+                media_type="application/json",
+                # The URL is a capability: keep it out of shared caches.
+                headers={"Cache-Control": "private, no-store"},
+            )
+
+        registry: MatchRegistry = request.app.state.match_registry
+        try:
+            match = registry.get(match_id)
+        except MatchNotFound:
+            match = None
+        if match is not None and not match.transcript_settled:
+            return _error_response(
+                409,
+                "transcript_not_ready",
+                "The match has not ended, or its transcript is still being stored; "
+                "retry after match_finished or match_aborted.",
+            )
+
+    return _error_response(
+        404,
+        "match_not_found",
+        "No public transcript for this match: unknown id, expired, or never stored.",
     )
 
 

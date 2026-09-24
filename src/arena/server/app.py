@@ -6,6 +6,8 @@ Structured JSON logging will be added in Phase 33.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 
@@ -19,6 +21,7 @@ from arena.server.registry import MatchRegistry
 from arena.server.routes_http import router as http_router
 from arena.server.routes_ws import router as ws_router
 from arena.server.runtime_bridge import forget_match_transcripts
+from arena.server.transcript_store import MemoryTranscriptStore, TranscriptStore
 
 
 def _wake_waiters(app_state: object, match_id: str) -> None:
@@ -58,6 +61,7 @@ def create_app(
     heartbeat_max_misses: int | None = None,
     rate_limiter: RateLimiter | None = None,
     max_turns_per_match: int | None = None,
+    transcript_store: TranscriptStore | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -75,6 +79,10 @@ def create_app(
     rate_limiter:
         Override the protocol §13 rate limiter.  Defaults to a ``RateLimiter``
         with the hardcoded v1 caps.  Tests inject one with small caps.
+    transcript_store:
+        Where ended matches' public transcripts are kept (Phase 40). Defaults to
+        a bounded in-memory store; ``python -m arena.server`` can pass a file or
+        SQLite store for durability. The app closes it on shutdown.
     """
 
     if game_registry is None:
@@ -82,7 +90,19 @@ def create_app(
 
         game_registry = build_default_registry()
 
-    app = FastAPI(title="AgentsArena", version="0.1.0")
+    store: TranscriptStore = (
+        transcript_store if transcript_store is not None else MemoryTranscriptStore()
+    )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            store.close()
+
+    app = FastAPI(title="AgentsArena", version="0.1.0", lifespan=lifespan)
+    app.state.transcript_store = store
 
     limiter = rate_limiter if rate_limiter is not None else RateLimiter()
 

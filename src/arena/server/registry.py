@@ -41,6 +41,10 @@ class Match:
     # Phase 32: resume tokens rotated on every welcome/reconnect.
     # seat → current valid token; set by send_welcome before being sent to the client.
     resume_tokens: dict[int, str] = field(default_factory=dict)
+    # Phase 40: set once the match's public transcript has been stored, or its
+    # storing has failed or been skipped. Until then a GET for the transcript
+    # answers 409 (retry), not 404.
+    transcript_settled: bool = False
 
 
 _TERMINAL_LIFECYCLES = frozenset({"finished", "aborted"})
