@@ -260,7 +260,9 @@ def test_connection_cap_closes_with_4429() -> None:
 
             # The only slot is taken: seat 1 is shed by the §13 cap before it
             # ever reaches the seat-occupancy check that would answer 4409.
+            # The slot is claimed by a valid hello, so seat 1 says one.
             with client.websocket_connect(f"/matches/{match_id}/play?seat=1") as ws1:
+                ws1.send_text(json.dumps(_hello(1)))
                 with pytest.raises(WebSocketDisconnect) as exc:
                     ws1.receive_text()
                 assert exc.value.code == CLOSE_RATE_LIMITED

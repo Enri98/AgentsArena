@@ -114,7 +114,17 @@ and no client ever receives a hand it may not see (wire tests plus the demo's au
 renders from the human seat's view. Running real agents also found and fixed two SDK bugs:
 `action_rejected` crashed clients, and a slow `choose()` froze the heartbeat.
 
-Active phase: **40**, transcript persistence and `GET /matches/{id}/public-transcript`.
+**Phase 40 is complete** (2026-09-25). The public transcript of every ended match is stored
+before its terminal frame goes out, and served at `GET /matches/{id}/public-transcript`. The store
+is in memory by default; `--transcript-store file:DIR | sqlite:PATH` makes it outlive a restart.
+Only the public view is stored. A pre-phase adversarial review found, and the phase fixed:
+- a seat-hijack path that leaked a seat's hand after one reconnect;
+- MCP clients reading each other's sessions;
+- turn deadlines a seat could extend for ever;
+- a driver crash from one malformed frame;
+- eviction of running matches.
+
+Active phase: **41**, the generalized turn loop (simultaneous moves, wire `schema_version=4`).
 
 The Phase 36-38 specs were revised on 2026-09-22 after an adversarial review that checked every
 claim against the code. Three findings are worth carrying forward, because each is easy to

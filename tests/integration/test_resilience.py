@@ -456,11 +456,15 @@ def test_disconnect_past_grace(running_server: RunningServer) -> None:
 
 
 def test_heartbeat_timeout(running_server_fast_hb: RunningServer) -> None:
-    """Seat 0 never responds to pings → closed 4408; seat 1 receives match_aborted."""
+    """Seat 0 never responds to pings → closed 4408; seat 1 receives match_aborted.
+
+    Section 8.10: the heartbeat close starts the disconnect grace period like any
+    other close; when it runs out, the match aborts as ``heartbeat_timeout``.
+    """
     from websockets.exceptions import ConnectionClosed
 
     async def run() -> None:
-        match = _create_match(running_server_fast_hb.http_base_url)
+        match = _create_match(running_server_fast_hb.http_base_url, disconnect_grace_ms=500)
         seat_0_url = match["seat_0_url"]
         seat_1_url = match["seat_1_url"]
 

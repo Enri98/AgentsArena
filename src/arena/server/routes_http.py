@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from arena.server.config import (
@@ -20,10 +22,17 @@ from arena.server.config import (
     RETRY_BUDGET_MIN,
     WIRE_SCHEMA_VERSION,
 )
-from arena.server.errors import InvalidConfig, InvalidRequest, MatchNotFound, UnknownGame
+from arena.server.errors import (
+    InvalidConfig,
+    InvalidRequest,
+    MatchNotFound,
+    ServerBusy,
+    UnknownGame,
+)
 from arena.server.payload_schemas import get_payload_schemas
-from arena.server.rate_limits import RateLimiter, RateLimitExceeded
+from arena.server.rate_limits import RateLimiter, RateLimitExceeded, client_address
 from arena.server.registry import MatchRegistry
+from arena.server.transcript_store import TranscriptStore, is_valid_match_id
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
@@ -34,10 +43,16 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
+#: Largest POST /matches body. A create request is a few hundred bytes; the
+#: body used to be read and parsed whole, however large, before any check.
+MAX_CREATE_BODY_BYTES: int = 64 * 1024
+MAX_PLAYER_LABEL_CHARS: int = 64
+
+
 class PlayerSpec(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    label: str | None = None
+    label: str | None = Field(default=None, max_length=MAX_PLAYER_LABEL_CHARS)
 
 
 class CreateMatchRequest(BaseModel):
@@ -45,7 +60,9 @@ class CreateMatchRequest(BaseModel):
 
     game_id: str = Field(min_length=1)
     game_config: dict[str, Any] | None = None
-    players: list[PlayerSpec] = Field(default_factory=list)
+    # Two seats: every label is echoed in every welcome, so 50,000 of them were
+    # an amplifier.
+    players: list[PlayerSpec] = Field(default_factory=list, max_length=2)
     per_turn_deadline_ms: int = Field(default=DEFAULT_PER_TURN_DEADLINE_MS)
     per_action_retry_budget: int = Field(default=DEFAULT_PER_ACTION_RETRY_BUDGET)
     disconnect_grace_ms: int = Field(default=DEFAULT_DISCONNECT_GRACE_MS)
@@ -69,15 +86,18 @@ def _error_response(status: int, code: str, message: str, details: Any = None) -
 
 
 def _client_ip(request: Request) -> str:
-    """Best-effort source address for rate-limit bucketing.
+    """Source address for rate-limit bucketing; see ``client_address``.
 
-    Behind a reverse proxy (the documented deployment shape) this is the proxy
-    unless it is configured to forward the peer address; v1 does not trust
-    ``X-Forwarded-For`` because nothing authenticates it.
+    ``X-Forwarded-For`` is never trusted on its own: only the one header the
+    operator names (``--client-ip-header``), set by their own proxy.
     """
 
     client = request.client
-    return client.host if client is not None else "unknown"
+    return client_address(
+        request.headers,
+        client.host if client is not None else None,
+        getattr(request.app.state, "client_ip_header", None),
+    )
 
 
 def _validate_range(value: int, lo: int, hi: int, field_name: str) -> None:
@@ -92,11 +112,47 @@ def _validate_range(value: int, lo: int, hi: int, field_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _read_capped_body(request: Request, limit: int) -> bytes | None:
+    """The request body, or ``None`` once it exceeds ``limit`` bytes."""
+
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > limit:
+        return None
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            return None
+    return bytes(body)
+
+
 @router.post("/matches", status_code=201)
 async def create_match_handler(request: Request) -> JSONResponse:
+    # The creation cap is checked before the body is read: a client already
+    # over it used to have a 50 MB body read and parsed before the 429.
+    limiter: RateLimiter | None = getattr(request.app.state, "rate_limiter", None)
+    if limiter is not None:
+        try:
+            limiter.check_match_creation(ip=_client_ip(request))
+        except RateLimitExceeded as exc:
+            logger.warning(
+                "rate_limited",
+                schema_version=WIRE_SCHEMA_VERSION,
+                scope=exc.scope,
+                detail=exc.message,
+            )
+            return _error_response(429, "rate_limited", exc.message)
+
+    body_bytes = await _read_capped_body(request, MAX_CREATE_BODY_BYTES)
+    if body_bytes is None:
+        return _error_response(
+            413,
+            "request_too_large",
+            f"A create request is at most {MAX_CREATE_BODY_BYTES} bytes.",
+        )
     try:
-        raw = await request.json()
-    except Exception:
+        raw = json.loads(body_bytes)
+    except (ValueError, RecursionError):
         return _error_response(400, "invalid_request", "Request body is not valid JSON.")
 
     if not isinstance(raw, dict) or "game_id" not in raw:
@@ -134,19 +190,6 @@ async def create_match_handler(request: Request) -> JSONResponse:
             f"supports {body.supported_schema_versions}.",
         )
 
-    limiter: RateLimiter | None = getattr(request.app.state, "rate_limiter", None)
-    if limiter is not None:
-        try:
-            limiter.check_match_creation(ip=_client_ip(request))
-        except RateLimitExceeded as exc:
-            logger.warning(
-                "rate_limited",
-                schema_version=WIRE_SCHEMA_VERSION,
-                scope=exc.scope,
-                detail=exc.message,
-            )
-            return _error_response(429, "rate_limited", exc.message)
-
     registry: MatchRegistry = request.app.state.match_registry
 
     try:
@@ -163,6 +206,8 @@ async def create_match_handler(request: Request) -> JSONResponse:
     except InvalidConfig as exc:
         details = exc.details if exc.details is not None else {}
         return _error_response(400, exc.error_code, exc.message, details=details)
+    except ServerBusy as exc:
+        return _error_response(503, exc.error_code, exc.message)
     except Exception as exc:
         return _error_response(500, "server_error", str(exc))
 
@@ -245,6 +290,89 @@ def get_match(match_id: str, request: Request) -> JSONResponse:
             "abort": abort_out,
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /matches/{match_id}/public-transcript (Phase 40)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/matches/{match_id}/public-transcript")
+async def get_public_transcript(match_id: str, request: Request) -> Response:
+    """The public transcript of an ended match.
+
+    Exactly what a spectator received in ``match_finished`` / ``match_aborted``.
+    Served from the transcript store, so it outlives the connections, the
+    registry's retention, and (with a durable store) a restart. Nothing
+    seat-scoped is ever served here: holding the ``match_id`` is not holding a
+    seat.
+    """
+
+    limiter: RateLimiter | None = getattr(request.app.state, "rate_limiter", None)
+    if limiter is not None:
+        try:
+            limiter.check_transcript_read(ip=_client_ip(request))
+        except RateLimitExceeded as exc:
+            return _no_store(_error_response(429, "rate_limited", exc.message))
+
+    if is_valid_match_id(match_id):
+        # Whether the save is still pending is read BEFORE the store: read
+        # after, a save finishing in between answered 404 for a transcript that
+        # had just come to exist.
+        registry: MatchRegistry = request.app.state.match_registry
+        try:
+            pending = not registry.get(match_id).transcript_settled
+        except MatchNotFound:
+            pending = False
+
+        store: TranscriptStore = request.app.state.transcript_store
+        # A read holds the whole body in memory; bound how many run at once.
+        async with _read_slots(request.app.state):
+            record = await asyncio.to_thread(store.get, match_id)
+        if record is not None:
+            return Response(
+                content=record.body,
+                media_type="application/json",
+                # The URL is a capability: keep it out of shared caches.
+                headers={"Cache-Control": "private, no-store"},
+            )
+        if pending:
+            return _no_store(
+                _error_response(
+                    409,
+                    "transcript_not_ready",
+                    "The match has not ended, or its transcript is still being stored; "
+                    "retry after match_finished or match_aborted.",
+                )
+            )
+
+    return _no_store(
+        _error_response(
+            404,
+            "match_not_found",
+            "No public transcript for this match: unknown id, expired, or never stored.",
+        )
+    )
+
+
+#: Concurrent public-transcript reads from the store, per server. Each loads a
+#: whole body (up to the store's per-record cap). Sending it is not covered: a
+#: slow reader's unsent bytes are the transport's to buffer.
+MAX_CONCURRENT_TRANSCRIPT_READS: int = 4
+
+
+def _read_slots(app_state: Any) -> asyncio.Semaphore:
+    slots = getattr(app_state, "transcript_read_slots", None)
+    if slots is None:
+        slots = asyncio.Semaphore(MAX_CONCURRENT_TRANSCRIPT_READS)
+        app_state.transcript_read_slots = slots
+    return slots
+
+
+def _no_store(response: JSONResponse) -> JSONResponse:
+    # A 404 or 409 for a capability URL is no more cacheable than a 200.
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 # ---------------------------------------------------------------------------

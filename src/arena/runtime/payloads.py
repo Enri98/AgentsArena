@@ -6,13 +6,19 @@ from collections.abc import Sequence
 from dataclasses import fields, is_dataclass
 from typing import Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from arena.core.actions import Action
 from arena.core.config import BaseGameConfig
 from arena.core.game_definition import GameDefinition
 from arena.core.observations import Observation
-from arena.core.public_view import FULL_VIEW, FullView, Viewer, check_viewer
+from arena.core.public_view import (
+    FULL_VIEW,
+    VIEWER_SEATS,
+    FullView,
+    Viewer,
+    check_viewer,
+)
 from arena.core.results import RuleResult
 from arena.core.serializer import JSONMapping, SnapshotEnvelope
 from arena.match.local_match import build_snapshot_for_viewer
@@ -29,6 +35,7 @@ from arena.match.transcript import (
 )
 from arena.runtime.models import (
     AbortMetadata,
+    AbortReason,
     MatchAborted,
     MatchCreated,
     MatchFinished,
@@ -37,6 +44,7 @@ from arena.runtime.models import (
     PolicyDecided,
     PolicyRetried,
     RuntimeEvent,
+    RuntimeLifecycle,
     TurnAccepted,
     TurnRequested,
 )
@@ -109,6 +117,37 @@ class RuntimeResultPayload(BaseModel):
     payload: JSONMapping = Field(default_factory=dict)
 
 
+#: Lifecycle values an envelope may carry. Checked by a validator rather than
+#: typed as a Literal: the field's JSON Schema is published at
+#: /schemas/payloads, which must stay byte-stable within a wire version.
+_LIFECYCLES = frozenset(lifecycle.value for lifecycle in RuntimeLifecycle)
+
+
+def _check_envelope(
+    *,
+    lifecycle: str,
+    abort: RuntimeAbortPayload | None,
+    players: list[RuntimePlayerPayload],
+    view: str,
+    viewer_seat: int | None,
+) -> None:
+    """What every status and transcript envelope must agree with itself on."""
+
+    if lifecycle not in _LIFECYCLES:
+        raise ValueError(f"unknown lifecycle {lifecycle!r}")
+    if (lifecycle == RuntimeLifecycle.ABORTED.value) != (abort is not None):
+        raise ValueError("abort is present exactly when the lifecycle is 'aborted'")
+    seats = [player.seat for player in players]
+    ids = [player.player_id for player in players]
+    if len(set(seats)) != len(seats) or len(set(ids)) != len(ids):
+        raise ValueError("players must have distinct seats and ids")
+    if view == VIEW_SEAT:
+        if viewer_seat not in VIEWER_SEATS:
+            raise ValueError("a seat view names the seat it was built for")
+    elif viewer_seat is not None:
+        raise ValueError(f"a {view!r} view has no viewer_seat")
+
+
 class RuntimeSessionStatusPayload(BaseModel):
     """JSON-safe session status envelope for CLI and UI consumers."""
 
@@ -128,6 +167,17 @@ class RuntimeSessionStatusPayload(BaseModel):
     view: TranscriptView = VIEW_FULL
     viewer_seat: int | None = None
 
+    @model_validator(mode="after")
+    def _consistent(self) -> "RuntimeSessionStatusPayload":
+        _check_envelope(
+            lifecycle=self.lifecycle,
+            abort=self.abort,
+            players=self.players,
+            view=self.view,
+            viewer_seat=self.viewer_seat,
+        )
+        return self
+
 
 class RuntimeTranscriptPayload(BaseModel):
     """JSON-safe runtime transcript envelope around a local match transcript."""
@@ -146,6 +196,29 @@ class RuntimeTranscriptPayload(BaseModel):
     #: Phase 38: whose view this is; mirrors ``match_transcript.view``.
     view: TranscriptView = VIEW_FULL
     viewer_seat: int | None = None
+
+    @model_validator(mode="after")
+    def _consistent(self) -> "RuntimeTranscriptPayload":
+        _check_envelope(
+            lifecycle=self.lifecycle,
+            abort=self.abort,
+            players=self.players,
+            view=self.view,
+            viewer_seat=self.viewer_seat,
+        )
+        inner = self.match_transcript
+        # An empty mapping is the server's placeholder (see
+        # runtime_bridge._build_transcript_payload); it is never a transcript.
+        if inner:
+            # Transcripts older than views (v1, v2) carry none and are full.
+            inner_view = inner.get("view", VIEW_FULL)
+            inner_seat = inner.get("viewer_seat")
+            if (inner_view, inner_seat) != (self.view, self.viewer_seat):
+                raise ValueError(
+                    "the envelope's view must be its match transcript's view: "
+                    f"{(self.view, self.viewer_seat)!r} wraps {(inner_view, inner_seat)!r}"
+                )
+        return self
 
 
 def dump_session_status(
@@ -191,7 +264,7 @@ def dump_session_status(
         turn_count=turn_count,
         result=result,
         latest_snapshot=latest_snapshot,
-        abort=_dump_abort(session.abort),
+        abort=_dump_abort(session.abort, view),
         view=view,
         viewer_seat=viewer_seat,
     )
@@ -232,11 +305,11 @@ def dump_runtime_transcript(
         lifecycle=session.lifecycle.value,
         players=[_dump_player(player) for player in session.players],
         events=[
-            _dump_runtime_event(event)
+            _dump_runtime_event(event, view)
             for event in session.events
             if _runtime_event_visible(event, view, viewer)
         ],
-        abort=_dump_abort(session.abort),
+        abort=_dump_abort(session.abort, view),
         match_transcript=match_transcript,
         view=view,
         viewer_seat=viewer_seat,
@@ -285,10 +358,15 @@ def redact_runtime_transcript(
             "schema_version": RUNTIME_TRANSCRIPT_SCHEMA_VERSION,
             "match_transcript": match_transcript,
             "events": [
-                event
+                _redact_runtime_event_payload(event, view)
                 for event in runtime_payload.events
                 if _runtime_event_payload_visible(event, view, viewer)
             ],
+            "abort": (
+                runtime_payload.abort
+                if view == VIEW_FULL
+                else _redact_abort_payload(runtime_payload.abort)
+            ),
             "view": view,
             "viewer_seat": viewer_seat,
         }
@@ -323,6 +401,7 @@ def redact_session_status(
         update={
             "schema_version": RUNTIME_STATUS_SCHEMA_VERSION,
             "latest_snapshot": latest,
+            "abort": status.abort if view == VIEW_FULL else _redact_abort_payload(status.abort),
             "view": view,
             "viewer_seat": viewer_seat,
         }
@@ -336,6 +415,17 @@ def _runtime_event_payload_visible(
     if view == VIEW_FULL or event.event_type not in ("PolicyDecided", "PolicyRetried"):
         return True
     return view == VIEW_SEAT and event.payload.get("seat") == viewer
+
+
+def _redact_runtime_event_payload(
+    event: RuntimeEventPayload, view: TranscriptView
+) -> RuntimeEventPayload:
+    abort = event.payload.get("abort")
+    if view == VIEW_FULL or event.event_type != "MatchAborted" or not isinstance(abort, dict):
+        return event
+    return event.model_copy(
+        update={"payload": {**event.payload, "abort": {**abort, "cause_message": None}}}
+    )
 
 
 def validate_session_status(payload: JSONMapping) -> RuntimeSessionStatusPayload:
@@ -369,9 +459,26 @@ def validate_runtime_transcript(
             f"Runtime transcript game_id {runtime_payload.game_id!r} "
             f"does not match definition {definition.game_id!r}."
         )
+    abort = runtime_payload.abort
+    if abort is not None and abort.reason not in _ABORT_REASONS:
+        raise ValueError(f"Unknown abort reason {abort.reason!r}.")
     if runtime_payload.match_transcript is None:
         return None
-    return validate_match_transcript(definition, runtime_payload.match_transcript)
+    loaded = validate_match_transcript(definition, runtime_payload.match_transcript)
+    final_state = loaded.turns[-1].post_state if loaded.turns else loaded.initial_state
+    finished = runtime_payload.lifecycle == RuntimeLifecycle.FINISHED.value
+    if finished != definition.rules_engine.is_terminal(final_state):
+        raise ValueError(
+            f"A {runtime_payload.lifecycle!r} transcript must "
+            f"{'' if finished else 'not '}end at a finished game."
+        )
+    return loaded
+
+
+#: Abort reasons this build knows. The wire model keeps ``reason`` a free string,
+#: so a newer server's reason does not break an older client; a saved
+#: transcript is held to the known set.
+_ABORT_REASONS = frozenset(reason.value for reason in AbortReason)
 
 
 def _dump_player(player: PlayerRecord) -> RuntimePlayerPayload:
@@ -382,18 +489,35 @@ def _dump_player(player: PlayerRecord) -> RuntimePlayerPayload:
     )
 
 
-def _dump_abort(abort: AbortMetadata | None) -> RuntimeAbortPayload | None:
+def _dump_abort(
+    abort: AbortMetadata | None, view: TranscriptView = VIEW_FULL
+) -> RuntimeAbortPayload | None:
     if abort is None:
         return None
     return RuntimeAbortPayload(
         reason=abort.reason.value,
         message=abort.message,
         cause_type=abort.cause_type,
-        cause_message=abort.cause_message,
+        cause_message=abort.cause_message if view == VIEW_FULL else None,
     )
 
 
-def _dump_runtime_event(event: RuntimeEvent) -> RuntimeEventPayload:
+def _redact_abort_payload(abort: RuntimeAbortPayload | None) -> RuntimeAbortPayload | None:
+    """An abort as a non-full view carries it: without the cause's text.
+
+    ``cause_message`` is ``str(exception)``, which can hold anything. An Ollama
+    seat that runs out of retries puts the model's raw reply there, thoughts
+    about its own hand included.
+    """
+
+    if abort is None or abort.cause_message is None:
+        return abort
+    return abort.model_copy(update={"cause_message": None})
+
+
+def _dump_runtime_event(
+    event: RuntimeEvent, view: TranscriptView = VIEW_FULL
+) -> RuntimeEventPayload:
     payload: JSONMapping
     if isinstance(event, MatchCreated):
         payload = {
@@ -408,7 +532,7 @@ def _dump_runtime_event(event: RuntimeEvent) -> RuntimeEventPayload:
     elif isinstance(event, TurnAccepted):
         payload = {"seat": event.seat, "turn_index": event.turn_index}
     elif isinstance(event, MatchAborted):
-        payload = {"abort": _dump_abort(event.abort).model_dump(mode="json")}
+        payload = {"abort": _dump_abort(event.abort, view).model_dump(mode="json")}
     elif isinstance(event, PolicyRetried):
         payload = {
             "seat": event.seat,

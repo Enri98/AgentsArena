@@ -36,6 +36,10 @@ COPY --from=builder /app/site-packages /usr/local/lib/python3.11/site-packages
 # Copy source code.
 COPY src/arena/ /app/arena/
 
+# Where a durable transcript store lives when a volume is mounted there
+# (docs/DEPLOYMENT.md). Owned by the runtime user so it can write.
+RUN mkdir -p /data && chown arena:arena /data
+
 # Set Python path and switch to non-root user.
 ENV PYTHONPATH=/app:/usr/local/lib/python3.11/site-packages
 USER arena

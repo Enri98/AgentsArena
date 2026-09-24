@@ -14,8 +14,13 @@ from arena.core.exceptions import UnknownGame as CoreUnknownGame
 from arena.core.registry import GameRegistry
 from arena.runtime.models import PlayerRecord
 from arena.runtime.session import Arena, MatchSession
-from arena.server.config import MATCH_MAX_AGE_S, MATCH_RETENTION_S, MAX_TRACKED_MATCHES
-from arena.server.errors import InvalidConfig, MatchNotFound, UnknownGame
+from arena.server.config import (
+    MATCH_MAX_AGE_S,
+    MATCH_RETENTION_S,
+    MATCH_UNSTARTED_MAX_AGE_S,
+    MAX_TRACKED_MATCHES,
+)
+from arena.server.errors import InvalidConfig, MatchNotFound, ServerBusy, UnknownGame
 
 
 @dataclass
@@ -36,6 +41,17 @@ class Match:
     # Phase 32: resume tokens rotated on every welcome/reconnect.
     # seat → current valid token; set by send_welcome before being sent to the client.
     resume_tokens: dict[int, str] = field(default_factory=dict)
+    # Phase 40: set once the match's public transcript has been stored, or its
+    # storing has failed or been skipped. Until then a GET for the transcript
+    # answers 409 (retry), not 404.
+    transcript_settled: bool = False
+    # Eviction ages a match from its last observed change, not its creation:
+    # (lifecycle, committed turns) as last seen by a sweep, and when.
+    activity: tuple[str, int] = ("created", 0)
+    activity_at: float = 0.0
+    # Set by run_match while it runs. A match is never evicted while its driver
+    # is still storing and sending its result.
+    driver_active: bool = False
 
 
 _TERMINAL_LIFECYCLES = frozenset({"finished", "aborted"})
@@ -56,6 +72,7 @@ class MatchRegistry:
         *,
         retention_s: float = MATCH_RETENTION_S,
         max_age_s: float = MATCH_MAX_AGE_S,
+        unstarted_max_age_s: float = MATCH_UNSTARTED_MAX_AGE_S,
         max_matches: int = MAX_TRACKED_MATCHES,
         time_fn: Callable[[], float] = time.monotonic,
         on_evict: Callable[[str], None] | None = None,
@@ -65,6 +82,7 @@ class MatchRegistry:
         self._lock = threading.Lock()
         self._retention_s = retention_s
         self._max_age_s = max_age_s
+        self._unstarted_max_age_s = min(unstarted_max_age_s, max_age_s)
         self._max_matches = max_matches
         self._now = time_fn
         self._on_evict = on_evict
@@ -122,6 +140,15 @@ class MatchRegistry:
             match_id=match_id,
         )
 
+        # Make room before admitting: a full registry sheds what it can, and
+        # refuses rather than evict a match someone is playing.
+        self.evict_expired()
+        with self._lock:
+            if len(self._matches) >= self._max_matches:
+                raise ServerBusy(
+                    "The server is at its match capacity; try again later."
+                )
+
         match = Match(
             match_id=match_id,
             game_id=game_id,
@@ -135,11 +162,10 @@ class MatchRegistry:
             disconnect_grace_ms=disconnect_grace_ms,
             created_at=self._now(),
         )
+        match.activity_at = match.created_at
 
         with self._lock:
             self._matches[match_id] = match
-
-        self.evict_expired()
 
         return match
 
@@ -166,32 +192,61 @@ class MatchRegistry:
         return existed
 
     def evict_expired(self) -> tuple[str, ...]:
-        """Sweep expired matches. Returns the evicted ids.
+        """Sweep expired matches, and make room below ``max_matches``.
 
-        Terminal matches are kept for ``retention_s`` so a late reader can still
-        fetch the result; non-terminal ones are presumed abandoned after
-        ``max_age_s``.  If the registry is still over ``max_matches`` afterwards,
-        the oldest matches are shed regardless of lifecycle.
+        Every limit counts from the match's last observed change: its end for a
+        terminal match (kept ``retention_s`` so a late reader can still fetch
+        the result), its creation for a never-started one
+        (``unstarted_max_age_s``), and its last committed turn for a running one
+        (presumed abandoned after ``max_age_s`` without a turn). Aging from
+        creation evicted a match that had run for an hour the moment it
+        finished, and a long, live one mid-play. A change is observed by the
+        next sweep (sweeps run on every create), so every limit is a minimum. At or over
+        ``max_matches``, terminal matches are shed first, then never-started
+        ones, oldest first, until there is room for one more. A running match is
+        never shed for room: that let anyone creating matches push a live one
+        out, its seats' resume tokens with it.
         """
 
         now = self._now()
         with self._lock:
             doomed: list[str] = []
             for match_id, match in self._matches.items():
-                age = now - match.created_at
-                terminal = self._is_terminal(match)
-                if terminal and age >= self._retention_s:
-                    doomed.append(match_id)
-                elif not terminal and age >= self._max_age_s:
+                if match.driver_active:
+                    continue
+                lifecycle = self._lifecycle(match)
+                local = match.session.local_match
+                activity = (lifecycle, len(local.turns) if local is not None else 0)
+                if activity != match.activity:
+                    match.activity = activity
+                    match.activity_at = now
+                age = now - match.activity_at
+                if lifecycle in _TERMINAL_LIFECYCLES:
+                    limit = self._retention_s
+                elif lifecycle == "created":
+                    limit = self._unstarted_max_age_s
+                else:
+                    limit = self._max_age_s
+                if age >= limit:
                     doomed.append(match_id)
 
             for match_id in doomed:
                 self._matches.pop(match_id, None)
 
-            overflow = len(self._matches) - self._max_matches
+            overflow = len(self._matches) - self._max_matches + 1
             if overflow > 0:
-                by_age = sorted(self._matches.items(), key=lambda kv: kv[1].created_at)
-                for match_id, _ in by_age[:overflow]:
+                sheddable = sorted(
+                    (
+                        (0 if self._lifecycle(m) in _TERMINAL_LIFECYCLES else 1, m.activity_at, mid)
+                        for mid, m in self._matches.items()
+                        if not m.driver_active
+                        and (
+                            self._lifecycle(m) in _TERMINAL_LIFECYCLES
+                            or self._lifecycle(m) == "created"
+                        )
+                    )
+                )
+                for _, _, match_id in sheddable[:overflow]:
                     self._matches.pop(match_id, None)
                     doomed.append(match_id)
 
@@ -200,9 +255,8 @@ class MatchRegistry:
         return tuple(doomed)
 
     @staticmethod
-    def _is_terminal(match: Match) -> bool:
-        lifecycle = getattr(match.session.lifecycle, "value", match.session.lifecycle)
-        return str(lifecycle) in _TERMINAL_LIFECYCLES
+    def _lifecycle(match: Match) -> str:
+        return str(getattr(match.session.lifecycle, "value", match.session.lifecycle))
 
     def _notify_evicted(self, match_id: str) -> None:
         if self._on_evict is None:

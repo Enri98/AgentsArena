@@ -98,6 +98,11 @@ class SessionRegistry:
         except Exception:
             pass
 
+    async def close_all(self) -> None:
+        """Close every session this registry holds (its client went away)."""
+        for match_id, seat in list(self._handles):
+            await self.close(match_id, seat)
+
     async def _recv_loop(
         self,
         match_id: str,

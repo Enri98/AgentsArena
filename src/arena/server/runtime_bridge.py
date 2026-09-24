@@ -40,6 +40,7 @@ Phase 32 features implemented here:
 from __future__ import annotations
 
 import asyncio
+import json
 import secrets as _secrets
 import uuid
 from collections import OrderedDict
@@ -91,6 +92,7 @@ from arena.core.public_view import Viewer, dump_config_for_seat, dump_config_for
 from arena.match.local_match import apply_match_action, build_snapshot_for_viewer
 from arena.match.transcript import (
     MATCH_TRANSCRIPT_SCHEMA_VERSION,
+    VIEW_PUBLIC,
     transcript_view_for,
     turn_record_for_viewer,
 )
@@ -117,6 +119,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 WS_CLOSE_NORMAL = 1000
+#: Protocol section 9: internal server failure.
+WS_CLOSE_SERVER_ERROR = 4500
 #: Frames a single connection may have in flight before it is considered
 #: too slow. Well above any legitimate burst: one turn produces ~3 frames.
 OUTBOX_MAXSIZE = 64
@@ -281,15 +285,26 @@ async def send_spectator_welcome(
     session = match.session
     local_match = session.local_match
     turn_count = len(local_match.turns) if local_match is not None else 0
+    # Every turn up to here is in the welcome's transcript; live frames resume
+    # after it. See SpectatorConnection.next_turn_index.
+    conn.next_turn_index = turn_count
+
+    # Every spectator attaching at the same point gets the same bytes, so they
+    # are built once. Serialising a long match's welcome is linear in its
+    # length (about 200 ms at the turn cap), and a client looping attach and
+    # detach made every match on the server pay that on the event loop.
+    key = (turn_count, session.lifecycle.value)
+    cached = _SPECTATOR_WELCOMES.get(match.match_id)
+    if cached is not None and cached[0] == key:
+        _SPECTATOR_WELCOMES.move_to_end(match.match_id)
+        await _send_text(conn, cached[1])
+        return
 
     transcript: RuntimeTranscriptPayload | None = None
     if local_match is not None:
         # Not swallowed: a spectator whose welcome lacks the history would never
         # get it (the watermark skips those turns). The handler closes it instead.
         transcript = _build_transcript_payload(session, None)
-    # Every turn up to here is in the welcome's transcript; live frames resume
-    # after it. See SpectatorConnection.next_turn_index.
-    conn.next_turn_index = turn_count
 
     body = SpectatorWelcomeBody(
         match_id=match.match_id,
@@ -307,7 +322,12 @@ async def send_spectator_welcome(
         match_id=match.match_id,
         payload=body,
     )
-    await _send(conn, env)
+    text = dumps(env)
+    _SPECTATOR_WELCOMES[match.match_id] = (key, text)
+    _SPECTATOR_WELCOMES.move_to_end(match.match_id)
+    while len(_SPECTATOR_WELCOMES) > _SPECTATOR_WELCOMES_MAX:
+        _SPECTATOR_WELCOMES.popitem(last=False)
+    await _send_text(conn, text)
 
 
 def _make_resume_token() -> str:
@@ -339,7 +359,7 @@ def _build_match_state_body(
             current_seat = local_match.rules_engine.current_seat(local_match.state)
 
     if session.abort is not None:
-        abort_dict = _dump_abort_dict(session.abort)
+        abort_dict = _dump_abort_dict(session.abort, session)
 
     return MatchStateBody(
         lifecycle=lc,
@@ -350,14 +370,26 @@ def _build_match_state_body(
     )
 
 
-def _dump_abort_dict(abort: AbortMetadata) -> dict:
-    payload = RuntimeAbortPayload(
+def _wire_abort(abort: AbortMetadata, session: MatchSession) -> RuntimeAbortPayload:
+    """An abort as a seat or spectator receives it.
+
+    No recipient of a hidden-information game gets ``cause_message``: it is
+    ``str(exception)`` and can carry anything (the transcripts drop it the
+    same way). Server aborts carry no cause today; this keeps one from leaking
+    if they ever do.
+    """
+
+    hidden = session.definition.has_hidden_information
+    return RuntimeAbortPayload(
         reason=abort.reason.value,
         message=abort.message,
         cause_type=abort.cause_type,
-        cause_message=abort.cause_message,
+        cause_message=None if hidden else abort.cause_message,
     )
-    return payload.model_dump(mode="json")
+
+
+def _dump_abort_dict(abort: AbortMetadata, session: MatchSession) -> dict:
+    return _wire_abort(abort, session).model_dump(mode="json")
 
 
 @dataclass
@@ -377,11 +409,18 @@ _VIEW_TRANSCRIPTS: "OrderedDict[tuple[str, Viewer], _ViewTranscript]" = OrderedD
 _VIEW_TRANSCRIPTS_MAX = 12
 
 
+#: The latest serialised spectator welcome per match, keyed by the point it was
+#: built at: ``match_id -> ((turn_count, lifecycle), text)``. Bounded LRU.
+_SPECTATOR_WELCOMES: "OrderedDict[str, tuple[tuple[int, str], str]]" = OrderedDict()
+_SPECTATOR_WELCOMES_MAX = 16
+
+
 def forget_match_transcripts(match_id: str) -> None:
     """Drop cached transcripts for an evicted match."""
 
     for key in [k for k in _VIEW_TRANSCRIPTS if k[0] == match_id]:
         del _VIEW_TRANSCRIPTS[key]
+    _SPECTATOR_WELCOMES.pop(match_id, None)
 
 
 def _match_transcript_for(session: MatchSession, viewer: Viewer) -> dict[str, Any]:
@@ -443,6 +482,62 @@ def _build_transcript_payload(session: MatchSession, viewer: Viewer) -> RuntimeT
     return envelope.model_copy(
         update={"match_transcript": _match_transcript_for(session, viewer)}
     )
+
+
+def _encode_transcript(payload: RuntimeTranscriptPayload) -> bytes:
+    return json.dumps(payload.model_dump(mode="json")).encode("utf-8")
+
+
+async def persist_public_transcript(app_state: Any, match: "Match") -> None:
+    """Store the match's public transcript (Phase 40). Never raises.
+
+    Called before ``match_finished`` / ``match_aborted`` go out, so a client
+    that has seen the terminal frame can fetch the transcript at once. The
+    stored body is exactly the transcript a spectator receives in that frame:
+    the public view of a hidden-information game, the full transcript of a
+    perfect-information one (which has nothing to hide). Encoding and disk I/O
+    run in a worker thread.
+
+    A failure is logged and swallowed: the match must still end properly for
+    its seats. ``match.transcript_settled`` is set either way.
+    """
+
+    from arena.server.transcript_store import PUBLIC_AUDIENCE, TranscriptRejected
+
+    store = getattr(app_state, "transcript_store", None)
+    session = match.session
+    try:
+        if store is None or session.local_match is None:
+            return
+        payload = _build_transcript_payload(session, None)
+        if session.definition.has_hidden_information and payload.view != VIEW_PUBLIC:
+            raise RuntimeError(f"refusing to store a {payload.view!r} view")
+        body = await asyncio.to_thread(_encode_transcript, payload)
+        await asyncio.to_thread(store.put, match.match_id, body, audience=PUBLIC_AUDIENCE)
+        logger.info(
+            "transcript_stored",
+            match_id=match.match_id,
+            seat=None,
+            schema_version=1,
+            bytes=len(body),
+        )
+    except TranscriptRejected as exc:
+        logger.warning(
+            "transcript_not_stored",
+            match_id=match.match_id,
+            seat=None,
+            schema_version=1,
+            detail=str(exc),
+        )
+    except Exception:
+        logger.exception(
+            "transcript_store_failed",
+            match_id=match.match_id,
+            seat=None,
+            schema_version=1,
+        )
+    finally:
+        match.transcript_settled = True
 
 
 async def _send_now(conn: SeatConnection, text: str) -> bool:
@@ -510,7 +605,12 @@ async def _send(conn: SeatConnection, envelope: Any) -> None:
     blamed whichever seat happened to be active.
     """
 
-    text = dumps(envelope)
+    await _send_text(conn, dumps(envelope))
+
+
+async def _send_text(conn: SeatConnection, text: str) -> None:
+    """:func:`_send` for an envelope that is already serialised."""
+
     if conn.writer_task is None:
         await _send_now(conn, text)
         return
@@ -607,30 +707,42 @@ async def _broadcast_per_viewer(
 
     No await point until every recipient has been queued: a spectator attaching
     in the middle would otherwise be sent turns its welcome already carried.
+
+    Every view is built before anything is queued. Building and queueing seat by
+    seat meant a failure on seat 1's view had already sent seat 0 its frame, and
+    the crash handler's retry then sent seat 0 a second terminal frame.
     """
 
+    recipients = [
+        conn
+        for conn in conns
+        if turn_index is None or turn_index >= getattr(conn, "next_turn_index", 0)
+    ]
     rendered: dict[Viewer, str] = {}
-    for conn in conns:
+    for conn in recipients:  # seats come first: a seat view failing raises here
         viewer: Viewer = None if shared else conn.seat
-        if turn_index is not None and turn_index < getattr(conn, "next_turn_index", 0):
+        if viewer in rendered:
             continue
-        if viewer not in rendered:
-            if conn.seat is None:
-                try:
-                    rendered[viewer] = dumps(build(viewer))
-                except Exception as exc:
-                    logger.warning(
-                        "public_view_failed", schema_version=1, error=str(exc)
-                    )
-                    for spectator in conns.spectators():
-                        spectator.outbox_overflowed = True
-                    break
-            else:
+        if conn.seat is None:
+            try:
                 rendered[viewer] = dumps(build(viewer))
-        if conn.writer_task is None:
-            await _send_now(conn, rendered[viewer])
+            except Exception as exc:
+                logger.warning("public_view_failed", schema_version=1, error=str(exc))
+                for spectator in conns.spectators():
+                    spectator.outbox_overflowed = True
+                break
         else:
-            _enqueue_text(conn, rendered[viewer])
+            rendered[viewer] = dumps(build(viewer))
+
+    for conn in recipients:
+        viewer = None if shared else conn.seat
+        text = rendered.get(viewer)
+        if text is None:
+            continue  # a spectator whose public view could not be built
+        if conn.writer_task is None:
+            await _send_now(conn, text)
+        else:
+            _enqueue_text(conn, text)
         if turn_index is not None and conn.seat is None:
             conn.next_turn_index = turn_index + 1
     await _shed_overflowed_spectators(conns)
@@ -757,12 +869,7 @@ async def _broadcast_match_aborted(
     conns: "MatchConnections",
     session: MatchSession,
 ) -> None:
-    abort_payload = RuntimeAbortPayload(
-        reason=session.abort.reason.value,
-        message=session.abort.message,
-        cause_type=session.abort.cause_type,
-        cause_message=session.abort.cause_message,
-    )
+    abort_payload = _wire_abort(session.abort, session)
 
     def build(viewer: Viewer) -> Any:
         return MatchAbortedEnvelope(
@@ -798,12 +905,38 @@ async def _close_both(
             pass
 
 
-async def _safe_receive_text(ws: "WebSocket") -> str | None:
-    """Receive one text frame; return None on any error (disconnect, close, etc.)."""
+#: Protocol sections 3 and 9: a binary frame closes the connection with 1003.
+WS_CLOSE_UNSUPPORTED_DATA = 1003
+
+
+async def receive_text_frame(ws: "WebSocket") -> str | None:
+    """Receive one text frame; ``None`` once the connection is gone.
+
+    A binary frame closes the connection with ``1003 unsupported_data`` (section
+    3) and also returns ``None``: to the caller it is a disconnect, and the seat
+    can resume. ``receive_text`` raised on a binary frame, which every caller
+    treated as a silent disconnect.
+    """
+
     try:
-        return await ws.receive_text()
+        message = await ws.receive()
     except Exception:
         return None
+    if message.get("type") != "websocket.receive":
+        return None
+    text = message.get("text")
+    if text is None:
+        try:
+            await ws.close(code=WS_CLOSE_UNSUPPORTED_DATA, reason="unsupported_data")
+        except Exception:
+            pass
+        return None
+    return text
+
+
+async def _safe_receive_text(ws: "WebSocket") -> str | None:
+    """Receive one text frame; return None on any error (disconnect, close, etc.)."""
+    return await receive_text_frame(ws)
 
 
 # ---------------------------------------------------------------------------
@@ -893,10 +1026,7 @@ _DEADLINE_EXPIRED = "deadline_expired"
 
 async def _receive_one_text(ws: "WebSocket") -> str | None:
     """Receive exactly one text frame; return None on disconnect/error."""
-    try:
-        return await ws.receive_text()
-    except Exception:
-        return None
+    return await receive_text_frame(ws)
 
 
 async def _receive_action(
@@ -927,10 +1057,16 @@ async def _receive_action(
     naturally.
     """
     while True:
+        # Checked before every read, not only while one is pending: the deadline
+        # can fire during the throttle sleep below, and the read after it used
+        # to wait with no deadline at all.
+        if deadline_event is not None and deadline_event.is_set():
+            return None, None, _DEADLINE_EXPIRED
+
         # Start one receive_text() as a task so we can race it against the deadline.
         recv_task = asyncio.create_task(_receive_one_text(active_conn.websocket))
 
-        if deadline_event is not None and not deadline_event.is_set():
+        if deadline_event is not None:
             deadline_task = asyncio.create_task(deadline_event.wait())
             done_set, pending = await asyncio.wait(
                 {recv_task, deadline_task}, return_when=asyncio.FIRST_COMPLETED
@@ -1076,6 +1212,9 @@ async def run_match(
     """
     arena = match.arena
     session = match.session
+    # Until the driver exits, the registry must not shed this match: it may be
+    # terminal already while its result is still being stored and sent.
+    match.driver_active = True
 
     session = arena.start_session(session)
     match.session = session
@@ -1109,6 +1248,37 @@ async def run_match(
                 pass
             hb_task = None
 
+    # Whether match_finished / match_aborted has been queued: the crash handler
+    # below must send it if not, and must not send it twice.
+    terminal_sent = False
+
+    async def _abort(
+        reason: AbortReason,
+        message: str,
+        *,
+        seat: int | None,
+        log_reason: str,
+        close_reason: str,
+        close_code: int = WS_CLOSE_NORMAL,
+    ) -> None:
+        """Abort the match: record it, tell everyone, close both seats."""
+
+        nonlocal session, terminal_sent
+        session = arena.abort_session(session, reason=reason, message=message)
+        match.session = session
+        await persist_public_transcript(app_state, match)
+        await _broadcast_match_state(conns, session)
+        await _broadcast_match_aborted(conns, session)
+        terminal_sent = True
+        logger.info(
+            "match_aborted",
+            match_id=session.match_id,
+            seat=seat,
+            schema_version=1,
+            reason=log_reason,
+        )
+        await _close_both(conns, close_code, close_reason)
+
     # One writer task per seat for the life of the match: the driver enqueues and
     # never blocks on a socket.
     for _seat_conn in conns.seats():
@@ -1116,8 +1286,10 @@ async def run_match(
 
     try:
         if session.lifecycle is RuntimeLifecycle.ABORTED:
+            await persist_public_transcript(app_state, match)
             await _broadcast_match_state(conns, session)
             await _broadcast_match_aborted(conns, session)
+            terminal_sent = True
             await _close_both(conns, WS_CLOSE_NORMAL, "match_aborted")
             return
 
@@ -1169,12 +1341,34 @@ async def run_match(
             # Per-turn deadline: create a fresh Event + timer task per observation.
             # The event is passed into _receive_action so it can return without
             # cancelling receive_text() (which corrupts ASGI state in some WS impls).
+            # One absolute deadline per turn (section 11): it keeps running while
+            # the seat is disconnected, and a reconnect does not restart it. A
+            # fresh budget per reconnect let a seat hold its turn for ever by
+            # reconnecting just before each deadline.
             deadline_event: asyncio.Event | None = None
             deadline_timer_task: asyncio.Task | None = None
+            deadline_at: float | None = None
             if deadline_s:
+                deadline_at = asyncio.get_running_loop().time() + deadline_s
                 deadline_event = asyncio.Event()
                 deadline_timer_task = asyncio.create_task(
                     _deadline_sleep(deadline_event, deadline_s)
+                )
+
+            async def _deadline_abort() -> None:
+                _cancel_task(deadline_timer_task)
+                logger.warning(
+                    "turn_deadline_expired",
+                    match_id=session.match_id,
+                    seat=active_seat,
+                    schema_version=1,
+                )
+                await _abort(
+                    AbortReason.TURN_DEADLINE_EXPIRED,
+                    "Per-turn deadline expired.",
+                    seat=active_seat,
+                    log_reason="turn_deadline_expired",
+                    close_reason="turn_deadline_expired",
                 )
 
             while not action_accepted:
@@ -1189,97 +1383,43 @@ async def run_match(
 
                 # --- Per-turn deadline expired ---
                 if error_msg == _DEADLINE_EXPIRED:
-                    _cancel_task(deadline_timer_task)
-                    logger.warning(
-                        "turn_deadline_expired",
-                        match_id=session.match_id,
-                        seat=active_seat,
-                        schema_version=1,
-                    )
-                    session = arena.abort_session(
-                        session,
-                        reason=AbortReason.TURN_DEADLINE_EXPIRED,
-                        message="Per-turn deadline expired.",
-                    )
-                    match.session = session
-                    await _broadcast_match_state(conns, session)
-                    await _broadcast_match_aborted(conns, session)
-                    logger.info(
-                        "match_aborted",
-                        match_id=session.match_id,
-                        seat=active_seat,
-                        schema_version=1,
-                        reason="turn_deadline_expired",
-                    )
-                    await _close_both(conns, WS_CLOSE_NORMAL, "turn_deadline_expired")
+                    await _deadline_abort()
                     return
 
                 # --- Disconnect handling ---
                 if error_msg == "disconnected":
-                    if active_conn.heartbeat_timed_out:
-                        # Heartbeat loop already closed the active seat's WS with 4408.
-                        _cancel_task(deadline_timer_task)
-                        await _cancel_hb()
-                        logger.warning(
-                            "heartbeat_timeout",
-                            match_id=session.match_id,
-                            seat=active_seat,
-                            schema_version=1,
-                        )
-                        session = arena.abort_session(
-                            session,
-                            reason=AbortReason.HEARTBEAT_TIMEOUT,
-                            message="Heartbeat timeout.",
-                        )
-                        match.session = session
-                        await _broadcast_match_state(conns, session)
-                        await _broadcast_match_aborted(conns, session)
-                        logger.info(
-                            "match_aborted",
-                            match_id=session.match_id,
-                            seat=active_seat,
-                            schema_version=1,
-                            reason="heartbeat_timeout",
-                        )
-                        await _close_both(conns, WS_CLOSE_NORMAL, "heartbeat_timeout")
-                        return
-
-                    # Normal disconnect: pause deadline, wait up to grace_ms for reconnect.
-                    _cancel_task(deadline_timer_task)
-                    deadline_event = None
-                    deadline_timer_task = None
-
+                    # A heartbeat timeout is a disconnect like any other: the
+                    # grace period starts when the socket closes (section 8.10),
+                    # so a seat whose network stalled can still resume.
+                    timed_out = active_conn.heartbeat_timed_out
                     grace_s = match.disconnect_grace_ms / 1000.0
                     reconnect_events = _get_reconnect_events(app_state)
                     reconnect_event = (
                         reconnect_events.get(match.match_id, {}).get(active_seat)
                     )
                     logger.info(
-                        "seat_disconnected",
+                        "heartbeat_timeout" if timed_out else "seat_disconnected",
                         match_id=match.match_id,
                         seat=active_seat,
                         schema_version=1,
                         grace_ms=match.disconnect_grace_ms,
                     )
+                    lost_reason = (
+                        AbortReason.HEARTBEAT_TIMEOUT
+                        if timed_out
+                        else AbortReason.PEER_DISCONNECTED
+                    )
 
                     if reconnect_event is None:
-                        # No event registered (shouldn't happen); abort immediately.
-                        session = arena.abort_session(
-                            session,
-                            reason=AbortReason.PEER_DISCONNECTED,
-                            message="Seat disconnected and did not reconnect within grace period.",
-                        )
-                        match.session = session
-                        await _broadcast_match_state(conns, session)
-                        await _broadcast_match_aborted(conns, session)
-                        logger.info(
-                            "match_aborted",
-                            match_id=session.match_id,
+                        # No event registered (should not happen); abort now.
+                        _cancel_task(deadline_timer_task)
+                        await _abort(
+                            lost_reason,
+                            "Seat disconnected and did not reconnect within grace period.",
                             seat=active_seat,
-                            schema_version=1,
-                            reason="peer_disconnected",
+                            log_reason="peer_disconnected",
+                            close_reason="peer_disconnected",
                         )
-                        await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
                     # The reconnect handler swaps the new connection into
@@ -1288,33 +1428,33 @@ async def run_match(
                     # clearing the event would discard a reconnect that beat us.
                     if conns[active_seat] is active_conn:
                         reconnect_event.clear()
-                    logger.debug(
-                        "seat_disconnected_awaiting_reconnect",
-                        match_id=match.match_id,
-                        seat=active_seat,
-                        grace_s=grace_s,
-                        schema_version=1,
+                        # The deadline keeps running (section 11): wait for a
+                        # reconnect, the deadline, or the end of the grace.
+                        waiters = {asyncio.ensure_future(reconnect_event.wait())}
+                        if deadline_event is not None:
+                            waiters.add(asyncio.ensure_future(deadline_event.wait()))
+                        await asyncio.wait(
+                            waiters, timeout=grace_s, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        for waiter in waiters:
+                            waiter.cancel()
+                        await asyncio.gather(*waiters, return_exceptions=True)
+
+                    reconnected = (
+                        conns[active_seat] is not active_conn or reconnect_event.is_set()
                     )
-                    try:
-                        if conns[active_seat] is active_conn:
-                            await asyncio.wait_for(reconnect_event.wait(), timeout=grace_s)
-                    except asyncio.TimeoutError:
-                        session = arena.abort_session(
-                            session,
-                            reason=AbortReason.PEER_DISCONNECTED,
-                            message="Seat disconnected and did not reconnect within grace period.",
-                        )
-                        match.session = session
-                        await _broadcast_match_state(conns, session)
-                        await _broadcast_match_aborted(conns, session)
-                        logger.info(
-                            "match_aborted",
-                            match_id=session.match_id,
+                    if deadline_event is not None and deadline_event.is_set():
+                        await _deadline_abort()
+                        return
+                    if not reconnected:
+                        _cancel_task(deadline_timer_task)
+                        await _abort(
+                            lost_reason,
+                            "Seat disconnected and did not reconnect within grace period.",
                             seat=active_seat,
-                            schema_version=1,
-                            reason="peer_disconnected_grace_expired",
+                            log_reason=f"{lost_reason.value}_grace_expired",
+                            close_reason="peer_disconnected",
                         )
-                        await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
                     # Reconnected: use the connection the handler swapped in.
@@ -1326,22 +1466,14 @@ async def run_match(
                             .get(active_seat)
                         )
                     if new_conn is None:
-                        session = arena.abort_session(
-                            session,
-                            reason=AbortReason.PEER_DISCONNECTED,
-                            message="Reconnect event set but no new connection found.",
-                        )
-                        match.session = session
-                        await _broadcast_match_state(conns, session)
-                        await _broadcast_match_aborted(conns, session)
-                        logger.info(
-                            "match_aborted",
-                            match_id=session.match_id,
+                        _cancel_task(deadline_timer_task)
+                        await _abort(
+                            AbortReason.PEER_DISCONNECTED,
+                            "Reconnect event set but no new connection found.",
                             seat=active_seat,
-                            schema_version=1,
-                            reason="peer_disconnected_no_conn",
+                            log_reason="peer_disconnected_no_conn",
+                            close_reason="peer_disconnected",
                         )
-                        await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
                     conns.replace_seat(active_seat, new_conn)
@@ -1351,13 +1483,21 @@ async def run_match(
                     await _cancel_hb()
                     hb_task = _start_hb(new_conn)
 
-                    # Re-send observation request with a fresh deadline budget.
-                    if deadline_s:
-                        deadline_event = asyncio.Event()
-                        deadline_timer_task = asyncio.create_task(
-                            _deadline_sleep(deadline_event, deadline_s)
+                    # Re-send the observation request with what is left of the
+                    # original deadline, not a fresh budget.
+                    resend = obs_env
+                    if deadline_at is not None:
+                        remaining_ms = int(
+                            (deadline_at - asyncio.get_running_loop().time()) * 1000
                         )
-                    await _send(active_conn, obs_env)
+                        resend = obs_env.model_copy(
+                            update={
+                                "payload": obs_body.model_copy(
+                                    update={"deadline_ms": max(1, remaining_ms)}
+                                )
+                            }
+                        )
+                    await _send(active_conn, resend)
                     continue  # back to the while not action_accepted loop
 
                 # --- Non-fatal parse/protocol error ---
@@ -1407,22 +1547,14 @@ async def run_match(
                             session, active_seat, turn_id, domain_err, 0
                         )
                         await _send(active_conn, rej_env)
-                        session = arena.abort_session(
-                            session,
-                            reason=AbortReason.ADAPTER_ERROR,
-                            message="Retry budget exhausted.",
-                        )
-                        match.session = session
-                        await _broadcast_match_state(conns, session)
-                        await _broadcast_match_aborted(conns, session)
-                        logger.info(
-                            "match_aborted",
-                            match_id=session.match_id,
+                        _cancel_task(deadline_timer_task)
+                        await _abort(
+                            AbortReason.ADAPTER_ERROR,
+                            "Retry budget exhausted.",
                             seat=active_seat,
-                            schema_version=1,
-                            reason="adapter_error_budget_exhausted",
+                            log_reason="adapter_error_budget_exhausted",
+                            close_reason="adapter_error",
                         )
-                        await _close_both(conns, WS_CLOSE_NORMAL, "adapter_error")
                         return
 
                     # Protocol 8.6: retries_remaining counts the further attempts
@@ -1458,22 +1590,14 @@ async def run_match(
                             session, active_seat, turn_id, domain_err, 0
                         )
                         await _send(active_conn, rej_env)
-                        session = arena.abort_session(
-                            session,
-                            reason=AbortReason.ADAPTER_ERROR,
-                            message="Retry budget exhausted.",
-                        )
-                        match.session = session
-                        await _broadcast_match_state(conns, session)
-                        await _broadcast_match_aborted(conns, session)
-                        logger.info(
-                            "match_aborted",
-                            match_id=session.match_id,
+                        _cancel_task(deadline_timer_task)
+                        await _abort(
+                            AbortReason.ADAPTER_ERROR,
+                            "Retry budget exhausted.",
                             seat=active_seat,
-                            schema_version=1,
-                            reason="adapter_error_budget_exhausted",
+                            log_reason="adapter_error_budget_exhausted",
+                            close_reason="adapter_error",
                         )
-                        await _close_both(conns, WS_CLOSE_NORMAL, "adapter_error")
                         return
 
                     # Protocol 8.6: retries_remaining counts the further attempts
@@ -1539,18 +1663,17 @@ async def run_match(
                         schema_version=1,
                         turn_cap=turn_cap,
                     )
-                    session = arena.abort_session(
-                        session,
-                        reason=AbortReason.TURN_LIMIT_EXCEEDED,
-                        message=f"The match exceeded the server's cap of {turn_cap} turns.",
+                    await _abort(
+                        AbortReason.TURN_LIMIT_EXCEEDED,
+                        f"The match exceeded the server's cap of {turn_cap} turns.",
+                        seat=None,
+                        log_reason="turn_limit_exceeded",
+                        close_reason="turn_limit_exceeded",
                     )
-                    match.session = session
-                    await _broadcast_match_state(conns, session)
-                    await _broadcast_match_aborted(conns, session)
-                    await _close_both(conns, WS_CLOSE_NORMAL, "turn_limit_exceeded")
                     return
 
         # Match reached terminal state.
+        await persist_public_transcript(app_state, match)
         if session.lifecycle is RuntimeLifecycle.FINISHED:
             logger.info(
                 "match_finished",
@@ -1568,10 +1691,62 @@ async def run_match(
                 reason=session.abort.reason.value if session.abort else "unknown",
             )
             await _broadcast_match_aborted(conns, session)
+        terminal_sent = True
 
         await _close_both(conns, WS_CLOSE_NORMAL, "normal_closure")
 
+    except Exception:
+        # A bug must not leave a match "running" until eviction with both seats
+        # hanging on a dead driver: abort it, tell everyone, close with 4500.
+        logger.exception(
+            "run_match_error", match_id=match.match_id, seat=None, schema_version=1
+        )
+        session = match.session
+        if session.lifecycle not in (
+            RuntimeLifecycle.FINISHED,
+            RuntimeLifecycle.ABORTED,
+        ):
+            try:
+                await _abort(
+                    AbortReason.RUNTIME_ERROR,
+                    "The server failed while running the match.",
+                    seat=None,
+                    log_reason="server_error",
+                    close_reason="server_error",
+                    close_code=WS_CLOSE_SERVER_ERROR,
+                )
+            except Exception:
+                logger.exception(
+                    "run_match_abort_failed",
+                    match_id=match.match_id,
+                    seat=None,
+                    schema_version=1,
+                )
+                await _close_both(conns, WS_CLOSE_SERVER_ERROR, "server_error")
+        else:
+            # The match had already ended when the failure struck (in a
+            # broadcast, say). Its seats still get the terminal frame, once,
+            # and a 4500 close rather than an abnormal 1006.
+            if not terminal_sent:
+                try:
+                    await persist_public_transcript(app_state, match)
+                    if session.lifecycle is RuntimeLifecycle.FINISHED:
+                        await _broadcast_match_finished(conns, session)
+                    else:
+                        await _broadcast_match_aborted(conns, session)
+                except Exception:
+                    logger.exception(
+                        "run_match_terminal_frame_failed",
+                        match_id=match.match_id,
+                        seat=None,
+                        schema_version=1,
+                    )
+            await _close_both(conns, WS_CLOSE_SERVER_ERROR, "server_error")
+
     finally:
+        # However the driver ended, a transcript GET must stop answering 409.
+        match.transcript_settled = True
+        match.driver_active = False
         # Cancel heartbeat task on any exit path.
         # (deadline_timer_task is cancelled inline at each return point via _cancel_task.)
         await _cancel_hb()

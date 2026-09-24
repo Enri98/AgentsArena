@@ -62,8 +62,11 @@ def loads(text: str | bytes) -> WireEnvelope:  # type: ignore[valid-type]
 
     try:
         obj = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise WireDecodeError(f"Invalid JSON: {exc}") from exc
+    except (ValueError, RecursionError) as exc:
+        # ValueError covers JSONDecodeError and an integer too long to convert;
+        # RecursionError, nesting too deep to parse. Any of them escaping here
+        # used to crash the match driver on one frame.
+        raise WireDecodeError(f"Invalid JSON: {type(exc).__name__}") from exc
 
     if not isinstance(obj, dict):
         raise WireDecodeError("Envelope must be a JSON object, not a scalar or array.")

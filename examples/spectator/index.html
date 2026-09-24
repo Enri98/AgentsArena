@@ -133,6 +133,25 @@
     logBox.scrollTop = logBox.scrollHeight;
   }
 
+  // Phase 40: an ended match's public transcript stays at an HTTP URL (the
+  // WebSocket base with its scheme swapped) after every socket has closed.
+  function logTranscriptLink() {
+    var base = el("server").value.replace(/\/+$/, "").replace(/^ws/, "http");
+    var url = base + "/matches/" + encodeURIComponent(el("match").value.trim()) +
+      "/public-transcript";
+    var row = document.createElement("div");
+    row.className = "muted";
+    row.appendChild(document.createTextNode("public transcript: "));
+    var link = document.createElement("a");
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = url;
+    row.appendChild(link);
+    logBox.appendChild(row);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
   function seatSpan(seat) {
     return seat === 0 ? "seat0" : "seat1";
   }
@@ -238,12 +257,14 @@
     if (env.type === "match_finished") {
       el("s-life").textContent = "finished";
       log("match finished: " + JSON.stringify(p.result), "muted");
+      logTranscriptLink();
       return;
     }
 
     if (env.type === "match_aborted") {
       el("s-life").textContent = "aborted";
       log("match aborted: " + JSON.stringify(p.abort || p), "muted");
+      logTranscriptLink();
       return;
     }
 

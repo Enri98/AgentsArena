@@ -5,6 +5,10 @@ Structured JSON logging will be added in Phase 33.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+from collections.abc import AsyncIterator
+
 from fastapi import FastAPI
 
 from arena.server.config import (
@@ -14,9 +18,41 @@ from arena.server.config import (
 )
 from arena.server.rate_limits import RateLimiter
 from arena.server.registry import MatchRegistry
+from arena.server.routes_http import MAX_CONCURRENT_TRANSCRIPT_READS
 from arena.server.routes_http import router as http_router
 from arena.server.routes_ws import router as ws_router
 from arena.server.runtime_bridge import forget_match_transcripts
+from arena.server.transcript_store import MemoryTranscriptStore, TranscriptStore
+
+
+def _wake_waiters(app_state: object, match_id: str) -> None:
+    """Close whoever still waits on an evicted match.
+
+    Only a match that never started, or one already over, is evicted. A seat
+    waiting for its opponent, or a spectator parked for a start that will now
+    never come, would otherwise wait until the client gave up. Eviction runs
+    inside POST /matches on the event loop, so the closes can be scheduled.
+    """
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    done = getattr(app_state, "_ws_done_events", {}).get(match_id)
+    if done is not None:
+        done.set()  # parked spectators leave their read loop and close
+    for conn in (getattr(app_state, "_ws_seat_slots", {}).get(match_id) or {}).values():
+        if conn is not None:
+            loop.create_task(_close_quietly(conn.websocket, 4410, "match_expired"))
+    for spectator in getattr(app_state, "_ws_pending_spectators", {}).get(match_id, []):
+        loop.create_task(_close_quietly(spectator.websocket, 4410, "match_expired"))
+
+
+async def _close_quietly(ws: object, code: int, reason: str) -> None:
+    try:
+        await ws.close(code=code, reason=reason)  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
 
 def create_app(
@@ -26,6 +62,8 @@ def create_app(
     heartbeat_max_misses: int | None = None,
     rate_limiter: RateLimiter | None = None,
     max_turns_per_match: int | None = None,
+    transcript_store: TranscriptStore | None = None,
+    client_ip_header: str | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -43,6 +81,14 @@ def create_app(
     rate_limiter:
         Override the protocol §13 rate limiter.  Defaults to a ``RateLimiter``
         with the hardcoded v1 caps.  Tests inject one with small caps.
+    transcript_store:
+        Where ended matches' public transcripts are kept (Phase 40). Defaults to
+        a bounded in-memory store; ``python -m arena.server`` can pass a file or
+        SQLite store for durability. The app closes it on shutdown.
+    client_ip_header:
+        A request header carrying the client address, set by a trusted reverse
+        proxy (``Fly-Client-IP``). Rate limits bucket by it instead of the TCP
+        peer. Leave unset unless the proxy is the only way in.
     """
 
     if game_registry is None:
@@ -50,7 +96,23 @@ def create_app(
 
         game_registry = build_default_registry()
 
-    app = FastAPI(title="AgentsArena", version="0.1.0")
+    store: TranscriptStore = (
+        transcript_store if transcript_store is not None else MemoryTranscriptStore()
+    )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # Created here, on the serving loop: a semaphore reused across event
+        # loops (an app served twice) raises once contended.
+        _app.state.transcript_read_slots = asyncio.Semaphore(MAX_CONCURRENT_TRANSCRIPT_READS)
+        try:
+            yield
+        finally:
+            store.close()
+
+    app = FastAPI(title="AgentsArena", version="0.1.0", lifespan=lifespan)
+    app.state.transcript_store = store
+    app.state.client_ip_header = client_ip_header or None
 
     limiter = rate_limiter if rate_limiter is not None else RateLimiter()
 
@@ -69,6 +131,7 @@ def create_app(
     )
 
     def _release_match_state(match_id: str) -> None:
+        _wake_waiters(app.state, match_id)
         for attr in _PER_MATCH_STATE_ATTRS:
             container = getattr(app.state, attr, None)
             if isinstance(container, dict):

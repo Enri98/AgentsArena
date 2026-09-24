@@ -15,6 +15,7 @@ from arena.adapters.websocket.envelope import (
     HelloEnvelope,
     PongEnvelope,
 )
+from arena.adapters.websocket.errors import UnknownMessageType
 from arena.adapters.websocket.messages import (
     ActionResponseBody,
     HelloBody,
@@ -32,13 +33,19 @@ from arena.sdk._events import (
     TurnCommittedEvent,
     WelcomeEvent,
 )
-from arena.sdk.errors import HandshakeError, ProtocolError, close_code_to_error
+from arena.sdk.errors import HandshakeError, close_code_to_error
 
 CLIENT_NAME = "arena-sdk-python"
 CLIENT_VERSION = "0.1.0"
 # Phase 37 bumped the wire to 2 (transcripts carry chance turns), Phase 38 to 3
 # (per-seat views). The SDK reads all three, so it advertises all three.
 SUPPORTED_SCHEMA_VERSIONS = [1, 2, 3]
+
+#: Largest frame the SDK accepts (protocol section 3). The websockets default of
+#: 1 MiB is below what the server sends for a long match: the transcript in
+#: match_finished is about 2 MB at the server's 5000-turn cap, and the SDK then
+#: failed with 1006 instead of delivering the result.
+MAX_FRAME_BYTES = 64 * 1024 * 1024
 
 
 class Session:
@@ -63,7 +70,7 @@ class Session:
             ProtocolError subclass: if the server closes with a 4xxx code.
         """
         try:
-            ws = await _ws_connect(url, ping_interval=None)
+            ws = await _ws_connect(url, ping_interval=None, max_size=MAX_FRAME_BYTES)
         except ConnectionClosed as exc:
             code = exc.rcvd.code if exc.rcvd else 1006
             reason = exc.rcvd.reason if exc.rcvd else "connection failed"
@@ -119,7 +126,10 @@ class Session:
                 reason = exc.rcvd.reason if exc.rcvd else "connection closed"
                 raise close_code_to_error(code, reason) from exc
 
-            env = loads(raw)
+            try:
+                env = loads(raw)
+            except UnknownMessageType:
+                continue  # section 7: a client ignores message types it does not know
 
             if env.type == "ping":
                 pong = PongEnvelope(
@@ -130,7 +140,9 @@ class Session:
                 await self._ws.send(dumps(pong))
                 continue
 
-            return _env_to_event(env)
+            event = _env_to_event(env)
+            if event is not None:
+                return event
 
     async def send_action(
         self,
@@ -225,8 +237,12 @@ class Session:
         return self._welcome.transcript
 
 
-def _env_to_event(env: object) -> SdkEvent:  # type: ignore[return]
-    """Convert a WireEnvelope to an SdkEvent. Raises if type is unhandled."""
+def _env_to_event(env: object) -> SdkEvent | None:
+    """Convert a WireEnvelope to an SdkEvent; ``None`` for a type a seat ignores.
+
+    Section 7: clients ignore message types they do not handle (a newer server
+    may send more), rather than failing the session.
+    """
     t = getattr(env, "type", None)
     payload = getattr(env, "payload", None)
 
@@ -246,7 +262,7 @@ def _env_to_event(env: object) -> SdkEvent:  # type: ignore[return]
         return ErrorEvent(body=payload)
     if t == "action_rejected":
         return ActionRejectedEvent(body=payload)
-    raise ProtocolError(0, f"Unhandled envelope type: {t!r}")
+    return None
 
 
 __all__: Sequence[str] = [

@@ -11,6 +11,9 @@ from arena.games.liarsdice.actions import Bid
 VALID_SEATS = (0, 1)
 MIN_FACES = 2
 MAX_FACES = 9
+#: The config's bound. load_state must refuse more: legal_actions enumerates
+#: every bid up to the dice in play, so a forged count of 10**6 would hang it.
+MAX_DICE_PER_SEAT = 6
 
 Hands = tuple[tuple[int, ...], tuple[int, ...]]
 
@@ -67,9 +70,32 @@ class LiarsDiceState:
         if type(self.current_seat) is not int or self.current_seat not in VALID_SEATS:
             raise ValueError("current_seat must be 0 or 1")
         if len(self.dice_counts) != 2 or any(
-            type(c) is not int or c < 0 for c in self.dice_counts
+            type(c) is not int or not 0 <= c <= MAX_DICE_PER_SEAT for c in self.dice_counts
         ):
-            raise ValueError("dice_counts must be two non-negative integers")
+            raise ValueError(
+                f"dice_counts must be two integers between 0 and {MAX_DICE_PER_SEAT}"
+            )
+        if self.dice_counts == (0, 0):
+            raise ValueError("a match always has a seat with dice left")
+        finished = 0 in self.dice_counts
+        if finished and self.current_seat != self.dice_counts.index(
+            max(self.dice_counts)
+        ):
+            raise ValueError("a finished match leaves the winner as current_seat")
+        if (finished or self.dice is None) and self.bids:
+            raise ValueError("bids are only made once the round's dice are dealt")
+        if finished and self.dice is not None:
+            raise ValueError("no dice are dealt once the match is over")
+        if self.round_number == 0 and self.last_showdown is not None:
+            raise ValueError("no showdown can precede the first round")
+        if self.last_showdown is not None:
+            showdown = self.last_showdown
+            if showdown.bid.face > self.faces or any(
+                not 1 <= len(hand) <= MAX_DICE_PER_SEAT
+                or any(type(d) is not int or not 1 <= d <= self.faces for d in hand)
+                for hand in showdown.dice
+            ):
+                raise ValueError("a showdown reveals hands of this game's dice")
         if self.dice is not None:
             if len(self.dice) != 2:
                 raise ValueError("dice must hold one hand per seat")

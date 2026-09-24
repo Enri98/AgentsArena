@@ -48,13 +48,24 @@ SDK or server APIs.
   nginx in front of `arena.server`). The server itself speaks plain WebSocket.
 - Each Client opens exactly one WebSocket connection per match-seat binding.
 - Wire format: UTF-8 JSON text frames. Binary frames must be rejected with close code `1003`
-  (unsupported data).
+  (unsupported data). On a play channel this is a disconnect like any other: the grace period
+  of §11 applies and the seat may resume.
 - One JSON message per WebSocket frame. No newline framing inside a frame.
+- **Frame sizes.** The server accepts inbound frames of at most 1 MiB; every client message is
+  small. Server frames carrying a transcript (`match_finished`, `match_aborted`, a reconnect
+  `welcome`, `spectator_welcome`) grow with the match, to about 2 MB at the server's 5000-turn
+  cap. Clients must accept frames of at least 16 MiB; the Python SDK accepts 64 MiB.
+- **Keepalive.** The server sends protocol-level WebSocket pings every 20 s to every
+  connection, spectators included, and closes one that does not answer within 20 s. This is
+  separate from the application `ping` of §8.10, and WebSocket libraries answer it
+  automatically.
 
 ## 4. URL shape
 
 - `POST /matches` — create a match (HTTP).
 - `GET /matches/{match_id}` — match status (HTTP, JSON, no auth).
+- `GET /matches/{match_id}/public-transcript` — the public transcript of an ended match (HTTP,
+  JSON, no auth; Phase 40).
 - `GET /games` — list of supported game ids and their config schemas (HTTP, JSON).
 - `WS /matches/{match_id}/play?seat={0|1}` — primary play channel (WebSocket).
 - `WS /matches/{match_id}/spectate` — read-only spectator channel (WebSocket). Live as of
@@ -129,7 +140,10 @@ Error responses:
 - `HTTP 400` `{"error": {"code": "invalid_request", "message": "..."}}` — malformed body.
 - `HTTP 400` `{"error": {"code": "schema_version_unsupported", "message": "..."}}` — the client's
   `supported_schema_versions` does not include the server's wire version (v3).
+- `HTTP 413` `{"error": {"code": "request_too_large", "message": "..."}}` — body over 64 KiB.
 - `HTTP 429` `{"error": {"code": "rate_limited", "message": "..."}}` — match-creation cap hit.
+- `HTTP 503` `{"error": {"code": "server_busy", "message": "..."}}` — the server is at its
+  match capacity and every tracked match is running (§13).
 - `HTTP 500` `{"error": {"code": "server_error", "message": "..."}}` — internal failure.
 
 #### `GET /matches/{match_id}`
@@ -156,6 +170,35 @@ Success (`HTTP 200`):
 Errors:
 
 - `HTTP 404` `{"error": {"code": "match_not_found", "message": "..."}}`.
+
+#### `GET /matches/{match_id}/public-transcript` (Phase 40)
+
+Success (`HTTP 200`): the `RuntimeTranscriptPayload` (§17) of an ended match, **exactly the
+transcript a spectator received** in `match_finished` or `match_aborted`. For a
+hidden-information game that is the public view (`view: "public"`): no hand, no private event,
+and the chance outcomes as the public saw them. A perfect-information game has nothing to hide,
+so its transcript is the full one (`view: "full"`). Finished and aborted matches are both
+served. The response carries `Cache-Control: private, no-store`: the URL is a capability.
+
+The server keeps these transcripts in a store that outlives the WebSocket connections and the
+registry's own retention. With a durable store configured (see `docs/DEPLOYMENT.md`), it also
+outlives a restart. Only the public transcript is ever stored or served: holding the `match_id`
+is not holding a seat, and seat-scoped transcripts are not available over HTTP.
+
+Retention is a server setting: by default a transcript is kept for 7 days from the end of the
+match, and at most 10,000 transcripts (plus a byte cap) are kept, oldest dropped first. A
+single transcript over the per-record cap (8 MiB with a durable store, 4 MiB in memory) is not
+stored. The caps are global, so many long matches from one client can push out older
+transcripts sooner than their TTL; size the byte cap for the deployment (docs/DEPLOYMENT.md).
+
+Errors:
+
+- `HTTP 404` `{"error": {"code": "match_not_found", ...}}`: unknown or malformed id, expired,
+  or never stored (the store refused or failed; the match itself ended normally).
+- `HTTP 409` `{"error": {"code": "transcript_not_ready", ...}}`: the match is still running, or
+  has just ended and its transcript is being stored. It is available by the time
+  `match_finished` / `match_aborted` has been sent; retry.
+- `HTTP 429` `{"error": {"code": "rate_limited", ...}}`: per-IP read cap (§13).
 
 #### `GET /games`
 
@@ -400,9 +443,8 @@ connection, no interleaving):
 3. `match_aborted` carrying the full abort metadata and the final transcript (§8.9).
 4. WebSocket close frame with code `1000`.
 
-`action_response` frames arriving after step 1 but before close are processed as in §8.10's
-"action arrives after match is no longer running" rule: dropped silently if their `turn_id` is
-already-known, otherwise replied with an `error` of code `match_already_finished`.
+The server stops reading once it has sent step 1, so `action_response` frames arriving after
+it go unanswered (see §8.10's action-after-terminal rule).
 
 ### 8.7 `turn_committed` (Server → Client, broadcast)
 
@@ -461,19 +503,21 @@ the failure reason.
 { "nonce": "<echoed>" }
 ```
 
-Sent every 20 seconds by the server, on every connected play channel regardless of whose turn it
-is. Clients must reply with `pong` echoing the same `nonce` within 20 seconds. Two consecutive
-missed `pong` responses close the connection with code `4408` (`heartbeat_timeout`).
+Sent every 20 seconds by the server to the **active seat** while its turn is open. An off-turn
+seat is not pinged: the server does not read from it, and it is checked when its turn comes
+(the protocol-level keepalive of §3 covers every connection meanwhile). Clients must reply with
+`pong` echoing the same `nonce` within 20 seconds. Two consecutive missed `pong` responses close
+the connection with code `4408` (`heartbeat_timeout`).
 
 Heartbeat-driven close is one of several ways a peer may disappear (others: explicit close, TCP
 RST, network partition). The disconnect grace period (§11) starts at the moment of close,
 regardless of which mechanism triggered it.
 
 **Action-after-terminal rule** (referenced from §8.6): once the server has emitted `match_state`
-with a non-`running` lifecycle, any subsequent `action_response` frame on the same connection is:
-
-- silently dropped if its `turn_id` is in the per-match committed-or-rejected set (§12);
-- otherwise replied with an `error` of code `match_already_finished`.
+with a non-`running` lifecycle, it reads nothing more from either seat: it sends the terminal
+frame (`match_finished` or `match_aborted`) and closes both play channels. Any `action_response`
+still in flight is never read, and no reply is sent. The error code `match_already_finished` is
+reserved and not currently emitted.
 
 The match's lifecycle transition itself is **atomic at the server**: a single state mutation
 flips `running → finished` or `running → aborted`. Frames arriving "during" that transition
@@ -550,14 +594,14 @@ WebSocket close codes (4000-4999 are application-defined):
 | `1000` | `normal_closure` | Match completed or aborted; transcript already delivered. |
 | `1003` | `unsupported_data` | Binary frame received. |
 | `4400` | `schema_version_mismatch` | No mutually supported `schema_version`. |
-| `4401` | `unauthorized` | Reserved for v2 auth failures. |
-| `4404` | `unsupported_endpoint` | Spectate / unknown endpoint requested. |
+| `4401` | `unauthorized` | A `resume_token` bound to the other seat (§11). Further uses reserved for v2 auth. |
+| `4404` | `unsupported_endpoint` | No such WebSocket endpoint. |
 | `4408` | `heartbeat_timeout` | Two consecutive missed `pong`s. |
 | `4409` | `seat_taken` | Seat already has a live connection. |
 | `4410` | `match_not_found` | `match_id` does not exist (or expired with server restart). |
-| `4422` | `malformed_envelope` | Envelope failed validation. |
+| `4422` | `malformed_envelope` | Envelope failed validation, or no `hello` / `spectator_hello` within 10 s of connecting (reason `hello_timeout`). |
 | `4429` | `rate_limited` | Connection or match-creation rate cap hit (v1 has hardcoded caps). |
-| `4500` | `server_error` | Internal server failure. |
+| `4500` | `server_error` | Internal server failure. If the match driver fails, the match aborts with reason `runtime_error`, both seats receive `match_aborted`, and both close `4500`. |
 
 In-band error codes carried in `error.code` and `action_rejected.error.code`:
 
@@ -566,7 +610,7 @@ In-band error codes carried in `error.code` and `action_rejected.error.code`:
 | `illegal_action` | rules engine | Action rejected by `apply_action`. |
 | `wrong_seat` | server | Action sent by a non-active seat. |
 | `wrong_turn` | server | Action did not match the current observation. |
-| `match_already_finished` | server | Action sent after terminal lifecycle. |
+| `match_already_finished` | server | Reserved; not currently emitted (see §8.10). |
 | `turn_deadline_expired` | server | `deadline_ms` elapsed; match aborts. |
 | `adapter_error` | server | Retry budget exhausted on `action_rejected`. |
 | `protocol_violation` | server | Message arrived in an invalid lifecycle state. |
@@ -601,7 +645,15 @@ negotiation in v1.
   `turn_deadline_expired`. Otherwise the match aborts with reason `peer_disconnected`.
 - **Disconnect off-turn**: server keeps the match alive. When the dropped seat's turn arrives, the
   same grace period applies before issuing the `observation_request`.
-- **Both seats disconnected**: match aborts after a longer grace period (default 60s).
+- **Both seats disconnected**: there is no separate rule. The active seat's grace period (or
+  the turn deadline, whichever ends first) decides the match; the off-turn seat's absence is
+  noticed when its turn comes.
+- **Heartbeat timeouts** (§8.10) are disconnects too: the `4408` close starts the grace period,
+  and if the seat does not resume the match aborts with reason `heartbeat_timeout`.
+- **Running matches are reachable only by resume token.** Once both seats have joined, a
+  `hello` without a `resume_token` closes with `4409 seat_taken`, even while a seat's grace
+  period runs. (Before this rule, a seat whose socket had dropped could be claimed by anyone
+  holding the `match_id`, who then resumed with the fresh token and read that seat's view.)
 - **Server restart**: matches do not survive. Reconnects with a stale `resume_token` close with
   `4410` (`match_not_found`).
 - **Resume protocol**: reconnecting client sends `hello` with `resume_token`. Server validates the
@@ -657,22 +709,23 @@ information.
 
 ## 13. Rate limits (v1, hardcoded)
 
-> **Implementation status (Phase 36): all four caps enforced.**
+> **Implementation status (Phase 40 Slice 0): every cap below is enforced.**
 >
 > | Cap | Status |
 > |-----|--------|
 > | Max concurrent WebSocket connections per source IP | ✅ closes `4429` |
+> | Max WebSocket opens per source IP per minute | ✅ closes `4429` |
 > | Max match creations per source IP per minute | ✅ returns `HTTP 429 rate_limited` |
-> | Max concurrent connections per match | ✅ closes `4429` |
-> | Max `action_response` per match per second | ✅ closes `4429` |
+> | Max concurrent seat connections per match | ✅ closes `4429` |
+> | Max concurrent spectators per match | ✅ closes `4429` |
+> | Max `action_response` per match per second | ✅ throttles (see below) |
+> | Max public-transcript reads per source IP per minute | ✅ returns `HTTP 429 rate_limited` |
 >
 > **Scope of the action cap.** It counts action frames the server actually *reads*, which are the
 > ones from the seat whose turn it is. An off-turn seat's frames sit unread in its socket buffer
 > until its turn arrives, so they are not counted when sent. The cap therefore bounds work the
 > match loop performs, not raw inbound traffic — the per-IP and per-match connection caps are what
-> bound the latter. Exceeding it closes that seat's connection with `4429`; no new abort reason is
-> introduced, because the closed socket surfaces as a disconnect and the existing disconnect-grace
-> path decides the match outcome.
+> bound the latter. Exceeding it throttles (see below); it never closes a connection.
 >
 > Implementation lives in `arena/server/rate_limits.py`. Caps are injectable: the test suite runs
 > with `RateLimiter.unlimited()` because the whole suite shares one client address.
@@ -685,10 +738,32 @@ information.
 > server's, not the seat's: an action that has arrived counts as on time, and the wait is not charged
 > against the per-turn deadline (the window is shared by both seats). The cap is 10 per second.
 
-- Max concurrent WebSocket connections per source IP: **8**.
-- Max match creations per source IP per minute: **5**.
+- Max concurrent WebSocket connections per source IP: **8**. "Source IP" is the TCP peer, or the
+  right-most entry of the operator's trusted client-address header (§ DEPLOYMENT); an IPv6
+  address counts by its /64, and an IPv4-mapped one as its IPv4 address.
+- Max WebSocket opens per source IP per minute, seats and spectators alike: **60**. The
+  concurrent cap alone let one client attach and detach a spectator in a loop, and each attach
+  to a long match costs the server a welcome of up to megabytes.
+- Max match creations per source IP per minute: **5**. Every attempt counts, and the cap is
+  checked before the request body is read. A create body is at most 64 KiB (`413
+  request_too_large`); `players` has at most two entries, and a label at most 64 characters.
 - Max `action_response` messages per match per second: **10**, enforced by throttling (see above).
-- Max concurrent connections per match (across seats and reconnects in grace): **4**.
+- Max concurrent seat connections per match: **4**. A connection claims its per-match slot only
+  once its fresh `hello` is valid; a resume with a valid token claims none and is never refused
+  for this cap: sockets that never said hello used to hold the slots and lock a
+  dropped seat out of its own reconnect. Every new connection has 10 s to send its hello.
+- Max concurrent spectators per match: **16**, counted separately, so spectators can never
+  lock a seat out of its own reconnect.
+- Max public-transcript reads per source IP per minute (Phase 40): **30**; at most **4** are
+  served at once, server-wide (each holds a whole transcript in memory).
+
+The server also bounds its match registry: at most 1000 matches. When it is full it sheds
+finished matches first, then never-started ones (which also expire after an hour), oldest
+first, and never a running match. Every age counts from the match's last change: a finished
+match is kept an hour after it *ended* (however long it ran), and a running match is given up
+only after 24 hours without a committed turn. If nothing can be shed, `POST /matches` returns `503
+server_busy`. Never-started matches the server sheds close any waiting seat or spectator with
+`4410 match_expired`.
 
 Exceeding a connection or creation cap closes the connection with `4429` (HTTP `429` for match
 creation); the action cap throttles. The same caps apply to malformed
@@ -790,6 +865,19 @@ The Python reference SDK (`arena.sdk`) consumes these schemas at install time vi
 Pydantic models; it does not need to fetch from `/schemas/payloads` at runtime. Non-Python SDKs
 fetch once during build/codegen and pin to the same `schema_version` they support. Servers MUST
 keep `/schemas/payloads` byte-stable for a given `schema_version`; any change is a version bump.
+
+**Envelope consistency (v3).** The JSON Schemas describe each field; a `RuntimeTranscriptPayload`
+or `SessionStatusPayload` must also agree with itself, and the reference implementation rejects
+one that does not:
+
+- `lifecycle` is one of `created`, `running`, `finished`, `aborted`, and `abort` is present
+  exactly when it is `aborted`;
+- players have distinct seats and distinct `player_id`s;
+- `viewer_seat` is a seat exactly when `view` is `"seat"`, and `null` otherwise;
+- a transcript's `view` and `viewer_seat` equal those of the `match_transcript` it wraps (a
+  pre-v3 inner transcript carries none and is full);
+- in a view other than `"full"`, `abort.cause_message` is `null` (the text of an exception can
+  carry anything, including an agent's reasoning about its own hand).
 
 **Key payload shapes** (informative summary; the JSON Schemas are authoritative):
 

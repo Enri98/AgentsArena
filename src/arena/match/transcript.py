@@ -326,16 +326,38 @@ def validate_match_transcript(
     cause.
     """
 
+    return _replay_match_transcript(definition, payload)[0]
+
+
+def _replay_match_transcript(
+    definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    payload: JSONMapping,
+) -> tuple[
+    LoadedMatchTranscript[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT],
+]:
+    """Validate ``payload`` by replay; return it loaded, with the replayed match."""
+
     try:
         return _validate_match_transcript(definition, payload)
     except ArenaCoreError as exc:
         raise ValueError(f"Transcript validation failed: {exc.message}") from exc
+    except (KeyError, IndexError, TypeError, AttributeError) as exc:
+        # A structurally malformed payload a model did not catch (a Win result
+        # without a seat, a state a loader indexes into): still a bad transcript,
+        # and callers rely on getting a ValueError for one.
+        raise ValueError(
+            f"Transcript validation failed: malformed payload ({type(exc).__name__})."
+        ) from exc
 
 
 def _validate_match_transcript(
     definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT],
     payload: JSONMapping,
-) -> LoadedMatchTranscript[ConfigT, StateT, ActionT, ObservationT, ResultT]:
+) -> tuple[
+    LoadedMatchTranscript[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT],
+]:
     loaded_transcript = load_match_transcript(definition, payload)
     # A replay match never samples: it waits at each chance node for the
     # recorded outcome. Validation therefore needs no seed.
@@ -418,7 +440,7 @@ def _validate_match_transcript(
             context=f"Turn {turn_index}",
         )
 
-    return loaded_transcript
+    return loaded_transcript, replay_match
 
 
 def dump_domain_event(event: DomainEvent) -> MatchEventPayload:
@@ -588,42 +610,20 @@ def redact_match_transcript(
 
     What a replay viewer uses to show one seat's perspective of an archived
     match. For a perfect-information game the payload comes back unredacted.
+
+    The file is replayed first, and the view is built from the *replayed*
+    match: what a viewer may see is decided by the game, never by the
+    ``is_public`` / ``audience`` markers in the file. Trusting them let a file
+    with the markers stripped show every hand. Raises ``ValueError`` for any
+    transcript that does not replay.
     """
 
-    loaded = load_match_transcript(definition, payload)
-    view, viewer_seat = transcript_view_for(definition, viewer)
+    check_viewer(viewer)
+    _, replay_match = _replay_match_transcript(definition, payload)
+    view, _ = transcript_view_for(definition, viewer)
     if view == VIEW_FULL:
         return MatchTranscriptPayload.model_validate(payload).model_dump(mode="json")
-
-    serializer = definition.serializer
-    redacted = MatchTranscriptPayload(
-        game_id=definition.game_id,
-        schema_version=MATCH_TRANSCRIPT_SCHEMA_VERSION,
-        config=dump_config_for_viewer(serializer, loaded.config, viewer),
-        initial_snapshot=build_snapshot_for_viewer(
-            definition, loaded.config, loaded.initial_state, viewer
-        ),
-        turns=[
-            turn_payload_for_viewer(
-                definition,
-                loaded.config,
-                kind=turn.kind,
-                seat=turn.seat,
-                action=(
-                    serializer.dump_action(turn.action) if turn.action is not None else None
-                ),
-                outcome=turn.outcome,
-                event_payloads=turn.event_payloads,
-                result=turn.result_payload,
-                post_state=turn.post_state,
-                viewer=viewer,
-            )
-            for turn in loaded.turns
-        ],
-        view=view,
-        viewer_seat=viewer_seat,
-    )
-    return redacted.model_dump(mode="json")
+    return dump_match_transcript_for_viewer(replay_match, viewer)
 
 
 #: Retained for internal callers predating the public name.
@@ -650,7 +650,10 @@ def _load_rule_result(result_payload: MatchResultPayload | None) -> RuleResult |
         return None
 
     if result_payload.result_type == "Win":
-        return Win(seat=result_payload.payload["seat"])
+        seat = result_payload.payload.get("seat")
+        if type(seat) is not int:
+            raise ValueError("A Win result must name the winning seat.")
+        return Win(seat=seat)
     if result_payload.result_type == "Draw":
         return Draw()
 

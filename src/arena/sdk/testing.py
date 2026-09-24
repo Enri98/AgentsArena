@@ -78,10 +78,12 @@ class LocalSession:
 
         Raises StopAsyncIteration when the script is exhausted.
         """
-        if not self._inbox:
-            raise StopAsyncIteration("LocalSession script exhausted")
-        env = self._inbox.pop(0)
-        return _env_to_event(env)
+        while True:
+            if not self._inbox:
+                raise StopAsyncIteration("LocalSession script exhausted")
+            event = _env_to_event(self._inbox.pop(0))
+            if event is not None:  # like Session, skip what a seat ignores
+                return event
 
     async def send_action(
         self,

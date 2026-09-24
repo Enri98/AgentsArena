@@ -4152,7 +4152,7 @@ Acceptance criteria:
 
 ---
 
-### Phase 40 - Transcript persistence and public transcript endpoint
+### Phase 40 - Transcript persistence and public transcript endpoint — ✅ COMPLETE (2026-09-25)
 
 Objective:
 - outlive the process, so a finished match has a URL
@@ -4175,6 +4175,118 @@ Acceptance criteria:
 - a hidden-information match's public transcript leaks nothing private, asserted by test
 - retention is enforced; an expired match returns `404`
 - ruff + pytest green
+
+Owner decisions (2026-09-24):
+- **Store the public transcript only**: exactly what a spectator receives in
+  `match_finished`/`match_aborted`. No hidden hand ever reaches the store, so a store or read bug
+  cannot leak one. Seat-scoped transcripts over HTTP stay out of scope.
+- **Memory by default, durability opt-in**: `create_app()` and `python -m arena.server` keep a
+  bounded in-memory store; `--transcript-store file:DIR | sqlite:PATH` makes it durable.
+- **SQLite ships too**, against the same contract tests as the file backend.
+- **Retention defaults: 7 days from the match's end, 10,000 records**, plus a byte cap (1 GiB
+  durable, 64 MiB in memory) so long matches cannot fill a disk. All configurable.
+
+#### Slice 0 - Pre-phase adversarial review fixes — ✅ COMPLETE (2026-09-25)
+
+Three reviewers audited `main` at `e28259e` before Phase 40 started: hidden-information leakage,
+server robustness and protocol conformance, and core/transcript/replay correctness (1,250
+round-tripped matches, 8,000 transcript mutations, 4,500 rule-fuzzed matches). Every confirmed
+finding was fixed and has a test.
+
+- **Leaks.**
+  - **Critical: a seat hijack.** After seat 0 resumed once, its old handler released the seat slot
+    mid-match. A fresh `hello` from anyone holding the match id then claimed it, resumed with the
+    new token, and read seat 0's hand while the player was locked out. A running match is now
+    reachable only by resume token (`4409`).
+  - MCP over HTTP shared one session registry across all clients; it is now per SSE connection.
+  - Redaction trusted the `is_public`/`audience` markers stored in a file. It now replays the file
+    and builds the view from the replayed match.
+  - An abort's `cause_message` (possibly an agent's raw reply) is dropped from non-full views.
+- **Server.**
+  - One absolute deadline per turn: a reconnect used to restart it, and a deadline firing during
+    the action throttle was never checked again.
+  - A heartbeat timeout enters the grace period (§8.10).
+  - A frame that `json.loads` rejects with `RecursionError` crashed the driver. The codec now
+    catches every parse failure, and a crashed driver aborts `runtime_error` and closes `4500`.
+  - Registry: a full registry never sheds a running match (503 `server_busy` instead), and ages
+    count from the last activity, not creation.
+  - Spectators have their own per-match cap. WebSocket opens are capped per IP.
+  - The serialised spectator welcome is cached, since a client looping attach/detach used to stall
+    every match.
+  - HTTP input is bounded, keepalive is pinned, and the spec's close codes are honoured
+    (`1003`, `4404`, `4401`).
+- **SDK.** It accepts 64 MiB frames (a long match's `match_finished` exceeded 1 MiB) and ignores
+  unknown message types (§7).
+- **Core.**
+  - Runtime envelopes must agree with themselves, and validation checks the lifecycle against the
+    replayed game.
+  - Malformed payloads raise `ValueError`.
+  - Unreachable Pig and Liar's Dice states no longer load.
+  - `ChanceRng` refuses bounds over 2**64, which made it loop forever.
+
+A second review of these fixes found four more issues, all fixed:
+
+- silent sockets holding per-match slots (the slot is now claimed after a valid hello, with a 10 s
+  hello timeout);
+- evicted matches resurrected as zombie state;
+- eviction ages;
+- a crash after the terminal state left clients with a 1006.
+
+#### Slice 1 - Transcript store interface and backends — ✅ COMPLETE (2026-09-25)
+
+`arena.server.transcript_store` provides:
+- the `TranscriptStore` protocol and `RetentionPolicy`: a TTL from the match's end, an entry cap,
+  a byte cap, and a per-record cap;
+- `MemoryTranscriptStore`;
+- `FileTranscriptStore`: one file per match, named by the hex of the id (ids are case-sensitive,
+  Windows file names are not), with the end time in the name, atomic rename, a directory fsync,
+  and best-effort deletes retried later (Windows refuses to delete a file held open);
+- `SqliteTranscriptStore`;
+- `open_transcript_store("memory" | "file:DIR" | "sqlite:PATH")`.
+
+Stores refuse any audience but the public, and any id that is not `token_urlsafe`-shaped. A
+record dated in the future is expired, the record just stored is never the one the caps evict,
+and a closed store refuses writes. One contract suite runs against all three backends.
+
+#### Slice 2 - Persist on match end, serve `GET /matches/{id}/public-transcript` — ✅ COMPLETE (2026-09-25)
+
+- **Saving.** `persist_public_transcript` stores exactly the transcript a spectator receives in the
+  terminal frame, before that frame goes out, on every ending path (finished, every abort, and
+  the crash path). Encoding and I/O run in a worker thread. A failing store never stops a match
+  from ending.
+- **Responses.**
+  - `200` returns the stored body verbatim, with `Cache-Control: private, no-store`.
+  - `409 transcript_not_ready` while the match is live or its transcript is being stored
+    (`Match.transcript_settled`).
+  - `404` for unknown, malformed, expired, or never-stored ids.
+  - `429` over the per-IP read cap (30/min).
+- **Tests.**
+  - The served body equals the spectator's frame.
+  - A Liar's Dice body leaks no hand, checked against ground truth.
+  - Aborted matches are served.
+  - The body survives eviction from the registry and a failing store.
+
+#### Slice 3 - Configuration, durability, docs — ✅ COMPLETE (2026-09-25)
+
+- **Configuration.** `python -m arena.server` takes `--transcript-store`, the retention flags, and
+  `--client-ip-header`, each also read from an `ARENA_*` variable. Behind Fly's proxy every client
+  shared one address, making the per-IP caps server-wide.
+- **Deployment files.** `fly.toml` sets `ARENA_CLIENT_IP_HEADER=Fly-Client-IP` and carries the
+  volume config commented out. The Dockerfile creates `/data`.
+- **Docs.**
+  - `docs/DEPLOYMENT.md`: persistence on a Fly volume, a settings reference, and Caddy.
+  - `docs/NETWORK_PROTOCOL.md`: §4.1 endpoint, §13 caps, §17 envelope rules.
+  - README.
+- **Spectator page.** It links the transcript when a match ends.
+- **Byte stability.** A golden-file test pins `/schemas/payloads` for v3 (a `Literal` had silently
+  changed it).
+- **Acceptance, real stack.**
+  - `python -m arena.server` with a SQLite store ran a 218-turn Pig match between two Ollama
+    agents.
+  - `GET /public-transcript` returned 200 (95 KB).
+  - After a restart the registry had forgotten the match (`GET /matches/{id}` returned 404), yet
+    the transcript came back byte-identical.
+  - The restart is also covered by integration tests for the file and SQLite stores.
 
 ---
 
