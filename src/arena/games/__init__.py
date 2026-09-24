@@ -11,6 +11,7 @@ def register_builtin_games(registry: GameRegistry) -> None:
     """Register the built-in game set in a supplied registry."""
 
     from arena.games.connect4.definition import register_connect4
+    from arena.games.liarsdice.definition import register_liarsdice
     from arena.games.nim.definition import register_nim
     from arena.games.pig.definition import register_pig
     from arena.games.tictactoe.definition import register_tictactoe
@@ -19,6 +20,7 @@ def register_builtin_games(registry: GameRegistry) -> None:
     register_tictactoe(registry)
     register_nim(registry)
     register_pig(registry)
+    register_liarsdice(registry)
 
 
 def build_default_registry() -> GameRegistry:
@@ -32,6 +34,7 @@ def build_default_registry() -> GameRegistry:
 __all__: Sequence[str] = [
     "build_default_registry",
     "connect4",
+    "liarsdice",
     "nim",
     "pig",
     "tictactoe",

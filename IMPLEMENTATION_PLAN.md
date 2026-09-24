@@ -4030,6 +4030,10 @@ Out of scope:
 - N-player Liar's Dice (2-seat only)
 - advanced variants (wild ones, palifico, spot-on calls) unless they fall out for free
 
+**Plan deviation (2026-09-24): no seed in config.** Phase 37 showed a seed in config is public
+(config goes to both seats and into every snapshot) and would let either seat reroll the opponent's
+hand. Liar's Dice uses the match-owned generator like every chance game.
+
 Acceptance criteria:
 - the information-leak test passes: neither seat can observe the other's dice at any point in a
   full match, over the wire, including on reconnect and in the final transcript
@@ -4037,6 +4041,29 @@ Acceptance criteria:
 - two Ollama agents complete a match locally and over the server
 - replay from transcript reproduces the match exactly, including the initial roll
 - ruff + pytest green
+
+#### Slice 1 - Game package and contract — ✅ COMPLETE (2026-09-24)
+
+`arena.games.liarsdice`, registered in the default registry.
+- **Rules.** Two seats with `dice_per_seat` dice (default 3) and `faces` faces (default 6). Each
+  round opens at a **chance node** that rolls both hands. Bids strictly rise (more dice, or as many
+  of a higher face). A **call** reveals both hands publicly: if the bid holds the caller loses a
+  die, else the bidder does. The loser opens the next round, which re-rolls. No dice left means
+  the match is lost. No wild ones, palifico, or spot-on.
+- **Views.**
+  - The seat view is the public fields plus `my_dice`.
+  - The public view has no hands.
+  - Each round's `Roll` outcome gives a seat its own hand and the public only the dice counts.
+  - `DiceDealt` events are private to their seat.
+  - `BidCalled` (the showdown) and `last_showdown` are public by design.
+- `legal_actions` lists `Call` first, so first-legal-action playouts end rounds instead of bidding
+  up.
+- **Contract bundle.** Private variants for both seats: at the opening, with a standing bid, and
+  near the end. Outcome variants, the opening roll, and `revealing_actions=(Call(),)`. Passes the
+  full shared contract, including the one-step indistinguishability check.
+
+#### Slice 2 - CLI, MCP, and Ollama adapters; per-seat live CLI
+#### Slice 3 - Wire acceptance, demo, and real agent runs
 
 ---
 
