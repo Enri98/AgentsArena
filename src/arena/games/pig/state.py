@@ -8,6 +8,8 @@ from typing import Sequence
 from arena.core.types import Seat
 
 VALID_SEATS = (0, 1)
+#: The config's bound, enforced again on load.
+MAX_TARGET_SCORE = 1000
 
 
 @dataclass(frozen=True)
@@ -37,8 +39,16 @@ class PigState:
             raise ValueError("turn_total must be a non-negative integer")
         if type(self.roll_pending) is not bool:
             raise ValueError("roll_pending must be a bool")
-        if type(self.target_score) is not int or self.target_score < 1:
-            raise ValueError("target_score must be a positive integer")
+        if type(self.target_score) is not int or not 1 <= self.target_score <= MAX_TARGET_SCORE:
+            raise ValueError(f"target_score must be an integer in 1..{MAX_TARGET_SCORE}")
+        winners = [seat for seat in VALID_SEATS if self.scores[seat] >= self.target_score]
+        if len(winners) > 1:
+            raise ValueError("only one seat can reach the target")
+        if winners and (
+            self.current_seat != winners[0] or self.turn_total or self.roll_pending
+        ):
+            # Banking ends the match with the winner still to move, as Nim does.
+            raise ValueError("a finished match rests with the winner to move and no turn open")
 
 
 __all__: Sequence[str] = ["PigState", "VALID_SEATS"]

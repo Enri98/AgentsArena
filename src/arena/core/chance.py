@@ -109,8 +109,10 @@ class ChanceRng:
         cost of getting it right is one comparison.
         """
 
-        if bound <= 0:
-            raise ValueError(f"draw bound must be positive, got {bound}")
+        if type(bound) is not int or not 0 < bound <= _WORD_MAX:
+            # Above one word, `limit` below is 0 and every draw is rejected: the
+            # loop would never end.
+            raise ValueError(f"draw bound must be an int in [1, 2**{_WORD_BITS}], got {bound!r}")
 
         # Largest multiple of `bound` that fits in a word; values at or above it
         # would over-represent the low residues.
@@ -141,12 +143,13 @@ class ChanceRng:
 
     @classmethod
     def load(cls, payload: dict[str, Any]) -> "ChanceRng":
+        # No coercion: int(1.9) and int("3") would load a different generator
+        # than the one dumped. And no payload in the error: it holds the seed.
         try:
-            return cls(seed=int(payload["seed"]), counter=int(payload["counter"]))
+            return cls(seed=payload["seed"], counter=payload["counter"])
         except (KeyError, TypeError, ValueError) as exc:
             raise InvalidGameConfig(
-                "Chance generator payload must carry integer 'seed' and 'counter'.",
-                details={"payload": payload},
+                "Chance generator payload must carry integer 'seed' and 'counter'."
             ) from exc
 
 

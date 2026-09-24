@@ -87,7 +87,7 @@ class _PublicFields(BaseModel):
 class LiarsDiceStatePayload(_PublicFields):
     """Authoritative state: both hands. Server-side only."""
 
-    dice: list[list[int]] | None
+    dice: list[list[int]] | None = Field(min_length=2, max_length=2)
 
 
 class LiarsDicePublicStatePayload(_PublicFields):
