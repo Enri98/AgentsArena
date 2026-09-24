@@ -468,35 +468,50 @@ def run_stdio(registry: SessionRegistry | None = None) -> None:
     anyio.run(_run)
 
 
-def run_http(
-    host: str = "127.0.0.1",
-    port: int = 9000,
-    registry: SessionRegistry | None = None,
-) -> None:
-    """Run the MCP server over HTTP/SSE (for remote MCP clients)."""
-    import uvicorn
+def build_http_app() -> Any:
+    """The HTTP/SSE application: one isolated tool server per SSE connection.
+
+    Each connection gets its own :class:`SessionRegistry`. A shared one let any
+    client read, consume, or move for any ``(match_id, seat)`` another client
+    had joined: two competing agents on one MCP server could read each other's
+    Liar's Dice hands. When the connection ends, its game sessions are closed.
+    """
+
     from mcp.server.sse import SseServerTransport
     from starlette.applications import Starlette
+    from starlette.responses import Response
     from starlette.routing import Mount, Route
 
-    server = build_server(registry)
     sse = SseServerTransport("/messages/")
 
     async def handle_sse(request: Any) -> Any:
-        async with sse.connect_sse(
-            request.scope, request.receive, request._send
-        ) as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options(),
-            )
+        registry = SessionRegistry()
+        server = build_server(registry)
+        try:
+            async with sse.connect_sse(
+                request.scope, request.receive, request._send
+            ) as (read_stream, write_stream):
+                await server.run(
+                    read_stream,
+                    write_stream,
+                    server.create_initialization_options(),
+                )
+        finally:
+            await registry.close_all()
+        # The SSE response has already been sent; Starlette still needs a
+        # response object, and None made every disconnect log a TypeError.
+        return Response()
 
-    starlette_app = Starlette(
+    return Starlette(
         routes=[
             Route("/sse", endpoint=handle_sse),
             Mount("/messages/", app=sse.handle_post_message),
         ]
     )
 
-    uvicorn.run(starlette_app, host=host, port=port)
+
+def run_http(host: str = "127.0.0.1", port: int = 9000) -> None:
+    """Run the MCP server over HTTP/SSE (for remote MCP clients)."""
+    import uvicorn
+
+    uvicorn.run(build_http_app(), host=host, port=port)
