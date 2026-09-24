@@ -21,7 +21,7 @@ from arena.adapters.websocket import (
 )
 from arena.adapters.websocket.errors import SchemaVersionMismatch, WireProtocolError
 from arena.adapters.websocket.messages import ErrorBody
-from arena.server.config import HEARTBEAT_MAX_MISSES
+from arena.server.config import HEARTBEAT_MAX_MISSES, HELLO_TIMEOUT_S
 from arena.server.errors import MatchNotFound
 from arena.server.rate_limits import (
     CLOSE_RATE_LIMITED,
@@ -117,22 +117,76 @@ def _client_ip(ws: WebSocket) -> str:
     )
 
 
+class _MatchSlot:
+    """A connection's claim on one of a match's §13 slots, taken after hello."""
+
+    def __init__(self, limiter: RateLimiter | None, match_id: str, *, spectator: bool) -> None:
+        self._limiter = limiter
+        self._match_id = match_id
+        self._spectator = spectator
+        self._held = False
+
+    def claim(self) -> None:
+        """Raises ``RateLimitExceeded`` when the match's cap is reached."""
+
+        if self._limiter is not None and not self._held:
+            self._limiter.acquire_match_slot(match_id=self._match_id, spectator=self._spectator)
+            self._held = True
+
+    def release(self) -> None:
+        if self._limiter is not None and self._held:
+            self._limiter.release_match_slot(match_id=self._match_id, spectator=self._spectator)
+            self._held = False
+
+
+async def _receive_hello(ws: WebSocket) -> str | None:
+    """The first frame, or ``None`` (the socket is then closed) if none came in time."""
+
+    timeout = getattr(ws.app.state, "hello_timeout_s", HELLO_TIMEOUT_S)
+    try:
+        raw = await asyncio.wait_for(receive_text_frame(ws), timeout)
+    except asyncio.TimeoutError:
+        await _close(ws, _CLOSE_MALFORMED, "hello_timeout")
+        return None
+    if raw is None:  # gone, or a binary frame (already closed 1003)
+        await _close(ws, _CLOSE_MALFORMED, "no_hello_received")
+    return raw
+
+
+def _still_registered(ws: WebSocket, match_id: str) -> bool:
+    """Whether the match survived while this handler awaited.
+
+    Eviction drops every per-match dict; a handler that then touched them
+    brought the match back as unreachable state that nothing would ever clean
+    up, and left its client waiting for an opponent who could not come.
+    """
+
+    registry: MatchRegistry = ws.app.state.match_registry
+    try:
+        registry.get(match_id)
+    except MatchNotFound:
+        return False
+    return True
+
+
 @router.websocket("/matches/{match_id}/play")
 async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
     """Primary play channel (protocol §5/§8/§10).
 
-    Thin wrapper holding a protocol §13 connection slot for the lifetime of the
+    Thin wrapper holding the protocol §13 per-IP slot for the lifetime of the
     session, so every early return inside ``_play_session`` still releases it.
+    The per-match slot is claimed inside, once the hello is valid.
     """
 
     limiter: RateLimiter | None = getattr(ws.app.state, "rate_limiter", None)
+    slot = _MatchSlot(limiter, match_id, spectator=False)
     if limiter is None:
-        await _play_session(ws, match_id, seat)
+        await _play_session(ws, match_id, seat, slot)
         return
 
     ip = _client_ip(ws)
     try:
-        limiter.acquire_connection(ip=ip, match_id=match_id)
+        limiter.acquire_ip(ip=ip)
     except RateLimitExceeded as exc:
         logger.warning(
             "rate_limited",
@@ -147,12 +201,15 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         return
 
     try:
-        await _play_session(ws, match_id, seat)
+        await _play_session(ws, match_id, seat, slot)
     finally:
-        limiter.release_connection(ip=ip, match_id=match_id)
+        slot.release()
+        limiter.release_ip(ip=ip)
 
 
-async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
+async def _play_session(
+    ws: WebSocket, match_id: str, seat: int, slot: _MatchSlot
+) -> None:
     """Drive one play-channel session; see :func:`play_handler`."""
 
     # 1. Look up match.
@@ -174,9 +231,8 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
     await ws.accept()
 
     # 4. Receive the first frame; expect a hello envelope.
-    raw = await receive_text_frame(ws)
-    if raw is None:  # gone, or a binary frame (already closed 1003)
-        await _close(ws, _CLOSE_MALFORMED, "no_hello_received")
+    raw = await _receive_hello(ws)
+    if raw is None:
         return
 
     try:
@@ -215,6 +271,10 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
 
     hello = envelope.payload
     app_state = ws.app.state
+
+    if not _still_registered(ws, match_id):
+        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_expired")
+        return
 
     # 4a. Phase 32: check for reconnect (resume_token present in hello).
     if hello.resume_token is not None:
@@ -256,6 +316,15 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         await _close(ws, _CLOSE_SCHEMA_MISMATCH, "schema_version_mismatch")
         return
 
+    # 6a. Section 13: a seat slot is claimed only by a valid hello. (A resume
+    # with a valid token is exempt: a seat's own reconnect is never refused
+    # for the match's connection count.)
+    try:
+        slot.claim()
+    except RateLimitExceeded as exc:
+        await _close(ws, _CLOSE_RATE_LIMITED, exc.scope)
+        return
+
     # 7. Check seat occupancy.
     seat_slots = _get_seat_slots(app_state)
     if match_id not in seat_slots:
@@ -289,6 +358,10 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         seat=seat,
         schema_version=1,
     )
+
+    if not _still_registered(ws, match_id):  # evicted during the welcome
+        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_expired")
+        return
 
     # 9. Initialise per-match ready / done / reconnect event dicts.
     ready_events = _get_ready_events(app_state)
@@ -350,10 +423,13 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
     # 10. Both seats are connected.  Seat 1's handler drives run_match; seat 0 just waits
     #     for the done_event (set by run_match when the match ends and both WS are closed).
     if seat == 1:
-        conn0 = seat_slots[match_id][0]
-        conn1 = seat_slots[match_id][1]
-        assert conn0 is not None
-        assert conn1 is not None
+        slots = seat_slots.get(match_id) or {}
+        conn0 = slots.get(0)
+        conn1 = slots.get(1)
+        if conn0 is None or conn1 is None:
+            # Evicted (or a seat vanished) in the instant the match was to start.
+            await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_expired")
+            return
         conns = MatchConnections(conn0, conn1)
         _get_match_conns(app_state)[match_id] = conns
 
@@ -569,13 +645,14 @@ async def spectate_handler(ws: WebSocket, match_id: str) -> None:
     """
 
     limiter: RateLimiter | None = getattr(ws.app.state, "rate_limiter", None)
+    slot = _MatchSlot(limiter, match_id, spectator=True)
     if limiter is None:
-        await _spectate_session(ws, match_id)
+        await _spectate_session(ws, match_id, slot)
         return
 
     ip = _client_ip(ws)
     try:
-        limiter.acquire_connection(ip=ip, match_id=match_id, spectator=True)
+        limiter.acquire_ip(ip=ip)
     except RateLimitExceeded as exc:
         logger.warning(
             "rate_limited",
@@ -590,12 +667,13 @@ async def spectate_handler(ws: WebSocket, match_id: str) -> None:
         return
 
     try:
-        await _spectate_session(ws, match_id)
+        await _spectate_session(ws, match_id, slot)
     finally:
-        limiter.release_connection(ip=ip, match_id=match_id, spectator=True)
+        slot.release()
+        limiter.release_ip(ip=ip)
 
 
-async def _spectate_session(ws: WebSocket, match_id: str) -> None:
+async def _spectate_session(ws: WebSocket, match_id: str, slot: _MatchSlot) -> None:
     """Drive one spectator session; see :func:`spectate_handler`."""
 
     registry: MatchRegistry = ws.app.state.match_registry
@@ -608,9 +686,8 @@ async def _spectate_session(ws: WebSocket, match_id: str) -> None:
 
     await ws.accept()
 
-    raw = await receive_text_frame(ws)
-    if raw is None:  # gone, or a binary frame (already closed 1003)
-        await _close(ws, _CLOSE_MALFORMED, "no_hello_received")
+    raw = await _receive_hello(ws)
+    if raw is None:
         return
 
     try:
@@ -628,6 +705,16 @@ async def _spectate_session(ws: WebSocket, match_id: str) -> None:
 
     if WIRE_SCHEMA_VERSION not in envelope.payload.supported_schema_versions:
         await _close(ws, _CLOSE_SCHEMA_MISMATCH, "schema_version_mismatch")
+        return
+
+    if not _still_registered(ws, match_id):
+        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_expired")
+        return
+
+    try:
+        slot.claim()
+    except RateLimitExceeded as exc:
+        await _close(ws, _CLOSE_RATE_LIMITED, exc.scope)
         return
 
     app_state = ws.app.state

@@ -1226,6 +1226,10 @@ async def run_match(
                 pass
             hb_task = None
 
+    # Whether match_finished / match_aborted has been queued: the crash handler
+    # below must send it if not, and must not send it twice.
+    terminal_sent = False
+
     async def _abort(
         reason: AbortReason,
         message: str,
@@ -1237,12 +1241,13 @@ async def run_match(
     ) -> None:
         """Abort the match: record it, tell everyone, close both seats."""
 
-        nonlocal session
+        nonlocal session, terminal_sent
         session = arena.abort_session(session, reason=reason, message=message)
         match.session = session
         await persist_public_transcript(app_state, match)
         await _broadcast_match_state(conns, session)
         await _broadcast_match_aborted(conns, session)
+        terminal_sent = True
         logger.info(
             "match_aborted",
             match_id=session.match_id,
@@ -1262,6 +1267,7 @@ async def run_match(
             await persist_public_transcript(app_state, match)
             await _broadcast_match_state(conns, session)
             await _broadcast_match_aborted(conns, session)
+            terminal_sent = True
             await _close_both(conns, WS_CLOSE_NORMAL, "match_aborted")
             return
 
@@ -1663,6 +1669,7 @@ async def run_match(
                 reason=session.abort.reason.value if session.abort else "unknown",
             )
             await _broadcast_match_aborted(conns, session)
+        terminal_sent = True
 
         await _close_both(conns, WS_CLOSE_NORMAL, "normal_closure")
 
@@ -1672,11 +1679,11 @@ async def run_match(
         logger.exception(
             "run_match_error", match_id=match.match_id, seat=None, schema_version=1
         )
-        if match.session.lifecycle not in (
+        session = match.session
+        if session.lifecycle not in (
             RuntimeLifecycle.FINISHED,
             RuntimeLifecycle.ABORTED,
         ):
-            session = match.session
             try:
                 await _abort(
                     AbortReason.RUNTIME_ERROR,
@@ -1694,6 +1701,25 @@ async def run_match(
                     schema_version=1,
                 )
                 await _close_both(conns, WS_CLOSE_SERVER_ERROR, "server_error")
+        else:
+            # The match had already ended when the failure struck (in a
+            # broadcast, say). Its seats still get the terminal frame, once,
+            # and a 4500 close rather than an abnormal 1006.
+            if not terminal_sent:
+                try:
+                    await persist_public_transcript(app_state, match)
+                    if session.lifecycle is RuntimeLifecycle.FINISHED:
+                        await _broadcast_match_finished(conns, session)
+                    else:
+                        await _broadcast_match_aborted(conns, session)
+                except Exception:
+                    logger.exception(
+                        "run_match_terminal_frame_failed",
+                        match_id=match.match_id,
+                        seat=None,
+                        schema_version=1,
+                    )
+            await _close_both(conns, WS_CLOSE_SERVER_ERROR, "server_error")
 
     finally:
         # However the driver ended, a transcript GET must stop answering 409.

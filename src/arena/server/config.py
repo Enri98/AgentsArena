@@ -37,6 +37,10 @@ UVICORN_WS_PING_TIMEOUT_S: float = 20.0
 #: Largest inbound frame. Clients send hellos, actions, and pongs: all small.
 UVICORN_WS_MAX_SIZE: int = 1 << 20
 
+#: Seconds a new WebSocket has to send its hello. Without a bound, a socket that
+#: never spoke held its connection slots for as long as it stayed open.
+HELLO_TIMEOUT_S: float = 10.0
+
 # Heartbeat defaults (Phase 32).  arena.server owns all deadline/heartbeat logic.
 HEARTBEAT_INTERVAL_MS: int = 20_000
 HEARTBEAT_MAX_MISSES: int = 2

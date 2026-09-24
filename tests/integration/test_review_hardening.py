@@ -260,3 +260,117 @@ def test_a_crashing_driver_aborts_the_match_and_closes_with_4500(monkeypatch: An
     assert out["reason"] == "runtime_error"
     assert out["code"] == (4500, "server_error")
     assert out["status"]["lifecycle"] == "aborted"
+
+
+# ── Review of the Slice 0 fixes ─────────────────────────────────────────────
+
+
+async def _open_silent(ws_base: str, match_id: str, seat: int) -> Any:
+    return await ws_connect(
+        f"{ws_base}/matches/{match_id}/play?seat={seat}", ping_interval=None, max_size=None
+    )
+
+
+def test_silent_sockets_cannot_lock_a_seat_out_of_its_reconnect() -> None:
+    async def run(base: str, ws_base: str) -> str:
+        match = _create(base, "tictactoe", per_turn_deadline_ms=20_000, disconnect_grace_ms=3_000)
+        mid = match["match_id"]
+        seat0 = await _join(ws_base, mid, 0)
+        token = (await _recv(seat0))["payload"]["resume_token"]
+        seat1 = await _join(ws_base, mid, 1)
+        await _recv(seat1)
+        await _until(seat0, "observation_request", mid)
+        # Two sockets that never say hello: they used to fill the seat slots.
+        squatters = [await _open_silent(ws_base, mid, 0) for _ in range(2)]
+        await seat0.close()  # a network blip
+        await asyncio.sleep(0.3)
+        resumed = await _join(ws_base, mid, 0, token)
+        welcome = await _recv(resumed)
+        for ws in (*squatters, seat1, resumed):
+            await ws.close()
+        return welcome["type"]
+
+    app = create_app(rate_limiter=RateLimiter())  # production caps
+    with serve(app) as server:
+        kind = asyncio.run(asyncio.wait_for(run(server.http_base_url, server.ws_base_url), 40))
+    assert kind == "welcome"
+
+
+def test_a_socket_that_never_says_hello_is_closed() -> None:
+    async def run(base: str, ws_base: str) -> tuple[Any, Any]:
+        mid = _create(base, "tictactoe")["match_id"]
+        silent = await _open_silent(ws_base, mid, 0)
+        return await _closed_with(silent)
+
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+    app.state.hello_timeout_s = 0.5
+    with serve(app) as server:
+        closed = asyncio.run(asyncio.wait_for(run(server.http_base_url, server.ws_base_url), 20))
+    assert closed == (4422, "hello_timeout")
+
+
+def test_a_hello_for_a_match_evicted_meanwhile_leaves_no_state() -> None:
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+
+    async def run(base: str, ws_base: str) -> tuple[Any, Any]:
+        mid = _create(base, "tictactoe")["match_id"]
+        silent = await _open_silent(ws_base, mid, 0)
+        app.state.match_registry._unstarted_max_age_s = 0.0
+        _create(base, "tictactoe")  # this create sweeps the first match away
+        app.state.match_registry._unstarted_max_age_s = 3600.0
+        await silent.send(_hello(0))
+        return mid, await _closed_with(silent)
+
+    with serve(app) as server:
+        mid, closed = asyncio.run(
+            asyncio.wait_for(run(server.http_base_url, server.ws_base_url), 20)
+        )
+    assert closed == (4410, "match_expired")
+    for attr in ("_ws_seat_slots", "_ws_ready_events", "_ws_done_events", "_ws_reconnect_events"):
+        assert mid not in getattr(app.state, attr, {}), attr
+
+
+def test_a_crash_after_the_match_ended_still_sends_the_result(monkeypatch: Any) -> None:
+    import arena.server.runtime_bridge as bridge
+
+    real = bridge._broadcast_match_finished
+    calls = 0
+
+    async def fails_once(conns: Any, session: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("simulated failure mid-broadcast")
+        await real(conns, session)
+
+    monkeypatch.setattr(bridge, "_broadcast_match_finished", fails_once)
+
+    async def run(base: str, ws_base: str) -> list[Any]:
+        from tests.integration._ws_client import connect, play_scripted
+
+        match = _create(base, "tictactoe")
+        frames: list[list[str]] = [[], []]
+        codes = []
+        async with await connect(match["seat_0_url"]) as ws0, await connect(
+            match["seat_1_url"]
+        ) as ws1:
+            def first(request: Any) -> Any:
+                return request.observation["legal_actions"][0]
+
+            await asyncio.gather(
+                play_scripted(ws0, 0, first, frames=frames[0]),
+                play_scripted(ws1, 1, first, frames=frames[1]),
+                return_exceptions=True,
+            )
+            # Read on until the server closes each socket, then take its code.
+            codes = [(await _closed_with(ws0))[0], (await _closed_with(ws1))[0]]
+        kinds = [[json.loads(f)["type"] for f in seat] for seat in frames]
+        return [kinds, codes]
+
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+    with serve(app) as server:
+        kinds, codes = asyncio.run(
+            asyncio.wait_for(run(server.http_base_url, server.ws_base_url), 40)
+        )
+    assert all(seat.count("match_finished") == 1 for seat in kinds), kinds
+    assert codes == [4500, 4500]

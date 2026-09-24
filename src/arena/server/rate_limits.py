@@ -127,6 +127,7 @@ class RateLimiter:
         self._opens: dict[str, deque[float]] = {}
         self._reads: dict[str, deque[float]] = {}
         self._actions: dict[str, deque[float]] = {}
+        self._prune_at: dict[int, tuple[int, float]] = {}
 
     @classmethod
     def unlimited(cls) -> "RateLimiter":
@@ -163,8 +164,19 @@ class RateLimiter:
         exceeded. A refused open still counts toward the open rate.
         """
 
-        per_match = self._spectators_per_match if spectator else self._conns_per_match
-        cap = self._max_spectators_per_match if spectator else self._max_conns_per_match
+        self.acquire_ip(ip=ip)
+        try:
+            self.acquire_match_slot(match_id=match_id, spectator=spectator)
+        except RateLimitExceeded:
+            self.release_ip(ip=ip)
+            raise
+
+    def acquire_ip(self, *, ip: str) -> None:
+        """Count one open from ``ip`` and take one of its concurrent slots.
+
+        The first step of every WebSocket, before its hello is read.
+        """
+
         now = self._now()
         with self._lock:
             opens = self._window(self._opens, ip, now, OPEN_WINDOW_S)
@@ -183,7 +195,28 @@ class RateLimiter:
                     f"Too many concurrent connections from {ip} "
                     f"(cap {self._max_ws_per_ip}).",
                 )
+            self._conns_per_ip[ip] = ip_count + 1
 
+    def release_ip(self, *, ip: str) -> None:
+        with self._lock:
+            ip_count = self._conns_per_ip.get(ip, 0) - 1
+            if ip_count > 0:
+                self._conns_per_ip[ip] = ip_count
+            else:
+                self._conns_per_ip.pop(ip, None)
+
+    def acquire_match_slot(self, *, match_id: str, spectator: bool = False) -> None:
+        """Take one of ``match_id``'s seat (or spectator) slots.
+
+        Taken only once a connection's hello is valid. Taken at connect, a
+        socket that never said hello held a seat slot for as long as its
+        library answered keepalives, and two of them locked a dropped seat out
+        of its own reconnect.
+        """
+
+        per_match = self._spectators_per_match if spectator else self._conns_per_match
+        cap = self._max_spectators_per_match if spectator else self._max_conns_per_match
+        with self._lock:
             match_count = per_match.get(match_id, 0)
             if match_count >= cap:
                 if spectator:
@@ -197,8 +230,16 @@ class RateLimiter:
                     f"(cap {cap}).",
                 )
 
-            self._conns_per_ip[ip] = ip_count + 1
             per_match[match_id] = match_count + 1
+
+    def release_match_slot(self, *, match_id: str, spectator: bool = False) -> None:
+        per_match = self._spectators_per_match if spectator else self._conns_per_match
+        with self._lock:
+            match_count = per_match.get(match_id, 0) - 1
+            if match_count > 0:
+                per_match[match_id] = match_count
+            else:
+                per_match.pop(match_id, None)
 
     def release_connection(
         self, *, ip: str, match_id: str, spectator: bool = False
@@ -208,19 +249,8 @@ class RateLimiter:
         Safe to call more times than acquire; counts never go negative.
         """
 
-        per_match = self._spectators_per_match if spectator else self._conns_per_match
-        with self._lock:
-            ip_count = self._conns_per_ip.get(ip, 0) - 1
-            if ip_count > 0:
-                self._conns_per_ip[ip] = ip_count
-            else:
-                self._conns_per_ip.pop(ip, None)
-
-            match_count = per_match.get(match_id, 0) - 1
-            if match_count > 0:
-                per_match[match_id] = match_count
-            else:
-                per_match.pop(match_id, None)
+        self.release_ip(ip=ip)
+        self.release_match_slot(match_id=match_id, spectator=spectator)
 
     def connection_count(
         self,
@@ -246,9 +276,17 @@ class RateLimiter:
     ) -> deque[float]:
         """``key``'s pruned sliding window. Call with the lock held."""
 
-        if len(windows) >= _PRUNE_THRESHOLD and key not in windows:
+        threshold, last_scan = self._prune_at.get(id(windows), (_PRUNE_THRESHOLD, now))
+        due = len(windows) >= threshold or (
+            len(windows) >= _PRUNE_THRESHOLD and now - last_scan >= span
+        )
+        if due and key not in windows:
             for stale in [k for k, w in windows.items() if not w or w[-1] <= now - span]:
                 del windows[stale]
+            # Rescan when the survivors have doubled, or a window later: a scan
+            # per new key would make every open O(n) under a spray of fresh
+            # addresses.
+            self._prune_at[id(windows)] = (max(_PRUNE_THRESHOLD, 2 * len(windows)), now)
         window = windows.setdefault(key, deque())
         _prune(window, now, span)
         return window

@@ -45,6 +45,10 @@ class Match:
     # storing has failed or been skipped. Until then a GET for the transcript
     # answers 409 (retry), not 404.
     transcript_settled: bool = False
+    # Eviction ages a match from its last observed change, not its creation:
+    # (lifecycle, committed turns) as last seen by a sweep, and when.
+    activity: tuple[str, int] = ("created", 0)
+    activity_at: float = 0.0
 
 
 _TERMINAL_LIFECYCLES = frozenset({"finished", "aborted"})
@@ -155,6 +159,7 @@ class MatchRegistry:
             disconnect_grace_ms=disconnect_grace_ms,
             created_at=self._now(),
         )
+        match.activity_at = match.created_at
 
         with self._lock:
             self._matches[match_id] = match
@@ -186,9 +191,14 @@ class MatchRegistry:
     def evict_expired(self) -> tuple[str, ...]:
         """Sweep expired matches, and make room below ``max_matches``.
 
-        Terminal matches are kept for ``retention_s`` so a late reader can still
-        fetch the result; never-started ones for ``unstarted_max_age_s``;
-        running ones are presumed abandoned after ``max_age_s``. At or over
+        Every limit counts from the match's last observed change: its end for a
+        terminal match (kept ``retention_s`` so a late reader can still fetch
+        the result), its creation for a never-started one
+        (``unstarted_max_age_s``), and its last committed turn for a running one
+        (presumed abandoned after ``max_age_s`` without a turn). Aging from
+        creation evicted a match that had run for an hour the moment it
+        finished, and a long, live one mid-play. A change is observed by the
+        next sweep (sweeps run on every create), so every limit is a minimum. At or over
         ``max_matches``, terminal matches are shed first, then never-started
         ones, oldest first, until there is room for one more. A running match is
         never shed for room: that let anyone creating matches push a live one
@@ -199,8 +209,13 @@ class MatchRegistry:
         with self._lock:
             doomed: list[str] = []
             for match_id, match in self._matches.items():
-                age = now - match.created_at
                 lifecycle = self._lifecycle(match)
+                local = match.session.local_match
+                activity = (lifecycle, len(local.turns) if local is not None else 0)
+                if activity != match.activity:
+                    match.activity = activity
+                    match.activity_at = now
+                age = now - match.activity_at
                 if lifecycle in _TERMINAL_LIFECYCLES:
                     limit = self._retention_s
                 elif lifecycle == "created":
@@ -217,7 +232,7 @@ class MatchRegistry:
             if overflow > 0:
                 sheddable = sorted(
                     (
-                        (0 if self._lifecycle(m) in _TERMINAL_LIFECYCLES else 1, m.created_at, mid)
+                        (0 if self._lifecycle(m) in _TERMINAL_LIFECYCLES else 1, m.activity_at, mid)
                         for mid, m in self._matches.items()
                         if self._lifecycle(m) in _TERMINAL_LIFECYCLES
                         or self._lifecycle(m) == "created"

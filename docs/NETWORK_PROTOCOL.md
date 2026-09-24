@@ -591,12 +591,12 @@ WebSocket close codes (4000-4999 are application-defined):
 | `1000` | `normal_closure` | Match completed or aborted; transcript already delivered. |
 | `1003` | `unsupported_data` | Binary frame received. |
 | `4400` | `schema_version_mismatch` | No mutually supported `schema_version`. |
-| `4401` | `unauthorized` | Reserved for v2 auth failures. |
+| `4401` | `unauthorized` | A `resume_token` bound to the other seat (§11). Further uses reserved for v2 auth. |
 | `4404` | `unsupported_endpoint` | No such WebSocket endpoint. |
 | `4408` | `heartbeat_timeout` | Two consecutive missed `pong`s. |
 | `4409` | `seat_taken` | Seat already has a live connection. |
 | `4410` | `match_not_found` | `match_id` does not exist (or expired with server restart). |
-| `4422` | `malformed_envelope` | Envelope failed validation. |
+| `4422` | `malformed_envelope` | Envelope failed validation, or no `hello` / `spectator_hello` within 10 s of connecting (reason `hello_timeout`). |
 | `4429` | `rate_limited` | Connection or match-creation rate cap hit (v1 has hardcoded caps). |
 | `4500` | `server_error` | Internal server failure. If the match driver fails, the match aborts with reason `runtime_error`, both seats receive `match_aborted`, and both close `4500`. |
 
@@ -745,14 +745,19 @@ information.
   checked before the request body is read. A create body is at most 64 KiB (`413
   request_too_large`); `players` has at most two entries, and a label at most 64 characters.
 - Max `action_response` messages per match per second: **10**, enforced by throttling (see above).
-- Max concurrent seat connections per match (seats and their reconnects): **4**.
+- Max concurrent seat connections per match (seats and their reconnects): **4**. A connection
+  claims its per-match slot only once its `hello` is valid, and a resume with a valid token is
+  never refused for this cap: sockets that never said hello used to hold the slots and lock a
+  dropped seat out of its own reconnect. Every new connection has 10 s to send its hello.
 - Max concurrent spectators per match: **16**, counted separately, so spectators can never
   lock a seat out of its own reconnect.
 - Max public-transcript reads per source IP per minute (Phase 40): **30**.
 
 The server also bounds its match registry: at most 1000 matches. When it is full it sheds
 finished matches first, then never-started ones (which also expire after an hour), oldest
-first, and never a running match. If nothing can be shed, `POST /matches` returns `503
+first, and never a running match. Every age counts from the match's last change: a finished
+match is kept an hour after it *ended* (however long it ran), and a running match is given up
+only after 24 hours without a committed turn. If nothing can be shed, `POST /matches` returns `503
 server_busy`. Never-started matches the server sheds close any waiting seat or spectator with
 `4410 match_expired`.
 

@@ -56,6 +56,9 @@ def _create(registry: MatchRegistry, game_id: str = "connect4") -> str:
 def _make_terminal(registry: MatchRegistry, match_id: str) -> None:
     match = registry.get(match_id)
     match.session = match.arena.abort_session(match.session)
+    # A sweep observes the end; retention counts from there (sweeps run on
+    # every create, so in the server the lag is at most one create).
+    registry.evict_expired()
 
 
 # ---------------------------------------------------------------------------
