@@ -228,8 +228,19 @@ class MemoryTranscriptStore:
             self._bodies.pop(mid, None)
 
 
+def _file_key(match_id: str) -> str:
+    """A match id as a file name: lowercase hex of its bytes.
+
+    Match ids are case-sensitive and Windows and macOS file names are not:
+    ``Abc...`` and ``abc...`` are two matches but one file. Hex is also free of
+    reserved device names (``CON``, ``NUL``, ...), dots, and separators.
+    """
+
+    return match_id.encode("ascii").hex()
+
+
 class FileTranscriptStore:
-    """One file per match: ``<match_id>.<ended_at_ms>.json``.
+    """One file per match: ``<hex(match_id)>.<ended_at_ms>.json``.
 
     The end time lives in the file name, not in the modification time, so
     copying or restoring the directory does not reset retention. Writes go to a
@@ -238,8 +249,8 @@ class FileTranscriptStore:
     is rebuilt from the directory on open.
     """
 
-    _NAME = re.compile(r"(?P<mid>[A-Za-z0-9_-]{1,64})\.(?P<ms>[0-9]{1,17})\.json")
-    _TMP_NAME = re.compile(r"\.[A-Za-z0-9_-]{1,64}\.tmp")
+    _NAME = re.compile(r"(?P<key>(?:[0-9a-f]{2}){1,64})\.(?P<ms>[0-9]{1,17})\.json")
+    _TMP_NAME = re.compile(r"\.(?:[0-9a-f]{2}){1,64}\.tmp")
 
     def __init__(
         self,
@@ -269,9 +280,13 @@ class FileTranscriptStore:
             parsed = self._NAME.fullmatch(entry.name)
             if parsed is None:
                 continue  # not ours: leave it alone
-            found.append(
-                (int(parsed["ms"]) / 1000, parsed["mid"], path, entry.stat().st_size)
-            )
+            try:
+                mid = bytes.fromhex(parsed["key"]).decode("ascii")
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not is_valid_match_id(mid):
+                continue
+            found.append((int(parsed["ms"]) / 1000, mid, path, entry.stat().st_size))
         with self._lock:
             for ended_at, mid, path, size in sorted(found):
                 previous = self._files.get(mid)
@@ -286,8 +301,9 @@ class FileTranscriptStore:
         _check_put(self.policy, match_id, body, audience)
         with self._lock:
             now = self._now()
-            path = self.directory / f"{match_id}.{int(now * 1000)}.json"
-            tmp = self.directory / f".{match_id}.tmp"
+            key = _file_key(match_id)
+            path = self.directory / f"{key}.{int(now * 1000)}.json"
+            tmp = self.directory / f".{key}.tmp"
             with open(tmp, "wb") as handle:
                 handle.write(body)
                 handle.flush()

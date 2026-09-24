@@ -270,14 +270,28 @@ def test_reopening_with_tighter_caps_applies_them(durable: str, tmp_path: Path) 
         second.close()
 
 
+HEX = MID.encode().hex()
+
+
 def test_the_file_store_names_files_by_end_time(tmp_path: Path) -> None:
     clock = Clock(1_700_000_000.25)
     store = FileTranscriptStore(tmp_path, time_fn=clock)
     store.put(MID, b"{}", audience="public")
-    assert sorted(os.listdir(tmp_path)) == [f"{MID}.1700000000250.json"]
+    assert sorted(os.listdir(tmp_path)) == [f"{HEX}.1700000000250.json"]
     clock.now += 1
     store.put(MID, b"{}", audience="public")
-    assert sorted(os.listdir(tmp_path)) == [f"{MID}.1700000001250.json"]
+    assert sorted(os.listdir(tmp_path)) == [f"{HEX}.1700000001250.json"]
+
+
+def test_ids_differing_only_in_case_are_different_files(tmp_path: Path) -> None:
+    # Windows and macOS file names are case-insensitive; match ids are not.
+    store = FileTranscriptStore(tmp_path, time_fn=Clock())
+    store.put("AbcDef", b"upper", audience="public")
+    store.put("abcdef", b"lower", audience="public")
+    assert store.get("AbcDef").body == b"upper"  # type: ignore[union-attr]
+    assert store.get("abcdef").body == b"lower"  # type: ignore[union-attr]
+    reopened = FileTranscriptStore(tmp_path, time_fn=Clock())
+    assert reopened.get("AbcDef").body == b"upper"  # type: ignore[union-attr]
 
 
 def test_the_file_store_ignores_foreign_files_and_clears_its_own_leftovers(
@@ -285,7 +299,7 @@ def test_the_file_store_ignores_foreign_files_and_clears_its_own_leftovers(
 ) -> None:
     (tmp_path / "README.txt").write_text("keep me")
     (tmp_path / "notes.tmp").write_text("keep me too")
-    (tmp_path / f".{MID}.tmp").write_bytes(b"half a transcript")
+    (tmp_path / f".{HEX}.tmp").write_bytes(b"half a transcript")
     (tmp_path / "subdir.1.json").mkdir()
     store = FileTranscriptStore(tmp_path, time_fn=Clock())
     assert sorted(os.listdir(tmp_path)) == ["README.txt", "notes.tmp", "subdir.1.json"]
@@ -294,12 +308,12 @@ def test_the_file_store_ignores_foreign_files_and_clears_its_own_leftovers(
 
 def test_the_file_store_keeps_the_newest_of_duplicate_records(tmp_path: Path) -> None:
     clock = Clock(2_000.0)
-    (tmp_path / f"{MID}.1000000.json").write_bytes(b"old")
-    (tmp_path / f"{MID}.1500000.json").write_bytes(b"new")
+    (tmp_path / f"{HEX}.1000000.json").write_bytes(b"old")
+    (tmp_path / f"{HEX}.1500000.json").write_bytes(b"new")
     store = FileTranscriptStore(tmp_path, time_fn=clock)
     got = store.get(MID)
     assert got is not None and got.body == b"new" and got.ended_at == 1500.0
-    assert os.listdir(tmp_path) == [f"{MID}.1500000.json"]
+    assert os.listdir(tmp_path) == [f"{HEX}.1500000.json"]
 
 
 def test_the_file_store_forgets_a_file_deleted_behind_its_back(tmp_path: Path) -> None:
