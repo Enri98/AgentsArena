@@ -26,13 +26,21 @@ def probe_models(
 
     resolved_client = client if client is not None else OllamaClient(host)
     available = resolved_client.list_tags()
-    missing = [m for m in required if m not in available]
+    # Ollama resolves an untagged name to ":latest"; so must the probe, or
+    # "llama3.2" is reported missing while "llama3.2:latest" is installed.
+    installed = set(available) | {_with_tag(name) for name in available}
+    missing = [m for m in required if _with_tag(m) not in installed]
     if missing:
         raise OllamaModelMissingError(
             host=host,
             missing_models=missing,
             available_models=available,
         )
+
+
+def _with_tag(name: str) -> str:
+    # The tag is after the last "/": "registry.local:5000/llama3.2" has none.
+    return name if ":" in name.rsplit("/", 1)[-1] else f"{name}:latest"
 
 
 __all__: tuple[str, ...] = ("probe_models",)

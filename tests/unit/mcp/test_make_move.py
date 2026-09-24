@@ -77,3 +77,36 @@ def test_an_out_of_turn_move_returns_as_soon_as_an_observation_arrives() -> None
     error, remaining = asyncio.run(run())
     assert error["error"] is True and error["code"] == "not_committed"
     assert any(type(e).__name__ == "ObservationEvent" for e in remaining)
+
+
+def test_a_rejected_move_is_reported_at_once() -> None:
+    """Review of Phase 39: a rejection used to be set aside; make_move then waited
+    out its timeout and returned no reason, while the seat's deadline ran."""
+
+    from arena.adapters.websocket.messages import ActionRejectedBody
+    from arena.sdk._events import ActionRejectedEvent
+
+    async def run() -> dict:
+        queue: asyncio.Queue = asyncio.Queue()
+        queue.put_nowait(
+            ActionRejectedEvent(
+                body=ActionRejectedBody.model_validate(
+                    {
+                        "turn_id": "t",
+                        "error": {"code": "illegal_action", "message": "column full"},
+                        "retries_remaining": 2,
+                    }
+                )
+            )
+        )
+        handle = SimpleNamespace(queue=queue, session=_Session())
+        registry = SimpleNamespace(get=lambda match_id, seat: handle)
+        result = await asyncio.wait_for(
+            _make_move(registry, {"match_id": "m", "seat": 0, "action": {"column": 0}}),
+            timeout=5,
+        )
+        return json.loads(result.content[0].text)
+
+    error = asyncio.run(run())
+    assert error["code"] == "action_rejected"
+    assert "column full" in error["message"] and "2 retries remaining" in error["message"]

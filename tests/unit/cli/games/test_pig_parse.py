@@ -56,7 +56,7 @@ def test_renderers_show_scores_and_turn_total() -> None:
                "target_score": 50}
     plain = render_state_plain(payload)
     assert "Target: 50" in plain
-    assert "Seat 0: 3" in plain and "▶ Seat 1: 9" in plain
+    assert "Seat 0: 3" in plain and "> Seat 1: 9" in plain
     assert "Turn total: 7" in plain
     assert "\x1b[" not in plain
     assert "\x1b[" in render_state(payload)

@@ -4010,7 +4010,7 @@ transcripts and needs adapting for Liar's Dice (Phase 39).
 
 ---
 
-### Phase 39 - Liar's Dice
+### Phase 39 - Liar's Dice — ✅ COMPLETE (2026-09-24)
 
 Objective:
 - prove Phases 37 and 38 together with a game that is unplayable without both
@@ -4030,6 +4030,10 @@ Out of scope:
 - N-player Liar's Dice (2-seat only)
 - advanced variants (wild ones, palifico, spot-on calls) unless they fall out for free
 
+**Plan deviation (2026-09-24): no seed in config.** Phase 37 showed a seed in config is public
+(config goes to both seats and into every snapshot) and would let either seat reroll the opponent's
+hand. Liar's Dice uses the match-owned generator like every chance game.
+
 Acceptance criteria:
 - the information-leak test passes: neither seat can observe the other's dice at any point in a
   full match, over the wire, including on reconnect and in the final transcript
@@ -4037,6 +4041,114 @@ Acceptance criteria:
 - two Ollama agents complete a match locally and over the server
 - replay from transcript reproduces the match exactly, including the initial roll
 - ruff + pytest green
+
+#### Slice 1 - Game package and contract — ✅ COMPLETE (2026-09-24)
+
+`arena.games.liarsdice`, registered in the default registry.
+- **Rules.** Two seats with `dice_per_seat` dice (default 3) and `faces` faces (default 6). Each
+  round opens at a **chance node** that rolls both hands. Bids strictly rise (more dice, or as many
+  of a higher face). A **call** reveals both hands publicly: if the bid holds the caller loses a
+  die, else the bidder does. The loser opens the next round, which re-rolls. No dice left means
+  the match is lost. No wild ones, palifico, or spot-on.
+- **Views.**
+  - The seat view is the public fields plus `my_dice`.
+  - The public view has no hands.
+  - Each round's `Roll` outcome gives a seat its own hand and the public only the dice counts.
+  - `DiceDealt` events are private to their seat.
+  - `BidCalled` (the showdown) and `last_showdown` are public by design.
+- `legal_actions` lists `Call` first, so first-legal-action playouts end rounds instead of bidding
+  up.
+- **Contract bundle.** Private variants for both seats: at the opening, with a standing bid, and
+  near the end. Outcome variants, the opening roll, and `revealing_actions=(Call(),)`. Passes the
+  full shared contract, including the one-step indistinguishability check.
+
+#### Slice 2 - CLI, MCP, and Ollama adapters; per-seat live CLI — ✅ COMPLETE (2026-09-24)
+
+- **CLI adapter.**
+  - Input: `bid Q F` (also `b Q F`, `Q F`, `QxF`) or `call`/`liar`.
+  - Flags: `--liarsdice-dice` and `--liarsdice-faces`, with argparse bounds.
+  - The renderer shows exactly the view it is given: its own hand, no hands, or both in the full
+    replay. It is ASCII-only; `▶` crashed cp1252 Windows consoles, and Pig's renderer had the same
+    problem.
+- **The live CLI (`arena.cli.play`) now renders hidden games from the human's seat.**
+  `play_match(human_seats=...)`:
+  - one human: that seat's view;
+  - two humans (hot-seat): the seat to move, which is inherently leaky and documented;
+  - no human: the public view.
+
+  Perfect-information games are unchanged, and the saved JSON stays full.
+- **MCP:** a `oneOf` bid/call schema with `additionalProperties: false`.
+- **Ollama:** `LiarsDicePromptBuilder` is built from the observation, so it only knows the seat's
+  own hand. It gives per-face tallies, the standing bid and the last showdown. `format_spec` uses
+  an action enum, and the parser rejects bool/str quantities and non-raising bids.
+#### Adversarial reviews of Slices 1-2 — fixes landed (2026-09-24)
+
+- **Slice 1** (the game): **no leak and no rules bug.** The reviewer checked 300 counterfactual
+  matches (5,924 viewer comparisons, zero differences) and 2,000 rule-fuzzed matches with 9,721
+  calls. Low findings, all fixed with tests:
+  - a finished match claimed a roll was pending, and marked the eliminated seat as to move;
+  - `observation(state, -1)` returned seat 1's hand;
+  - `load_state` accepted impossible states (unbounded faces, bids above the dice in play,
+    inconsistent showdowns: `Showdown` now validates its count and loser);
+  - `apply_chance` could store list-valued hands.
+
+  The contract bundle gained variants after a showdown and at a later chance node.
+- **Slice 2** (adapters): **no leak.** The reviewer checked that a fake Ollama opponent writing its
+  hand into its thoughts and retries never reached the human's screen. Fixed:
+  - the prompt invited an impossible raise when only a call was legal, so small models burned their
+    retries (legality is now stated from the actual legal actions);
+  - MCP clients were never told a game's action schema (`join_match` now returns it);
+  - Connect 4's `●` crashed cp1252 consoles (the CLI entry points now replace unencodable
+    characters);
+  - **pre-existing SDK bug:** `action_rejected` was an unhandled envelope type, so any rejected
+    move killed an SDK client. It is now an event, and the callback loop chooses again.
+
+#### Slice 3 - Wire acceptance, demo, and real agent runs — ✅ COMPLETE (2026-09-24)
+
+- `arena.games.liarsdice.audit.leaked_hand_paths`: a structural check for hands a viewer may not
+  see, used by the tests and the demo.
+- `tests/integration/test_liarsdice_wire.py`, over real TCP:
+  - no frame to either seat or a spectator carries a hidden hand;
+  - against the server's full transcript, every hand a seat is shown is its own, for the current
+    round;
+  - the spectator sees every bid and every reveal;
+  - the full transcript replays, opening roll included;
+  - two matches differing only in seat 1's hand look identical to seat 0 and to the spectator until
+    the first showdown;
+  - a mid-round reconnect replays exactly the turns the seat saw live, and nothing hidden.
+- `examples/run_liarsdice_demo.py` has two Ollama seats and a spectator. It audits each seat's
+  transcript and the spectator stream instead of replaying: seat transcripts are views, and differ
+  by design.
+- **Two agent-facing bugs found by running real agents:**
+  1. **The SDK ran the synchronous `choose()` on the event loop.** An LLM thinking past the
+     heartbeat window left pings unanswered, and the server dropped a healthy seat. `choose()` now
+     runs in a worker thread while a concurrent receive answers pings.
+  2. **`probe_models` rejected untagged names** (`llama3.2` vs `llama3.2:latest`).
+- **Acceptance, real stack:**
+  - Over the server, two `llama3.2` agents finished a four-round match: 0 leaks in either seat
+    transcript, and the spectator saw 17 bids and 4 reveals with 0 leaks.
+  - Locally, `arena.cli.play` with two agents showed the public view, and the saved full transcript
+    replays.
+  - The demo defaults to temperature 0.5, so a retry isn't the same illegal answer again, and to a
+    5-minute turn deadline for local models.
+- **The adversarial review of Slice 3 found five issues, fixed with tests** (mostly in
+  `tests/integration/test_sdk_slow_agents.py`, against a real server):
+  - **SDK error reporting.** An abort arriving while the agent decides was masked as
+    `ProtocolError`; it is now `MatchAbortedError`.
+  - **Retry budget.** A spent budget still triggered another (possibly minutes-long) decision.
+    The server's `action_rejected.retries_remaining` was **one too low on every non-final
+    rejection**, contradicting protocol §8.6, so a compliant client stopped one attempt early.
+    The server now reports the attempts still allowed; `0` appears only right before the abort.
+  - **Cancellation.** Cancelling `connect()` waited out a running decision; decisions now run on
+    a daemon thread.
+  - **MCP.** An illegal `make_move` waited out its timeout with no reason; it now returns the
+    rejection with its reason and remaining retries.
+  - **Probe.** `probe_models` misread `registry:port/model` names.
+
+  The wire test's ground truth now checks every hand a seat receives (live snapshots,
+  observations, and each turn of the final transcript) against that seat's actual hand for that
+  round.
+- 994 tests pass.
 
 ---
 

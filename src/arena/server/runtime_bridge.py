@@ -1398,7 +1398,7 @@ async def run_match(
                         schema_version=1,
                         turn_id=turn_id,
                         error_code=domain_err.code,
-                        retries_remaining=retries_left - 1 if retries_left > 0 else 0,
+                        retries_remaining=retries_left,
                     )
 
                     if retries_left == 0:
@@ -1425,10 +1425,15 @@ async def run_match(
                         await _close_both(conns, WS_CLOSE_NORMAL, "adapter_error")
                         return
 
-                    retries_left -= 1
+                    # Protocol 8.6: retries_remaining counts the further attempts
+                    # still allowed, so it is reported before this rejection spends
+                    # one; 0 appears only on the final rejection, right before the
+                    # abort. (Reporting it after decrementing made a compliant
+                    # client stop one attempt early.)
                     rej_env = _make_rejected_env(
                         session, active_seat, turn_id, domain_err, retries_left
                     )
+                    retries_left -= 1
                     await _send(active_conn, rej_env)
                     continue
 
@@ -1445,7 +1450,7 @@ async def run_match(
                         schema_version=1,
                         turn_id=turn_id,
                         error_code=domain_err.code,
-                        retries_remaining=retries_left - 1 if retries_left > 0 else 0,
+                        retries_remaining=retries_left,
                     )
 
                     if retries_left == 0:
@@ -1471,10 +1476,15 @@ async def run_match(
                         await _close_both(conns, WS_CLOSE_NORMAL, "adapter_error")
                         return
 
-                    retries_left -= 1
+                    # Protocol 8.6: retries_remaining counts the further attempts
+                    # still allowed, so it is reported before this rejection spends
+                    # one; 0 appears only on the final rejection, right before the
+                    # abort. (Reporting it after decrementing made a compliant
+                    # client stop one attempt early.)
                     rej_env = _make_rejected_env(
                         session, active_seat, turn_id, domain_err, retries_left
                     )
+                    retries_left -= 1
                     await _send(active_conn, rej_env)
                     continue
 

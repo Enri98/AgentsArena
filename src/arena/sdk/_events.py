@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from arena.adapters.websocket.messages import (
+    ActionRejectedBody,
     ErrorBody,
     MatchAbortedBody,
     MatchFinishedBody,
@@ -50,6 +51,13 @@ class ErrorEvent:
     body: ErrorBody
 
 
+@dataclass(frozen=True)
+class ActionRejectedEvent:
+    """The server refused the last action; the same turn is still open."""
+
+    body: ActionRejectedBody
+
+
 SdkEvent = (
     WelcomeEvent
     | ObservationEvent
@@ -58,9 +66,11 @@ SdkEvent = (
     | MatchFinishedEvent
     | MatchAbortedEvent
     | ErrorEvent
+    | ActionRejectedEvent
 )
 
 __all__: Sequence[str] = [
+    "ActionRejectedEvent",
     "ErrorEvent",
     "MatchAbortedEvent",
     "MatchFinishedEvent",

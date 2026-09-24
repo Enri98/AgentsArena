@@ -247,7 +247,30 @@ def _pig_target(text: str) -> int:
     return value
 
 
+def _bounded(low: int, high: int) -> Any:
+    def parse(text: str) -> int:
+        try:
+            value = int(text)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"not an integer: {text!r}") from None
+        if not low <= value <= high:
+            raise argparse.ArgumentTypeError(f"must be between {low} and {high}")
+        return value
+
+    return parse
+
+
+def _tolerate_unencodable_output() -> None:
+    """Boards use glyphs like ● that a cp1252 Windows console cannot encode;
+    replace them rather than crash mid-match."""
+
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:
+        reconfigure(errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _tolerate_unencodable_output()
     parser = argparse.ArgumentParser(prog="python -m arena.cli.play")
     parser.add_argument("--game", choices=sorted(cli_game_ids()), required=True)
     parser.add_argument("--seat-0", required=True, dest="seat_0")
@@ -261,6 +284,12 @@ def main(argv: list[str] | None = None) -> int:
         "--nim-pile-size", type=int, default=7, dest="nim_pile_size"
     )
     parser.add_argument("--pig-target", type=_pig_target, default=50, dest="pig_target")
+    parser.add_argument(
+        "--liarsdice-dice", type=_bounded(1, 6), default=3, dest="liarsdice_dice"
+    )
+    parser.add_argument(
+        "--liarsdice-faces", type=_bounded(2, 9), default=6, dest="liarsdice_faces"
+    )
     parser.add_argument("--ollama-host", default="http://localhost:11434", dest="ollama_host")
     parser.add_argument(
         "--ollama-temperature", type=float, default=0.3, dest="ollama_temperature"
@@ -366,6 +395,9 @@ def main(argv: list[str] | None = None) -> int:
         config,
         (player0, player1),
         policies,
+        human_seats=tuple(
+            seat for seat, raw in ((0, raw_policy0), (1, raw_policy1)) if raw is None
+        ),
         out_dir=args.out_dir,
         retry_sink=retry_sink if retry_sink else None,
         decision_sink=decision_sink if decision_sink else None,

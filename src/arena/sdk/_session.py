@@ -22,6 +22,7 @@ from arena.adapters.websocket.messages import (
     WelcomeBody,
 )
 from arena.sdk._events import (
+    ActionRejectedEvent,
     ErrorEvent,
     MatchAbortedEvent,
     MatchFinishedEvent,
@@ -243,6 +244,8 @@ def _env_to_event(env: object) -> SdkEvent:  # type: ignore[return]
         return MatchAbortedEvent(body=payload)
     if t == "error":
         return ErrorEvent(body=payload)
+    if t == "action_rejected":
+        return ActionRejectedEvent(body=payload)
     raise ProtocolError(0, f"Unhandled envelope type: {t!r}")
 
 

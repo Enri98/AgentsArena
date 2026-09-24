@@ -15,6 +15,7 @@ from __future__ import annotations
 # Importing the per-game submodules fires their top-level register_cli_adapter()
 # calls. Add new games here.
 from arena.cli.games import connect4 as _connect4  # noqa: E402, F401
+from arena.cli.games import liarsdice as _liarsdice  # noqa: E402, F401
 from arena.cli.games import nim as _nim  # noqa: E402, F401
 from arena.cli.games import pig as _pig  # noqa: E402, F401
 from arena.cli.games import tictactoe as _tictactoe  # noqa: E402, F401

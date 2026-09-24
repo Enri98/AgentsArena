@@ -182,15 +182,18 @@ def test_existing_engines_and_serializers_still_satisfy_their_protocols() -> Non
         assert isinstance(definition.serializer, Serializer)
 
 
-def test_shipped_games_declare_no_hidden_information() -> None:
+def test_only_liars_dice_declares_hidden_information() -> None:
+    hidden = {d.game_id for d in build_default_registry().list() if d.has_hidden_information}
+    assert hidden == {"liarsdice"}
+
+
+def test_perfect_information_games_expose_their_full_state_as_the_public_view() -> None:
+    """This equality is what lets a perfect-information game's public view be
+    its full state (and its payloads stay unchanged across Phase 38)."""
+
     for definition in build_default_registry().list():
-        assert definition.has_hidden_information is False
-
-
-def test_shipped_games_expose_their_full_state_as_the_public_view() -> None:
-    """This equality is what makes the Phase 36 spectator channel safe."""
-
-    for definition in build_default_registry().list():
+        if definition.has_hidden_information:
+            continue
         state = definition.rules_engine.initial_state(definition.config_type())
         assert dump_public_state(definition.serializer, state) == definition.serializer.dump_state(
             state

@@ -24,7 +24,7 @@ def _lines(state_payload: Mapping[str, Any]) -> list[str]:
     current = state_payload["current_seat"]
     lines = [f"  Target: {target}"]
     for seat, score in enumerate(scores):
-        marker = "▶" if seat == current else " "
+        marker = ">" if seat == current else " "
         lines.append(f"  {marker} Seat {seat}: {score}")
     lines.append(f"  Turn total: {state_payload['turn_total']}")
     return lines

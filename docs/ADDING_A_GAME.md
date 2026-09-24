@@ -368,7 +368,8 @@ Pig's does.
 
 Since Phase 38 a game may keep information private to a seat (a hand of cards,
 dice under a cup). `arena.testing.hidden_factory` (the secrets game) is the
-minimal reference; Liar's Dice (Phase 39) will be the full one.
+minimal reference; Liar's Dice (`src/arena/games/liarsdice/`, with
+`tests/contract/test_liarsdice_contract.py`) is the full one.
 
 1. Set `has_hidden_information=True`. Registration then requires:
    - `rules_engine.public_state(state)`
