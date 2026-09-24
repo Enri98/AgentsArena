@@ -18,6 +18,9 @@ PIG_ACTION_SCHEMA: dict[str, object] = {
         },
     },
     "required": ["choice"],
+    # The serializer forbids extra keys; say so, or an LLM adding e.g. a
+    # "thought" field is rejected with no hint why.
+    "additionalProperties": False,
 }
 
 

@@ -39,7 +39,7 @@ def _spectator_hello() -> SpectatorHelloEnvelope:
         payload=SpectatorHelloBody(
             client_name="test-spectator",
             client_version="0.1.0",
-            supported_schema_versions=[1, 2],
+            supported_schema_versions=[1, 2, 3],
         ),
     )
 

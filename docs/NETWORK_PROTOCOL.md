@@ -1,7 +1,7 @@
 # AgentsArena Network Protocol
 
-Current wire `schema_version`: **2** (Phase 37). Versions 1 and 2 are both accepted on decode;
-see §7.1 for what changed.
+Current wire `schema_version`: **3** (Phase 38). Versions 1-3 are all accepted on decode, but a
+client must list 3 in `supported_schema_versions` to be served; see §7.1 for what changed.
 
 This document is the language-agnostic source of truth for the wire protocol that connects remote
 agents to an `arena.server` instance. Every implementation — the reference Python SDK, future
@@ -66,9 +66,9 @@ SDK or server APIs.
 The unguessable `match_id` (>=128 bits of entropy via `secrets.token_urlsafe(16)`) is the
 capability. Possession of the URL grants the right to join the match.
 
-> **Known v1 information leak:** `GET /matches/{match_id}` exposes the opponent's `label` and the
-> chosen `match_config` to any holder of the `match_id`. For the v1 trust model (you and a friend
-> share the id out-of-band) this is by design. v2 will redact per-viewer.
+> **Information exposed by `GET /matches/{match_id}`:** player labels, lifecycle, whose turn it is,
+> and the turn count, to any holder of the `match_id`. It does **not** expose `match_config` or any
+> game state. For the capability-by-id trust model this is by design.
 
 ### 4.1 HTTP request and response shapes
 
@@ -86,11 +86,15 @@ Request body (JSON):
   ],
   "per_turn_deadline_ms": 30000,
   "per_action_retry_budget": 3,
-  "disconnect_grace_ms": 30000
+  "disconnect_grace_ms": 30000,
+  "supported_schema_versions": [3]
 }
 ```
 
 - `game_id` must appear in `GET /games`.
+- `supported_schema_versions` (optional, v3) lists the wire versions the creating client reads. If
+  it is given and does not include the server's version, creation fails with `400`
+  `schema_version_unsupported`. Without it the mismatch surfaces later, at `hello`, as `4400`.
 - `game_config` must validate against the registered serializer's config schema.
 - `players` length must equal the seat count for the game (currently always 2).
 - `per_turn_deadline_ms` is the wall-clock budget per `observation_request`. Default 30000.
@@ -107,7 +111,7 @@ Success response (`HTTP 201 Created`):
   "match_id": "abc123...",
   "game_id": "connect4",
   "game_schema_version": 1,
-  "schema_version": 1,
+  "schema_version": 3,
   "lifecycle": "created",
   "per_turn_deadline_ms": 30000,
   "per_action_retry_budget": 3,
@@ -123,6 +127,8 @@ Error responses:
 - `HTTP 400` `{"error": {"code": "invalid_config", "message": "...", "details": {...}}}` — config
   validation failed; `details` carries the originating `DomainErrorPayload`.
 - `HTTP 400` `{"error": {"code": "invalid_request", "message": "..."}}` — malformed body.
+- `HTTP 400` `{"error": {"code": "schema_version_unsupported", "message": "..."}}` — the client's
+  `supported_schema_versions` does not include the server's wire version (v3).
 - `HTTP 429` `{"error": {"code": "rate_limited", "message": "..."}}` — match-creation cap hit.
 - `HTTP 500` `{"error": {"code": "server_error", "message": "..."}}` — internal failure.
 
@@ -135,7 +141,7 @@ Success (`HTTP 200`):
   "match_id": "...",
   "game_id": "connect4",
   "lifecycle": "running",
-  "schema_version": 1,
+  "schema_version": 3,
   "current_seat": 0,
   "turn_count": 4,
   "players": [
@@ -238,6 +244,7 @@ inside known message types are also ignored.
 | Version | Shipped in | What changed |
 |---------|-----------|--------------|
 | 1 | v1 (Phases 0-35) | Initial protocol. |
+| 3 | Phase 38 | **Per-recipient payloads**, so hidden-information games can be served. `turn_committed` carries the recipient's own `post_snapshot`, a new `public_snapshot`, and only the events and chance-outcome parts the recipient may see. Events record `is_public`/`audience` when private. Transcripts (runtime and match) declare `view` (`"full"`, `"seat"`, `"public"`) and `viewer_seat`. Seats get `"seat"` transcripts and spectators `"public"` ones, and only a `"full"` transcript can be replayed. `welcome.match_config` is the seat's view, and `welcome.transcript` replays the seat's history on reconnect (§11). `POST /matches` accepts `supported_schema_versions`. New abort reason `turn_limit_exceeded`: the server caps every match's length. For a perfect-information game every view is the full one, so payloads differ from v2 only by the added fields. |
 | 2 | Phase 37 | Transcript turns gained a `kind`. A **chance turn** has no seat and no action — nobody chose it — so `turns[].seat` and `turns[].action` became nullable in `match_finished.transcript` and `match_aborted.transcript`. `turn_committed.events` became load-bearing: it used to be an empty list, harmless while every game was deterministic because a client could recompute anything it missed, but a chance outcome cannot be recomputed. A chance turn carries the recorded `outcome` (game-specific JSON; null on action turns). Replay applies it and never re-rolls, so a transcript validates without the seed. **The seed is never sent**: the server's match object holds it, and it appears in no config, state, snapshot, event, or transcript. |
 
 **Decode and emit are separate.** A server emits its own `schema_version` but accepts every version
@@ -308,7 +315,8 @@ If the seat is already occupied by a live connection, the server closes with cod
     {"player_id": "p0", "label": "alice", "seat": 0},
     {"player_id": "p1", "label": "bob", "seat": 1}
   ],
-  "match_config": { /* the validated game config object */ }
+  "match_config": { /* this seat's view of the validated game config */ },
+  "transcript": null
 }
 ```
 
@@ -318,7 +326,11 @@ If the seat is already occupied by a live connection, the server closes with cod
   and is rotated on every successful resume. A token presented for a different seat or match is
   rejected and the connection closes with `4401` (`unauthorized`).
 - `match_config` is the validated game config that was sent to `POST /matches`, normalized by the
-  game's serializer.
+  game's serializer, **as this seat may see it** (v3). Games keep secrets out of config (a seed
+  there would be public), so in practice this is the whole config.
+- `transcript` (v3) is null on a first connect. On a **reconnect** it is this seat's runtime
+  transcript so far (`view: "seat"`), the replay §11 promises. It holds exactly the turns the seat
+  was sent live, so reconnecting recovers what was missed and adds no information.
 - `per_turn_deadline_ms`, `per_action_retry_budget`, and `disconnect_grace_ms` echo the values
   locked at match creation; SDKs use them to size internal state.
 
@@ -405,7 +417,19 @@ already-known, otherwise replied with an `error` of code `match_already_finished
 }
 ```
 
-Sent once per committed turn. Both seats and every spectator receive it.
+Sent once per committed turn. Both seats and every spectator receive it, **each in its own
+view** (v3):
+
+- `post_snapshot` is the recipient's view: its seat's for a seat, the public view for a spectator.
+- `public_snapshot` (v3) is the public view, the same for every recipient. For a
+  perfect-information game it equals `post_snapshot`.
+- `events` holds only the events the recipient may see. A domain event may be private to some
+  seats (for example "you were dealt these dice"). Its serialized form then carries
+  `"is_public": false` and `"audience": [seats]`. A public event carries neither key.
+- `turn_record.outcome` of a chance turn is the recipient's view of the outcome. A spectator may
+  get `{}` for a private deal.
+- `turn_index` is **0-based** here and in transcripts. (`TurnAccepted` runtime events count
+  1-based.)
 
 Since v2 one step can commit several turns. An accepted action is followed by one `turn_committed`
 for each chance node it leads to (for example the die roll after a Pig `roll`). A game that opens at
@@ -585,20 +609,22 @@ negotiation in v1.
   `4410` (`match_not_found`).
 - **Resume protocol**: reconnecting client sends `hello` with `resume_token`. Server validates the
   token's `(match_id, seat)` binding; mismatch closes with `4401` (`unauthorized`). On success the
-  server responds with `welcome` containing the latest lifecycle and a freshly-rotated
-  `resume_token`, then replays the runtime transcript via existing `dump_runtime_transcript(...)`
-  so the client reaches **logically equivalent state** to a fresh joiner that received the full
-  history (note: framing is not guaranteed byte-identical, only the resulting state is). If the
-  reconnecting seat is the active seat, the in-flight `observation_request` is re-sent **after**
-  the transcript replay so the client always knows what to act on. After replay, normal flow
-  resumes.
+  server responds with `welcome` containing the latest lifecycle, a freshly-rotated
+  `resume_token`, and (v3) **`welcome.transcript`: the seat's own transcript so far**. The replay
+  rides inside the welcome rather than as separate frames. The client reaches **logically
+  equivalent state** to one that never disconnected. Framing is not byte-identical; the resulting
+  state is. The server then sends `match_state` and, if the reconnecting seat is the active seat,
+  re-sends the in-flight `observation_request`, so the client always knows what to act on.
+- **Reconnects are only fully supported for the active seat.** The server notices an off-turn
+  seat's disconnect only when that seat's turn arrives. An off-turn client that reconnects early
+  may miss turns committed between its welcome and that point. Known limitation; the match-owned
+  driver planned for Phase 41 is the fix.
 
-**v1 information-model assumption.** The full-history replay is safe only because Connect 4 and
-Tic-Tac-Toe are public-move perfect-information games: every move is broadcast to both seats the
-moment it happens, so a reconnecting peer learns nothing it would not have learned by staying
-connected. **Games with private state (hidden cards, fog of war, simultaneous moves) require a v2
-extension** that scopes transcript replay per-seat. v1 servers must reject registration of any
-game whose `GameDefinition` declares hidden information.
+**Information model (v3).** A reconnecting seat is replayed its *own* view: the same per-seat
+redaction as the live frames, so it learns nothing it would not have learned by staying
+connected. This is what makes resuming safe for hidden-information games. v1 and v2 relied on
+every game being perfect-information, and refused to serve any game that declared hidden
+information.
 
 ## 12. Idempotency
 
@@ -765,7 +791,8 @@ keep `/schemas/payloads` byte-stable for a given `schema_version`; any change is
 - `ResultPayload`: `{kind: "win"|"draw", winner_seat, ...}` mirroring `arena.core.results`.
 - `AbortMetadataPayload`: `{reason, message, cause_type, cause_message}` from
   `arena.runtime.AbortMetadata`. `reason` is one of the documented runtime abort codes
-  (e.g. `peer_disconnected`, `turn_deadline_expired`, `adapter_error`, `user_quit`).
+  (e.g. `peer_disconnected`, `turn_deadline_expired`, `adapter_error`, `user_quit`,
+  `turn_limit_exceeded`).
 - `RuntimeEventPayload`: `{event_scope: "runtime", event_type, ...event-specific fields}`.
 
 ## 18. Message broadcast matrix
@@ -800,8 +827,11 @@ Notes:
   the full one for a perfect-information game). There is no separate history message for a running
   match.
 - Adding spectators required **no schema bump**: `spectator_hello` and `spectator_welcome` are new
-  message types, which §7 permits, and spectators receive the existing `post_snapshot`. Phase 38
-  introduces `public_snapshot` and per-seat redaction in the same bump that carries hidden
-  information.
+  message types, which §7 permits. v3 then made every broadcast **per recipient**: each seat gets
+  its own view and spectators the public view (§8.7). A spectator is sent no `turn_committed` for
+  a turn its `spectator_welcome` transcript already carried.
+- The server caps every match's length (default 5000 turns). A game that can loop forever
+  (two Pig seats that only ever roll) aborts with `turn_limit_exceeded` rather than pinning
+  server memory.
 - `match_state` is the **only** lifecycle-transition signal; SDKs should drive their internal
   state machine off it rather than off `welcome.lifecycle` after the initial handshake.

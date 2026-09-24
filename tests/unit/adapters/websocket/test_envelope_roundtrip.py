@@ -81,7 +81,7 @@ def test_hello_roundtrip() -> None:
         payload=HelloBody(
             client_name="arena-sdk-python",
             client_version="0.1.0",
-            supported_schema_versions=[1, 2],
+            supported_schema_versions=[1, 2, 3],
             requested_seat=_SEAT,
         ),
     )

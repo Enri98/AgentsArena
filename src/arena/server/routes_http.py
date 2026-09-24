@@ -49,6 +49,11 @@ class CreateMatchRequest(BaseModel):
     per_turn_deadline_ms: int = Field(default=DEFAULT_PER_TURN_DEADLINE_MS)
     per_action_retry_budget: int = Field(default=DEFAULT_PER_ACTION_RETRY_BUDGET)
     disconnect_grace_ms: int = Field(default=DEFAULT_DISCONNECT_GRACE_MS)
+    #: Phase 38, optional: the wire versions the creating client can read. When
+    #: given and the server's version is not among them, creation is refused
+    #: with 400, not later at hello with 4400. Most important for a
+    #: hidden-information game, which an older wire cannot serve without leaking.
+    supported_schema_versions: list[int] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -117,6 +122,17 @@ async def create_match_handler(request: Request) -> JSONResponse:
         )
     except InvalidRequest as exc:
         return _error_response(400, "invalid_request", exc.message)
+
+    if (
+        body.supported_schema_versions is not None
+        and WIRE_SCHEMA_VERSION not in body.supported_schema_versions
+    ):
+        return _error_response(
+            400,
+            "schema_version_unsupported",
+            f"This server speaks wire schema_version {WIRE_SCHEMA_VERSION}; the client "
+            f"supports {body.supported_schema_versions}.",
+        )
 
     limiter: RateLimiter | None = getattr(request.app.state, "rate_limiter", None)
     if limiter is not None:

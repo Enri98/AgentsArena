@@ -174,8 +174,9 @@ def test_validate_match_transcript_accepts_a_terminal_connect4_replay() -> None:
             "Turn 7 result mismatch",
         ),
         (
+            # The engine's WrongPlayer is chained as the cause (see below).
             _tamper_first_recorded_seat,
-            WrongPlayer,
+            ValueError,
             "The provided seat is not active.",
         ),
     ],
@@ -211,12 +212,13 @@ def test_load_match_transcript_rejects_invalid_and_foreign_game_ids() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_transcript_schema_bumped_for_turn_kinds() -> None:
-    """Chance turns carry no seat and no action, which an older reader cannot
-    interpret — a shape change, so a version bump rather than an additive field.
+def test_transcript_schema_bumped_for_views() -> None:
+    """v2 (Phase 37): chance turns. v3 (Phase 38): a transcript declares its view,
+    and a redacted one cannot be read as if it were full — a bump, not an
+    additive field.
     """
 
-    assert MATCH_TRANSCRIPT_SCHEMA_VERSION == 2
+    assert MATCH_TRANSCRIPT_SCHEMA_VERSION == 3
 
 
 def test_action_turns_are_labelled_and_complete() -> None:
@@ -254,3 +256,12 @@ def test_a_version_1_transcript_still_loads() -> None:
     assert loaded.schema_version == 1
     assert [turn.kind for turn in loaded.turns] == ["action", "action"]
     assert validate_match_transcript(Connect4GameDefinition, payload) is not None
+
+
+def test_an_engine_rejection_during_replay_is_a_chained_value_error() -> None:
+    payload = copy.deepcopy(dump_match_transcript(_play_connect4_win()))
+    _tamper_first_recorded_seat(payload)
+
+    with pytest.raises(ValueError) as exc:
+        validate_match_transcript(Connect4GameDefinition, payload)
+    assert isinstance(exc.value.__cause__, WrongPlayer)

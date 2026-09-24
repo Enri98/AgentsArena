@@ -254,3 +254,36 @@ def test_deterministic_games_declare_no_chance_nodes() -> None:
     for definition in build_default_registry().list():
         if definition.game_id in deterministic:
             assert definition.has_chance_nodes is False
+
+
+# ---------------------------------------------------------------------------
+# Adversarial review of Phase 37
+# ---------------------------------------------------------------------------
+
+
+def test_chance_hooks_without_the_flag_are_rejected() -> None:
+    """Hooks but no flag: no generator, so the first chance node would deadlock."""
+
+    coin = build_coin_game_definition()
+    with pytest.raises(IncompleteChanceSupport, match="has_chance_nodes"):
+        validate_chance_support(dataclasses.replace(coin, has_chance_nodes=False))
+
+
+@pytest.mark.parametrize("seed", [-1, 2**128, True, 1.5, "7"])
+def test_out_of_range_seeds_fail_at_construction(seed: object) -> None:
+    with pytest.raises(ValueError):
+        ChanceRng(seed=seed)  # type: ignore[arg-type]
+
+
+def test_a_bad_seed_fails_at_start_not_mid_match() -> None:
+    from arena.match import start_match
+    from arena.testing.chance_factory import CoinGameConfig
+
+    with pytest.raises(ValueError):
+        start_match(build_coin_game_definition(), CoinGameConfig(), seed=-1)
+
+
+def test_the_seed_error_message_does_not_echo_the_seed() -> None:
+    with pytest.raises(ValueError) as exc:
+        ChanceRng(seed=2**128 + 987654321)
+    assert "987654321" not in str(exc.value)

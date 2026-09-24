@@ -112,6 +112,8 @@ def test_running_status_maps_to_deterministic_json_safe_screen_payload() -> None
         "latest_snapshot": runtime_status["latest_snapshot"],
         "state_payload": runtime_status["latest_snapshot"]["state"],
         "abort": None,
+        "view": "full",
+        "viewer_seat": None,
     }
     assert "events" not in screen_status
     assert UIMatchStatusPayload.model_validate(screen_status).match_id == "ui-running"

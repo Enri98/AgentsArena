@@ -87,7 +87,11 @@ class WelcomeBody(BaseModel):
     per_action_retry_budget: int = Field(ge=0)
     disconnect_grace_ms: int = Field(ge=0)
     players: list[PlayerInfoBody]
+    #: The seat's own view of the config (Phase 38).
     match_config: dict[str, Any] = Field(default_factory=dict)
+    #: Phase 38: on a reconnect, the seat's transcript so far (protocol §11).
+    #: Null on a first connect, before the match has started.
+    transcript: RuntimeTranscriptPayload | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -152,8 +156,12 @@ class TurnCommittedBody(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     turn_record: dict[str, Any]
+    #: The recipient's view: a seat's own, or the public's for a spectator.
     post_snapshot: dict[str, Any]
     events: list[dict[str, Any]] = Field(default_factory=list)
+    #: Phase 38: the public view, identical for every recipient. Equal to
+    #: post_snapshot for a perfect-information game.
+    public_snapshot: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------

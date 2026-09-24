@@ -35,9 +35,9 @@ from arena.sdk.errors import HandshakeError, ProtocolError, close_code_to_error
 
 CLIENT_NAME = "arena-sdk-python"
 CLIENT_VERSION = "0.1.0"
-# Phase 37 bumped the wire to 2 (transcripts carry chance turns). The SDK
-# reads both, so it advertises both and a v1 server still accepts it.
-SUPPORTED_SCHEMA_VERSIONS = [1, 2]
+# Phase 37 bumped the wire to 2 (transcripts carry chance turns), Phase 38 to 3
+# (per-seat views). The SDK reads all three, so it advertises all three.
+SUPPORTED_SCHEMA_VERSIONS = [1, 2, 3]
 
 
 class Session:
@@ -212,6 +212,16 @@ class Session:
     @property
     def welcome(self) -> WelcomeBody:
         return self._welcome
+
+    @property
+    def replayed_transcript(self) -> object | None:
+        """After :meth:`reconnect`, this seat's transcript so far (wire v3, §11).
+
+        The seat's own view: it recovers what was missed while disconnected and
+        nothing the seat was not already entitled to. None on a first connect.
+        """
+
+        return self._welcome.transcript
 
 
 def _env_to_event(env: object) -> SdkEvent:  # type: ignore[return]

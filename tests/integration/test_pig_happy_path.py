@@ -178,3 +178,42 @@ def test_seatless_chance_turns_do_not_confuse_the_spectator_stream(
     assert "observation_request" not in types
     assert types[-1] == "match_finished"
 
+
+
+def _always_roll(_: Any) -> dict[str, Any]:
+    return {"choice": "roll"}
+
+
+def test_a_match_that_never_ends_is_capped_by_the_server() -> None:
+    """Two seats that only roll never bank a point; the server bounds the match.
+
+    Found by adversarial review of Phase 37: without a cap, one client holding
+    both seat URLs could grow a transcript without limit.
+    """
+
+    from arena.server.app import create_app
+    from arena.server.rate_limits import RateLimiter
+    from tests.integration.conftest import serve
+
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+    app.state.max_turns_per_match = 40
+
+    async def run(server: RunningServer) -> Any:
+        match = _create_match(server.http_base_url)
+        async with (
+            await connect(match["seat_0_url"]) as ws0,
+            await connect(match["seat_1_url"]) as ws1,
+        ):
+            results = await asyncio.gather(
+                play_scripted(ws0, 0, _always_roll),
+                play_scripted(ws1, 1, _always_roll),
+                return_exceptions=True,
+            )
+        return results
+
+    with serve(app) as server:
+        results = asyncio.run(asyncio.wait_for(run(server), timeout=60))
+
+    for outcome in results:
+        assert isinstance(outcome, RuntimeError)
+        assert "turn_limit_exceeded" in str(outcome)

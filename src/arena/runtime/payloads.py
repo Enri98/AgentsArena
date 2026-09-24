@@ -12,11 +12,19 @@ from arena.core.actions import Action
 from arena.core.config import BaseGameConfig
 from arena.core.game_definition import GameDefinition
 from arena.core.observations import Observation
+from arena.core.public_view import FULL_VIEW, FullView, Viewer, check_viewer
 from arena.core.results import RuleResult
 from arena.core.serializer import JSONMapping, SnapshotEnvelope
+from arena.match.local_match import build_snapshot_for_viewer
 from arena.match.transcript import (
+    VIEW_FULL,
+    VIEW_SEAT,
     LoadedMatchTranscript,
+    TranscriptView,
     dump_match_transcript,
+    dump_match_transcript_for_viewer,
+    redact_match_transcript,
+    transcript_view_for,
     validate_match_transcript,
 )
 from arena.runtime.models import (
@@ -42,16 +50,23 @@ ResultT = TypeVar("ResultT", bound=RuleResult)
 
 # Moves with RUNTIME_TRANSCRIPT_SCHEMA_VERSION: arena.ui cross-checks that a
 # status and a transcript come from the same runtime payload generation.
-RUNTIME_STATUS_SCHEMA_VERSION = 2
+RUNTIME_STATUS_SCHEMA_VERSION = 3
 
 #: Versions the status validator accepts.
-SUPPORTED_RUNTIME_STATUS_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2)
+SUPPORTED_RUNTIME_STATUS_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3)
 # Bumped to 2 in Phase 37: the embedded match transcript's turns gained a
 # `kind`, and a chance turn carries no seat and no action.
-RUNTIME_TRANSCRIPT_SCHEMA_VERSION = 2
+# Bumped to 3 in Phase 38: payloads declare their `view` (full, one seat's, or
+# the public's), and a redacted one omits hidden information.
+RUNTIME_TRANSCRIPT_SCHEMA_VERSION = 3
 
-#: Versions the transcript validator accepts. v1 predates chance nodes.
-SUPPORTED_RUNTIME_TRANSCRIPT_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2)
+#: Versions the transcript validator accepts. v1 predates chance nodes; v1 and
+#: v2 predate views and are always full.
+SUPPORTED_RUNTIME_TRANSCRIPT_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3)
+
+#: Runtime events that carry an agent's own reasoning. In a hidden-information
+#: game a "thought" can reveal a hand, so a viewer sees only its own seat's.
+_SEAT_PRIVATE_RUNTIME_EVENTS = (PolicyDecided, PolicyRetried)
 
 
 class RuntimePlayerPayload(BaseModel):
@@ -99,7 +114,7 @@ class RuntimeSessionStatusPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
     match_id: str = Field(min_length=1)
     game_id: str = Field(min_length=1)
     lifecycle: str = Field(min_length=1)
@@ -109,6 +124,9 @@ class RuntimeSessionStatusPayload(BaseModel):
     result: RuntimeResultPayload | None
     latest_snapshot: SnapshotEnvelope | None
     abort: RuntimeAbortPayload | None
+    #: Phase 38: whose view ``latest_snapshot`` is. See ``TranscriptView``.
+    view: TranscriptView = VIEW_FULL
+    viewer_seat: int | None = None
 
 
 class RuntimeTranscriptPayload(BaseModel):
@@ -118,25 +136,35 @@ class RuntimeTranscriptPayload(BaseModel):
 
     match_id: str = Field(min_length=1)
     game_id: str = Field(min_length=1)
-    # Accepts 1 and 2: a v1 transcript predates chance nodes and stays readable.
-    schema_version: Literal[1, 2]
+    # Accepts every version this build reads; older ones stay readable.
+    schema_version: Literal[1, 2, 3]
     lifecycle: str = Field(min_length=1)
     players: list[RuntimePlayerPayload]
     events: list[RuntimeEventPayload]
     abort: RuntimeAbortPayload | None
     match_transcript: JSONMapping | None
+    #: Phase 38: whose view this is; mirrors ``match_transcript.view``.
+    view: TranscriptView = VIEW_FULL
+    viewer_seat: int | None = None
 
 
 def dump_session_status(
     session: MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    *,
+    viewer: Viewer | FullView = FULL_VIEW,
 ) -> JSONMapping:
-    """Dump the current runtime session status as a JSON-safe mapping."""
+    """Dump the current runtime session status as a JSON-safe mapping.
+
+    ``viewer`` (Phase 38) redacts ``latest_snapshot`` to a seat's view, or the
+    public's for ``None``. The default is the full, unredacted status.
+    """
 
     local_match = session.local_match
     current_seat = None
     latest_snapshot = None
     result = None
     turn_count = 0
+    view, viewer_seat = _view_of(session.definition, viewer)
 
     if local_match is not None:
         turn_count = len(local_match.turns)
@@ -145,6 +173,10 @@ def dump_session_status(
             if local_match.turns
             else local_match.initial_snapshot
         )
+        if not isinstance(viewer, FullView):
+            latest_snapshot = build_snapshot_for_viewer(
+                local_match.definition, local_match.config, local_match.state, viewer
+            )
         if not local_match.rules_engine.is_terminal(local_match.state):
             current_seat = local_match.rules_engine.current_seat(local_match.state)
         result = _dump_rule_result(local_match.rules_engine.result(local_match.state))
@@ -160,14 +192,34 @@ def dump_session_status(
         result=result,
         latest_snapshot=latest_snapshot,
         abort=_dump_abort(session.abort),
+        view=view,
+        viewer_seat=viewer_seat,
     )
     return payload.model_dump(mode="json")
 
 
 def dump_runtime_transcript(
     session: MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    *,
+    viewer: Viewer | FullView = FULL_VIEW,
 ) -> JSONMapping:
-    """Dump a runtime transcript envelope without validating replay."""
+    """Dump a runtime transcript envelope without validating replay.
+
+    ``viewer`` (Phase 38) selects a seat's transcript, or the public's for
+    ``None``. The default is the full transcript, which only the server should
+    hold for a hidden-information game. A perfect-information game's transcript
+    is full for every viewer.
+    """
+
+    view, viewer_seat = _view_of(session.definition, viewer)
+    local_match = session.local_match
+    match_transcript: JSONMapping | None = None
+    if local_match is not None:
+        match_transcript = (
+            dump_match_transcript(local_match)
+            if view == VIEW_FULL
+            else dump_match_transcript_for_viewer(local_match, viewer)  # type: ignore[arg-type]
+        )
 
     payload = RuntimeTranscriptPayload(
         match_id=session.match_id,
@@ -175,15 +227,111 @@ def dump_runtime_transcript(
         schema_version=RUNTIME_TRANSCRIPT_SCHEMA_VERSION,
         lifecycle=session.lifecycle.value,
         players=[_dump_player(player) for player in session.players],
-        events=[_dump_runtime_event(event) for event in session.events],
+        events=[
+            _dump_runtime_event(event)
+            for event in session.events
+            if _runtime_event_visible(event, view, viewer)
+        ],
         abort=_dump_abort(session.abort),
-        match_transcript=(
-            dump_match_transcript(session.local_match)
-            if session.local_match is not None
-            else None
-        ),
+        match_transcript=match_transcript,
+        view=view,
+        viewer_seat=viewer_seat,
     )
     return payload.model_dump(mode="json")
+
+
+def _view_of(definition: object, viewer: Viewer | FullView) -> tuple[TranscriptView, int | None]:
+    if isinstance(viewer, FullView):
+        return VIEW_FULL, None
+    return transcript_view_for(definition, viewer)  # type: ignore[arg-type]
+
+
+def _runtime_event_visible(
+    event: RuntimeEvent, view: TranscriptView, viewer: Viewer | FullView
+) -> bool:
+    if view == VIEW_FULL or not isinstance(event, _SEAT_PRIVATE_RUNTIME_EVENTS):
+        return True
+    return view == VIEW_SEAT and event.seat == viewer
+
+
+def redact_runtime_transcript(
+    definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    payload: JSONMapping,
+    viewer: Viewer,
+) -> JSONMapping:
+    """``viewer``'s transcript from a saved **full** runtime transcript (Phase 38).
+
+    For replaying one seat's perspective of an archived match. The input must be
+    full: a redacted transcript cannot be re-redacted for someone else.
+    """
+
+    check_viewer(viewer)
+    runtime_payload = RuntimeTranscriptPayload.model_validate(payload)
+    if runtime_payload.view != VIEW_FULL:
+        raise ValueError(
+            f"Only a full transcript can be redacted; this one is a "
+            f"{runtime_payload.view!r} view."
+        )
+    view, viewer_seat = transcript_view_for(definition, viewer)
+    match_transcript = runtime_payload.match_transcript
+    if match_transcript is not None:
+        match_transcript = redact_match_transcript(definition, match_transcript, viewer)
+    redacted = runtime_payload.model_copy(
+        update={
+            "schema_version": RUNTIME_TRANSCRIPT_SCHEMA_VERSION,
+            "match_transcript": match_transcript,
+            "events": [
+                event
+                for event in runtime_payload.events
+                if _runtime_event_payload_visible(event, view, viewer)
+            ],
+            "view": view,
+            "viewer_seat": viewer_seat,
+        }
+    )
+    return redacted.model_dump(mode="json")
+
+
+def redact_session_status(
+    definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    payload: JSONMapping,
+    viewer: Viewer,
+) -> JSONMapping:
+    """``viewer``'s status from a saved **full** status payload (Phase 38)."""
+
+    check_viewer(viewer)
+    status = validate_session_status(payload)
+    if status.view != VIEW_FULL:
+        raise ValueError(
+            f"Only a full status can be redacted; this one is a {status.view!r} view."
+        )
+    view, viewer_seat = transcript_view_for(definition, viewer)
+    latest = status.latest_snapshot
+    if latest is not None and view != VIEW_FULL:
+        serializer = definition.serializer
+        latest = build_snapshot_for_viewer(
+            definition,
+            serializer.load_config(latest.config),
+            serializer.load_state(latest.state),
+            viewer,
+        )
+    redacted = status.model_copy(
+        update={
+            "schema_version": RUNTIME_STATUS_SCHEMA_VERSION,
+            "latest_snapshot": latest,
+            "view": view,
+            "viewer_seat": viewer_seat,
+        }
+    )
+    return redacted.model_dump(mode="json")
+
+
+def _runtime_event_payload_visible(
+    event: RuntimeEventPayload, view: TranscriptView, viewer: Viewer
+) -> bool:
+    if view == VIEW_FULL or event.event_type not in ("PolicyDecided", "PolicyRetried"):
+        return True
+    return view == VIEW_SEAT and event.payload.get("seat") == viewer
 
 
 def validate_session_status(payload: JSONMapping) -> RuntimeSessionStatusPayload:
@@ -331,6 +479,8 @@ __all__: Sequence[str] = [
     "RuntimeTranscriptPayload",
     "dump_runtime_transcript",
     "dump_session_status",
+    "redact_runtime_transcript",
+    "redact_session_status",
     "validate_session_status",
     "validate_runtime_transcript",
 ]

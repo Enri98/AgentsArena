@@ -12,7 +12,16 @@ RETRY_BUDGET_MAX: int = 10
 MAX_DISCONNECT_GRACE_MS: int = 600000
 
 GAME_SCHEMA_VERSION: int = 1
-WIRE_SCHEMA_VERSION: int = 1
+# Re-exported from the codec, which owns it. A second literal here drifted: it
+# still said 1 after Phase 37 moved the wire to 2.
+from arena.adapters.websocket.codec import (  # noqa: E402
+    WIRE_SCHEMA_VERSION as WIRE_SCHEMA_VERSION,
+)
+
+# Every match is bounded. A game can loop forever (two Pig seats that only ever
+# roll never bank a point), and one client holding both seat URLs could pin
+# server memory that way. Exceeding it aborts with ``turn_limit_exceeded``.
+MAX_TURNS_PER_MATCH: int = 5000
 
 # Heartbeat defaults (Phase 32).  arena.server owns all deadline/heartbeat logic.
 HEARTBEAT_INTERVAL_MS: int = 20_000

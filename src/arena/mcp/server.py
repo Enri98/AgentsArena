@@ -270,6 +270,10 @@ async def _get_observation(
                 for e in deferred:
                     await handle.queue.put(e)
                 return _ok_result(_event_to_dict(event))
+            elif isinstance(event, TurnCommittedEvent):
+                # Already recorded in handle.history. Re-queueing it would make a
+                # later make_move return this old turn as its own confirmation.
+                continue
             elif isinstance(event, (MatchFinishedEvent, MatchAbortedEvent)):
                 for e in deferred:
                     await handle.queue.put(e)
@@ -281,6 +285,18 @@ async def _get_observation(
                 deferred.append(event)
     except Exception as exc:
         return _error_result("internal_error", str(exc))
+
+
+def _is_own_action(event: TurnCommittedEvent, seat: int) -> bool:
+    """Whether a committed turn is this seat's action rather than another turn.
+
+    Since chance nodes (wire v2) one move can commit several turns, e.g. a Pig
+    roll followed by the die result, so "the next turn_committed" is not
+    necessarily the caller's.
+    """
+
+    record = event.body.turn_record
+    return record.get("kind", "action") == "action" and record.get("seat") == seat
 
 
 async def _make_move(
@@ -326,6 +342,9 @@ async def _make_move(
                     await handle.queue.put(e)
                 return _error_result("timeout", "Timed out waiting for turn confirmation")
 
+            if isinstance(event, TurnCommittedEvent) and not _is_own_action(event, seat):
+                # Someone else's turn, or a chance turn: in history already.
+                continue
             if isinstance(event, (TurnCommittedEvent, ErrorEvent)):
                 for e in deferred:
                     await handle.queue.put(e)

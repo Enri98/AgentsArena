@@ -248,6 +248,8 @@ def test_status_payload_is_ui_ready_without_rendering_assumptions() -> None:
         "result": None,
         "latest_snapshot": session.local_match.initial_snapshot.model_dump(mode="json"),
         "abort": None,
+        "view": "full",
+        "viewer_seat": None,
     }
     validated = validate_session_status(payload)
     assert validated.schema_version == RUNTIME_STATUS_SCHEMA_VERSION
@@ -282,6 +284,8 @@ def test_finished_status_payload_is_stable_and_rendering_agnostic() -> None:
         "result": {"result_type": "Win", "payload": {"seat": 0}},
         "latest_snapshot": last_snapshot,
         "abort": None,
+        "view": "full",
+        "viewer_seat": None,
     }
     validated = validate_session_status(payload)
     assert validated.lifecycle == "finished"
@@ -321,6 +325,8 @@ def test_aborted_status_payload_is_stable_without_runtime_event_list() -> None:
             "cause_type": None,
             "cause_message": None,
         },
+        "view": "full",
+        "viewer_seat": None,
     }
     assert "events" not in payload
     validated = validate_session_status(payload)
@@ -371,8 +377,8 @@ def test_runtime_payload_models_encode_fixed_schema_versions() -> None:
     status_schema = RuntimeSessionStatusPayload.model_json_schema()
     transcript_schema = RuntimeTranscriptPayload.model_json_schema()
 
-    assert status_schema["properties"]["schema_version"]["enum"] == [1, 2]
-    assert transcript_schema["properties"]["schema_version"]["enum"] == [1, 2]
+    assert status_schema["properties"]["schema_version"]["enum"] == [1, 2, 3]
+    assert transcript_schema["properties"]["schema_version"]["enum"] == [1, 2, 3]
 
 
 def test_runtime_transcript_validation_rejects_missing_runtime_event_scope() -> None:

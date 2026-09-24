@@ -212,66 +212,23 @@ def test_eviction_releases_app_state_and_rate_limiter_counters() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Protocol §11 gate: hidden-information games cannot be served on the v1 wire
+# Protocol §11 gate: lifted in Phase 38, once every payload is built per viewer
 # ---------------------------------------------------------------------------
 
 
-def test_hidden_information_game_is_refused_until_phase_38() -> None:
-    """The v1 wire broadcasts one full snapshot to both seats.
-
-    Serving a game that declares hidden information over it would leak private
-    state, so match creation refuses rather than leaking. Phase 38 lifts this.
-    """
-
-    import dataclasses
-
-    import pytest
-
+def test_hidden_information_games_are_served_since_phase_38() -> None:
     from arena.core.registry import GameRegistry
-    from arena.server.errors import InvalidConfig
+    from arena.testing.hidden_factory import build_secrets_game_definition
 
-    class _RedactingEngine:
-        def observation(self, state: object, seat: int) -> str:
-            return "obs"
-
-        def public_state(self, state: object) -> str:
-            return "public"
-
-    class _RedactingSerializer:
-        def dump_state(self, state: object) -> dict[str, object]:
-            return {"secret": 1, "public": 2}
-
-        def load_state(self, payload: dict[str, object]) -> str:
-            return "full"
-
-        def dump_public_state(self, state: object) -> dict[str, object]:
-            return {"public": 2}
-
-        def load_public_state(self, payload: dict[str, object]) -> str:
-            return "public"
-
-        def dump_state_for_seat(self, state: object, seat: int) -> dict[str, object]:
-            return {"public": 2}
-
-    source = build_default_registry().get("connect4")
-    hidden = dataclasses.replace(
-        source,
-        game_id="hidden-game",
-        has_hidden_information=True,
-        rules_engine=_RedactingEngine(),
-        serializer=_RedactingSerializer(),
-    )
     games = GameRegistry()
-    games.register(hidden)
+    games.register(build_secrets_game_definition())
 
-    registry = MatchRegistry(games)
-    with pytest.raises(InvalidConfig) as exc:
-        registry.create(
-            game_id="hidden-game",
-            game_config_payload=None,
-            players_spec=[{"label": "a"}, {"label": "b"}],
-            per_turn_deadline_ms=30000,
-            per_action_retry_budget=3,
-            disconnect_grace_ms=30000,
-        )
-    assert exc.value.details["reason"] == "hidden_information_unsupported"
+    match = MatchRegistry(games).create(
+        game_id="secrets-game",
+        game_config_payload=None,
+        players_spec=[{"label": "a"}, {"label": "b"}],
+        per_turn_deadline_ms=30000,
+        per_action_retry_budget=3,
+        disconnect_grace_ms=30000,
+    )
+    assert match.game_id == "secrets-game"

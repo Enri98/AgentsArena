@@ -86,15 +86,9 @@ class MatchRegistry:
         except CoreUnknownGame as exc:
             raise UnknownGame(str(exc)) from exc
 
-        # Protocol §11: the v1 wire broadcasts one full snapshot to every seat,
-        # so a game with hidden information would leak it. Phase 38 makes
-        # snapshots per-seat and lifts this gate.
-        if getattr(definition, "has_hidden_information", False):
-            raise InvalidConfig(
-                f"Game '{game_id}' declares hidden information, which the current wire "
-                f"schema cannot serve without leaking private state to both seats.",
-                details={"game_id": game_id, "reason": "hidden_information_unsupported"},
-            )
+        # Phase 38 lifted the §11 gate that refused hidden-information games:
+        # every snapshot, event, chance outcome, transcript and welcome config is
+        # now built per recipient (see runtime_bridge._broadcast_per_viewer).
 
         raw_config = game_config_payload if game_config_payload is not None else {}
         try:

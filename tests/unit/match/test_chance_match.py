@@ -184,8 +184,9 @@ def test_an_impossible_outcome_is_revalidated_by_the_engine() -> None:
     first_chance = next(t for t in payload["turns"] if t["kind"] == "chance")
     first_chance["outcome"]["face"] = 7
 
-    with pytest.raises(ChanceResolutionError):
+    with pytest.raises(ValueError, match="A coin lands on 0 or 1") as exc:
         validate_match_transcript(build_coin_game_definition(), payload)
+    assert isinstance(exc.value.__cause__, ChanceResolutionError)
 
 
 def test_a_chance_turn_without_an_outcome_is_rejected() -> None:
@@ -201,7 +202,7 @@ def test_a_dropped_chance_turn_is_detected() -> None:
     payload = dump_match_transcript(_play(SEED))
     payload["turns"] = [t for i, t in enumerate(payload["turns"]) if i != 0]
 
-    with pytest.raises(ChanceResolutionError):
+    with pytest.raises(ValueError):
         validate_match_transcript(build_coin_game_definition(), payload)
 
 
@@ -240,3 +241,39 @@ def test_the_coin_game_passes_the_chance_contract() -> None:
     from arena.testing import assert_chance_contract
 
     assert_chance_contract(SimpleNamespace(definition=build_coin_game_definition()))
+
+
+# ---------------------------------------------------------------------------
+# Forged shapes (adversarial review of Phase 37)
+# ---------------------------------------------------------------------------
+
+
+def _forge(mutate):
+    payload = dump_match_transcript(_play(SEED))
+    mutate(payload)
+    return payload
+
+
+def _first(payload, kind):
+    return next(t for t in payload["turns"] if t["kind"] == kind)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda p: _first(p, "chance").update(seat=0, action={"type": "move"}),
+         "no seat and no action"),
+        (lambda p: _first(p, "action").update(outcome={"face": 1}), "no chance outcome"),
+        (lambda p: p.update(schema_version=1), "predates chance turns"),
+        (lambda p: p.update(schema_version=999), "schema_version 999"),
+        (lambda p: _first(p, "chance").update(kind="dice"), "unknown turn kind"),
+        (lambda p: p.update(view="seat"), "must name its viewer_seat"),
+        (lambda p: p.update(schema_version=2, view="public"), "no views"),
+        # Drop the final (chance, action) pair: the match now ends right after an
+        # action that led to a chance node, with the roll missing.
+        (lambda p: p.update(turns=p["turns"][:-2]), "pending chance node"),
+    ],
+)
+def test_forged_transcripts_are_rejected(mutate, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        validate_match_transcript(build_coin_game_definition(), _forge(mutate))

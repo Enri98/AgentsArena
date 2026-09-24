@@ -30,11 +30,16 @@ from arena.adapters.websocket.errors import SchemaVersionMismatch, WireDecodeErr
 # Bumped to 2 in Phase 37: transcripts carry chance turns, which have no seat and
 # no action. That is a shape change to an existing field (match_finished.transcript,
 # match_aborted.transcript) and §7 requires a bump for it.
-WIRE_SCHEMA_VERSION = 2
+#
+# Bumped to 3 in Phase 38: per-recipient payloads for hidden-information games.
+# turn_committed carries each recipient's own view plus public_snapshot, events
+# and chance outcomes are filtered per viewer, transcripts declare their view,
+# and welcome carries the seat's config view and, on reconnect, its transcript.
+WIRE_SCHEMA_VERSION = 3
 
-#: Versions this build can decode. A v1 client predates chance nodes; every
-#: message it sends is still valid, so there is no reason to refuse it.
-SUPPORTED_WIRE_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2)
+#: Versions this build can decode. Older clients' messages are still valid, so
+#: there is no reason to refuse to read them.
+SUPPORTED_WIRE_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3)
 
 
 def dumps(envelope: WireEnvelope) -> str:  # type: ignore[valid-type]

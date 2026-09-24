@@ -69,7 +69,18 @@ class SecretsState:
 
 @dataclass(frozen=True)
 class SecretsDealt(DomainEvent):
-    """Carries nothing private: which digit each seat holds is not an event field."""
+    """Public: the deal happened. Which digit each seat holds is not in it."""
+
+
+@dataclass(frozen=True)
+class SecretReceived(DomainEvent):
+    """Private to ``seat``: the digit it was dealt (Phase 38 event visibility)."""
+
+    seat: Seat
+    secret: int
+
+    def visible_to(self, viewer: Seat | None) -> bool:
+        return viewer == self.seat
 
 
 @dataclass(frozen=True)
@@ -127,7 +138,12 @@ class SecretsRulesEngine:
         ):
             raise ChanceResolutionError("Each secret is a single digit.")
         return TransitionResult(
-            state=replace(state, secrets=outcome.secrets), events=(SecretsDealt(),)
+            state=replace(state, secrets=outcome.secrets),
+            events=(
+                SecretsDealt(),
+                SecretReceived(seat=0, secret=outcome.secrets[0]),
+                SecretReceived(seat=1, secret=outcome.secrets[1]),
+            ),
         )
 
     def is_terminal(self, state: SecretsState) -> bool:
@@ -252,7 +268,7 @@ def build_secrets_game_definition() -> GameDefinition[
 
 @dataclass(frozen=True)
 class SecretsContractBundle:
-    """A ``GameContractBundle`` for the secrets game, with its private variant."""
+    """A ``GameContractBundle`` for the secrets game, with its private variants."""
 
     definition: object
     config: SecretsConfig
@@ -261,28 +277,42 @@ class SecretsContractBundle:
     terminal_state: SecretsState
     legal_action: SecretsPass
     illegal_action: object
-    private_variant_state: SecretsState
-    private_variant_blind_seat: Seat
+    opening_outcomes: tuple[SecretsDeal, ...]
+    private_variants: tuple[object, ...]
+    chance_state: SecretsState
+    private_outcome_variants: tuple[object, ...]
 
 
 def build_secrets_contract_bundle() -> SecretsContractBundle:
+    from arena.testing.contracts import PrivateVariant
+
     definition = build_secrets_game_definition()
     config = SecretsConfig(max_turns=2)
     engine = definition.rules_engine
     near_terminal = SecretsState(turn=1, max_turns=2, secrets=(3, 8))
+    opening = SecretsState(turn=0, max_turns=2, secrets=(3, 8))
     return SecretsContractBundle(
         definition=definition,
         config=config,
-        # The contract's initial-state checks need a seat to move, so the bundle's
-        # "initial" state is the one right after the opening deal.
-        initial_state=SecretsState(turn=0, max_turns=2, secrets=(3, 8)),
+        # The game opens at the deal; opening_outcomes resolve it to this state.
+        initial_state=opening,
         near_terminal_state=near_terminal,
         terminal_state=engine.apply_action(near_terminal, 1, SecretsPass()).state,
         legal_action=SecretsPass(),
         illegal_action=object(),
-        # Seat 1's digit differs; seat 0 must not be able to tell.
-        private_variant_state=SecretsState(turn=1, max_turns=2, secrets=(3, 5)),
-        private_variant_blind_seat=0,
+        opening_outcomes=(SecretsDeal(secrets=(3, 8)),),
+        # Each seat blind to the other's digit, on its own turn and the other's.
+        private_variants=(
+            PrivateVariant(opening, replace(opening, secrets=(3, 5)), blind_seat=0),
+            PrivateVariant(opening, replace(opening, secrets=(6, 8)), blind_seat=1),
+            PrivateVariant(near_terminal, replace(near_terminal, secrets=(3, 5)), blind_seat=0),
+            PrivateVariant(near_terminal, replace(near_terminal, secrets=(6, 8)), blind_seat=1),
+        ),
+        chance_state=engine.initial_state(config),
+        private_outcome_variants=(
+            PrivateVariant(SecretsDeal((3, 8)), SecretsDeal((3, 5)), blind_seat=0),
+            PrivateVariant(SecretsDeal((3, 8)), SecretsDeal((6, 8)), blind_seat=1),
+        ),
     )
 
 
@@ -291,6 +321,7 @@ __all__ = [
     "SecretsContractBundle",
     "SecretsDeal",
     "SecretsPass",
+    "SecretReceived",
     "SecretsState",
     "build_secrets_contract_bundle",
     "build_secrets_game_definition",

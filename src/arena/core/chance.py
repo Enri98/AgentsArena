@@ -59,6 +59,10 @@ _SERIALIZER_HOOKS = (DUMP_CHANCE_OUTCOME_METHOD, LOAD_CHANCE_OUTCOME_METHOD)
 _WORD_BITS = 64
 _WORD_MAX = 1 << _WORD_BITS
 
+#: Seeds and counters are hashed as 16-byte unsigned integers.
+SEED_BITS = 128
+_SEED_MAX = 1 << SEED_BITS
+
 
 @dataclass(frozen=True)
 class ChanceRng:
@@ -78,6 +82,16 @@ class ChanceRng:
 
     seed: int = field(repr=False)
     counter: int = 0
+
+    def __post_init__(self) -> None:
+        # Validated here rather than at the first draw: a bad seed that only
+        # fails mid-match would be reported against whichever seat just acted.
+        for name, value in (("seed", self.seed), ("counter", self.counter)):
+            if type(value) is not int or not 0 <= value < _SEED_MAX:
+                raise ValueError(
+                    f"ChanceRng {name} must be an int in [0, 2**{SEED_BITS}), "
+                    f"got a {type(value).__name__}."
+                )
 
     def _block(self, counter: int) -> int:
         digest = hashlib.blake2b(
@@ -216,6 +230,16 @@ def validate_chance_support(definition: Any) -> None:
     """
 
     if not getattr(definition, "has_chance_nodes", False):
+        # The converse matters too: hooks without the flag register, get no
+        # generator, and the first chance node then deadlocks the match — every
+        # action is refused while nothing ever rolls.
+        if _has_hook(definition.rules_engine, IS_CHANCE_NODE_METHOD):
+            raise IncompleteChanceSupport(
+                f"Game '{definition.game_id}' implements "
+                f"rules_engine.{IS_CHANCE_NODE_METHOD} but does not declare "
+                f"has_chance_nodes=True, so its matches would get no generator.",
+                details={"game_id": definition.game_id, "missing": ["has_chance_nodes"]},
+            )
         return
 
     missing = [
@@ -243,6 +267,7 @@ __all__: Sequence[str] = [
     "IS_CHANCE_NODE_METHOD",
     "LOAD_CHANCE_OUTCOME_METHOD",
     "SAMPLE_CHANCE_METHOD",
+    "SEED_BITS",
     "ChanceRng",
     "apply_chance",
     "dump_chance_outcome",

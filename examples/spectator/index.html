@@ -185,12 +185,19 @@
   function renderTranscript(transcript) {
     if (!transcript || !transcript.match_transcript) { return; }
     var turns = transcript.match_transcript.turns || [];
-    turns.forEach(function (t, i) {
-      log("turn " + i + " · seat " + t.seat + " · " + JSON.stringify(t.action), seatSpan(t.seat));
-    });
+    turns.forEach(function (t, i) { log(describeTurn(i, t), seatSpan(t.seat)); });
     if (turns.length) {
       render(turns[turns.length - 1].post_snapshot);
     }
+  }
+
+  // A chance turn (wire v2) has no seat and no action: it carries the outcome,
+  // e.g. a die roll. Hidden parts of it are already redacted for spectators.
+  function describeTurn(index, t) {
+    if (t.kind === "chance") {
+      return "turn " + index + " · chance · " + JSON.stringify(t.outcome);
+    }
+    return "turn " + index + " · seat " + t.seat + " · " + JSON.stringify(t.action);
   }
 
   // ---- protocol ------------------------------------------------------
@@ -216,10 +223,10 @@
 
     if (env.type === "turn_committed") {
       var rec = p.turn_record || {};
-      log("turn " + rec.turn_index + " · seat " + rec.seat + " · " + JSON.stringify(rec.action),
-          seatSpan(rec.seat));
+      log(describeTurn(rec.turn_index, rec), seatSpan(rec.seat));
       el("s-turns").textContent = (rec.turn_index || 0) + 1;
-      render(p.post_snapshot);
+      // public_snapshot (wire v3) is the view every spectator shares.
+      render(p.public_snapshot || p.post_snapshot);
       return;
     }
 
@@ -272,7 +279,8 @@
         payload: {
           client_name: "browser-spectator",
           client_version: "0.1.0",
-          supported_schema_versions: [1]
+          // The server speaks v3 and refuses a client that cannot read it.
+          supported_schema_versions: [3]
         }
       }));
     };

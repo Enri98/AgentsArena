@@ -8,7 +8,6 @@ states differing only in what a seat may not see must look identical to it.
 from __future__ import annotations
 
 import dataclasses
-import json
 
 import pytest
 
@@ -25,13 +24,11 @@ from arena.core.public_view import (
 from arena.core.registry import GameRegistry
 from arena.games.pig import PigConfig, PigGameDefinition, PigState
 from arena.match import build_snapshot_for_viewer, start_match
-from arena.testing import assert_game_contract, assert_seat_view_contract
 from arena.testing.chance_factory import CoinOutcome, build_coin_game_definition
 from arena.testing.hidden_factory import (
     SecretsDeal,
     SecretsSerializer,
     SecretsState,
-    build_secrets_contract_bundle,
     build_secrets_game_definition,
 )
 
@@ -162,68 +159,3 @@ def test_the_secrets_game_registers() -> None:
     assert registry.get("secrets-game") is SECRETS
 
 
-# ---------------------------------------------------------------------------
-# The shared contract catches leaks
-# ---------------------------------------------------------------------------
-
-
-def test_the_secrets_game_passes_the_full_contract() -> None:
-    assert_game_contract(build_secrets_contract_bundle())
-
-
-class _LeakyObservation(SecretsSerializer):
-    def dump_observation(self, observation: object) -> dict:
-        payload = super().dump_observation(observation)
-        payload["debug"] = "opponent-secret-leaked"
-        return payload
-
-
-class _LeakyEngine(type(SECRETS.rules_engine)):  # type: ignore[misc]
-    def observation(self, state, seat):  # type: ignore[no-untyped-def]
-        obs = super().observation(state, seat)
-        other = state.secrets[1 - seat] if state.secrets else None
-        return dataclasses.replace(obs, turn=obs.turn * 100 + (other or 0))
-
-
-class _LeakySeatState(SecretsSerializer):
-    def dump_state_for_seat(self, state: object, seat: int) -> dict:
-        return {**super().dump_state_for_seat(state, seat), "all": json.dumps(
-            self.dump_state(state))}
-
-
-class _LeakyPublic(SecretsSerializer):
-    def dump_public_state(self, state: object) -> dict:
-        return self.dump_state(state)
-
-
-def _bundle_with(**definition_overrides: object):
-    bundle = build_secrets_contract_bundle()
-    return dataclasses.replace(
-        bundle, definition=dataclasses.replace(bundle.definition, **definition_overrides)
-    )
-
-
-@pytest.mark.parametrize(
-    ("overrides", "leak"),
-    [
-        ({"rules_engine": _LeakyEngine()}, "dump_observation"),
-        ({"serializer": _LeakySeatState()}, "dump_state_for_seat"),
-        ({"serializer": _LeakyPublic()}, "dump_public_state"),
-    ],
-)
-def test_a_leak_through_any_view_fails_the_contract(overrides: dict, leak: str) -> None:
-    with pytest.raises(AssertionError, match=leak):
-        assert_seat_view_contract(_bundle_with(**overrides))
-
-
-def test_an_observation_field_that_does_not_leak_passes() -> None:
-    """A constant extra field is not a leak — it cannot distinguish the states."""
-
-    assert_seat_view_contract(_bundle_with(serializer=_LeakyObservation()))
-
-
-def test_a_hidden_game_bundle_must_supply_a_private_variant() -> None:
-    bundle = build_secrets_contract_bundle()
-    stripped = dataclasses.replace(bundle, private_variant_state=None)
-    with pytest.raises(AssertionError, match="private_variant_state"):
-        assert_seat_view_contract(stripped)

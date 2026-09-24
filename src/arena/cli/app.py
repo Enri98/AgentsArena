@@ -12,27 +12,54 @@ from arena.cli.rendering import render_match_screen
 from arena.ui import build_match_screen
 
 
+def _load(
+    status_path: str | os.PathLike[str],
+    transcript_path: str | os.PathLike[str],
+    seat: int | None,
+) -> dict[str, Any]:
+    """Read the files and build the screen, as seat ``seat`` saw it if given.
+
+    A saved full transcript of a hidden-information game is redacted to that
+    seat's view here. A file that is already a seat's view is rendered as is, and
+    the UI refuses it if it belongs to a different seat.
+    """
+
+    with open(status_path, encoding="utf-8") as fh:
+        status_payload: dict[str, Any] = json.load(fh)
+    with open(transcript_path, encoding="utf-8") as fh:
+        transcript_payload: dict[str, Any] = json.load(fh)
+
+    if seat is not None and transcript_payload.get("view", "full") == "full":
+        from arena.games import build_default_registry
+        from arena.runtime.payloads import redact_runtime_transcript, redact_session_status
+
+        definition = build_default_registry().get(transcript_payload["game_id"])
+        transcript_payload = redact_runtime_transcript(definition, transcript_payload, seat)
+        if status_payload.get("view", "full") == "full":
+            status_payload = redact_session_status(definition, status_payload, seat)
+
+    return build_match_screen(
+        status_payload=status_payload,
+        transcript_payload=transcript_payload,
+        seat=seat,
+    )
+
+
 def render_session_from_files(
     status_path: str | os.PathLike[str],
     transcript_path: str | os.PathLike[str],
     *,
     turn: int | None = None,
+    seat: int | None = None,
 ) -> str:
     """Read status and transcript JSON files and render one or the latest frame.
 
     When *turn* is None, the latest complete screen is rendered.
     When *turn* is an integer, the board and turn-history cursor reflect frame N
     while the status header always reflects the latest session state.
+    When *seat* is given, everything is shown as that seat saw it (Phase 38).
     """
-    with open(status_path, encoding="utf-8") as fh:
-        status_payload: dict[str, Any] = json.load(fh)
-    with open(transcript_path, encoding="utf-8") as fh:
-        transcript_payload: dict[str, Any] = json.load(fh)
-
-    screen = build_match_screen(
-        status_payload=status_payload,
-        transcript_payload=transcript_payload,
-    )
+    screen = _load(status_path, transcript_path, seat)
 
     if turn is None:
         return render_match_screen(screen)
@@ -50,17 +77,11 @@ def render_session_from_files(
 def render_all_frames(
     status_path: str | os.PathLike[str],
     transcript_path: str | os.PathLike[str],
+    *,
+    seat: int | None = None,
 ) -> str:
     """Render every turn frame separated by '=== Turn N ===' headers."""
-    with open(status_path, encoding="utf-8") as fh:
-        status_payload: dict[str, Any] = json.load(fh)
-    with open(transcript_path, encoding="utf-8") as fh:
-        transcript_payload: dict[str, Any] = json.load(fh)
-
-    screen = build_match_screen(
-        status_payload=status_payload,
-        transcript_payload=transcript_payload,
-    )
+    screen = _load(status_path, transcript_path, seat)
 
     turns: list[Any] = screen["transcript"]["turns"]
     sections: list[str] = []

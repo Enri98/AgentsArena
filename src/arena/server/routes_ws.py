@@ -196,7 +196,15 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
 
     # 4a. Phase 32: check for reconnect (resume_token present in hello).
     if hello.resume_token is not None:
-        await _handle_reconnect(ws, seat, match_id, match, hello.resume_token, app_state)
+        await _handle_reconnect(
+            ws,
+            seat,
+            match_id,
+            match,
+            hello.resume_token,
+            app_state,
+            hello.supported_schema_versions,
+        )
         return
 
     # 5. Validate requested_seat matches the URL ?seat= param.
@@ -204,7 +212,7 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         await _close(ws, _CLOSE_MALFORMED, "seat_mismatch")
         return
 
-    # 6. Schema-version negotiation: require 1 in client's supported list.
+    # 6. Schema-version negotiation: the client must read the version we emit.
     if WIRE_SCHEMA_VERSION not in hello.supported_schema_versions:
         await _close(ws, _CLOSE_SCHEMA_MISMATCH, "schema_version_mismatch")
         return
@@ -355,6 +363,7 @@ async def _handle_reconnect(
     match: Match,
     resume_token: str,
     app_state: Any,
+    supported_schema_versions: list[int],
 ) -> None:
     """Handle a reconnecting client presenting a valid resume_token."""
 
@@ -364,11 +373,19 @@ async def _handle_reconnect(
         await _close(ws, _CLOSE_MATCH_NOT_FOUND, "invalid_resume_token")
         return
 
+    # A reconnecting client negotiates like a new one: it will be sent a
+    # transcript in the current wire shape.
+    if WIRE_SCHEMA_VERSION not in supported_schema_versions:
+        await _close(ws, _CLOSE_SCHEMA_MISMATCH, "schema_version_mismatch")
+        return
+
     # Build new SeatConnection and send welcome.
     # send_welcome rotates the resume_token in match.resume_tokens[seat] atomically.
+    # Phase 38: the welcome carries the seat's own transcript so far (§11), so a
+    # reconnecting client recovers everything it missed and nothing more.
     new_conn = SeatConnection(websocket=ws, seat=seat)
     try:
-        await send_welcome(new_conn, match)
+        await send_welcome(new_conn, match, with_transcript=True)
     except Exception:
         await _close(ws, _CLOSE_SERVER_ERROR, "server_error")
         return

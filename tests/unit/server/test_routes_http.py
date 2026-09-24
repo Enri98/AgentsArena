@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+from arena.adapters.websocket import WIRE_SCHEMA_VERSION
 from arena.server.app import create_app
 from arena.server.rate_limits import RateLimiter
 
@@ -38,7 +39,7 @@ def test_post_matches_connect4_happy_path() -> None:
     assert "match_id" in data
     assert data["game_id"] == "connect4"
     assert data["lifecycle"] == "created"
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == WIRE_SCHEMA_VERSION == 3
     assert data["game_schema_version"] == 1
     assert "per_turn_deadline_ms" in data
     assert "per_action_retry_budget" in data
@@ -210,7 +211,7 @@ def test_get_schemas_payloads_contains_required_keys() -> None:
     resp = client.get("/schemas/payloads")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == WIRE_SCHEMA_VERSION == 3
     missing = _REQUIRED_KEYS - set(data["schemas"].keys())
     assert missing == set(), f"Missing payload keys: {missing}"
 
@@ -220,3 +221,25 @@ def test_get_schemas_payloads_byte_stable() -> None:
     r1 = client.get("/schemas/payloads")
     r2 = client.get("/schemas/payloads")
     assert r1.content == r2.content
+
+
+def test_post_matches_refuses_a_client_that_cannot_read_the_wire() -> None:
+    with _client() as client:
+        resp = client.post(
+            "/matches", json={"game_id": "connect4", "supported_schema_versions": [1, 2]}
+        )
+        assert resp.status_code == 400
+        assert resp.json()["error"]["code"] == "schema_version_unsupported"
+
+        ok = client.post(
+            "/matches", json={"game_id": "connect4", "supported_schema_versions": [2, 3]}
+        )
+        assert ok.status_code == 201
+
+
+def test_get_match_does_not_expose_match_config() -> None:
+    with _client() as client:
+        created = client.post("/matches", json={"game_id": "connect4"}).json()
+        data = client.get(f"/matches/{created['match_id']}").json()
+        assert "match_config" not in data
+        assert "game_config" not in data

@@ -3850,8 +3850,90 @@ Core and contract only: no wire change, and the server still refuses hidden-info
 - `arena.testing.hidden_factory`: a secrets game that deals each seat a private digit at an opening
   chance node — the smallest game with a private share of state and a private chance outcome.
   Tests prove the contract catches a leak through each of the three views.
-#### Slice 2 - Multi-version codec, wire bump to 3, per-recipient broadcast, event filtering
-#### Slice 3 - Per-seat transcripts, reconnect replay, SDK/MCP/UI/CLI updates
+#### Adversarial review of Phase 37 and Slice 1 — fixes landed with Slices 2-3 (2026-09-24)
+
+Owner rule (2026-09-24): **dispatch adversarial reviewer subagents between one feature and the
+next.** Two reviewers checked `00fc9f0`+`ab388f8` (chance/Pig) and `cf7bf64` (seat views).
+Every confirmed finding is fixed, with a regression test:
+
+- **The seat-view contract was too weak (5 high).** It checked one blind seat and one state, never
+  looked at chance outcomes or events, and compared only serialized observations. Leaky games
+  passed. Bundles now supply `private_variants` (a `PrivateVariant` list covering every seat, over
+  several states) and, for chance games, `chance_state` plus `private_outcome_variants`. Across
+  each pair the contract checks the blind seat's state view, observation (object and dump), legal
+  actions, the public view, and the engine's `public_state`. It then steps once and compares the
+  resulting events and views. `tests/unit/core/test_seat_view_contract.py` reproduces every leak
+  the review found and shows it now fails.
+- **The opening-chance initial-state check was a tautology.** Bundles now supply
+  `opening_outcomes`, and the engine must reach `bundle.initial_state` by applying them.
+- **Viewers are validated** (`check_viewer`). `-1` used to index the last seat's secret, and `True`
+  acted as seat 1.
+- **The transcript validator accepted forged shapes:** any `schema_version`, seat/action on a chance
+  turn, an outcome on an action turn, chance turns in v1, and transcripts ending at a pending chance
+  node. All are rejected now, and engine rejections during replay surface as `ValueError` with the
+  domain error as the cause.
+- **Pig could run forever** (always roll, never bank). The server now caps every match at
+  `MAX_TURNS_PER_MATCH` (5000). Beyond it the match aborts with the new `turn_limit_exceeded` reason.
+- **Duplicate spectator turns / reconnect stall.** A reconnected seat had no writer task, so sends
+  awaited its socket inside `run_match`. That broke the Phase 36 no-stall constraint and opened an
+  await mid-broadcast, where an attaching spectator could get turns twice. `replace_seat` now starts
+  a writer. Broadcasts never yield until every recipient is queued; slow spectators are closed in the
+  background. Spectators also carry a turn watermark from their welcome.
+- **MCP `make_move` returned a stale turn** as its confirmation. It now returns the caller's own
+  action turn and drops other turns, which are already in the session history.
+- `/schemas/payloads` reported wire version 1: `server.config.WIRE_SCHEMA_VERSION` now re-exports the
+  codec's constant.
+- **Chance hooks without `has_chance_nodes`** registered, then deadlocked at the first roll; they are
+  now rejected. **Out-of-range seeds** failed mid-match, blaming the acting seat; `ChanceRng`
+  validates at construction.
+- Smaller items: the browser spectator advertised `[1]`, so it had been refused since Phase 37, and
+  it never rendered chance turns. `PIG_ACTION_SCHEMA` gains `additionalProperties: false`, and
+  `--pig-target` gets a clean usage error.
+
+Not fixed: a *buggy engine* whose `apply_chance` raises while being drained after a seat's action is
+still reported against that seat. With seeds validated, this only happens with a broken engine.
+
+#### Slices 2-3 - Wire v3: per-recipient payloads, per-seat transcripts, reconnect replay — ✅ COMPLETE (2026-09-24)
+
+Built together, because the server's per-recipient broadcast and per-seat transcripts are the same
+code.
+
+- **Wire `schema_version=3`**; runtime transcript/status and match transcript also move to 3, and all
+  decoders accept 1-3. The SDK advertises `[1, 2, 3]`.
+- **Events gain visibility.** `DomainEvent.visible_to(viewer)` defaults to public. `is_public` and
+  `audience()` are serialized only for non-public events, so perfect-information payloads are
+  unchanged.
+- **Views.** Transcripts declare `view` (`full`/`seat`/`public`) and `viewer_seat`. Only a full
+  transcript loads or replays. `dump_match_transcript_for_viewer`, `turn_record_for_viewer`, and
+  `redact_match_transcript` in `arena.match`; `dump_runtime_transcript(session, viewer=...)`,
+  `dump_session_status(session, viewer=...)`, and `redact_runtime_transcript` /
+  `redact_session_status` in `arena.runtime`. The default is `FULL_VIEW`, a sentinel distinct from
+  seat 0 and from `None`. A seat's view also drops the other seat's `PolicyDecided` /
+  `PolicyRetried` runtime events: an agent's "thought" can name its hand.
+- **Per-recipient broadcast** (`_broadcast_per_viewer`). Each distinct view is built and serialized
+  once. `turn_committed` carries the recipient's `post_snapshot`, a new `public_snapshot`, and
+  filtered events and outcomes. `match_finished`/`match_aborted` carry each recipient's own
+  transcript. `welcome.match_config` is per seat.
+- **Reconnect replay (§11).** `welcome.transcript` carries the seat's own transcript on reconnect,
+  and the reconnect hello now negotiates the version.
+- The server's `hidden_information_unsupported` gate is lifted. `POST /matches` accepts optional
+  `supported_schema_versions`; `GET /matches/{id}` exposes no config.
+- `arena.ui`: `build_match_status/transcript/screen(..., seat=None)` refuse a payload redacted for a
+  different perspective. `arena.cli` replay viewer: `--seat N` redacts a saved full transcript to
+  that seat's view. SDK: `Session.replayed_transcript`. MCP: the `make_move` fix above.
+- **Acceptance** (`tests/integration/test_hidden_information.py`, real TCP): with the secrets fixture
+  game, two matches in which seat 0 holds the same digit and seat 1 a different one produce
+  **byte-identical frames for seat 0 and for a spectator**, once per-match ids are removed. Seat 1's
+  frames differ, which shows the comparison can detect a difference. The server's full transcript
+  still replays, and a seat's transcript is refused for replay. A reconnect replays exactly the
+  turns the seat was sent live, field for field.
+
+Known limitation, documented in protocol §11: reconnects are fully supported only for the active
+seat. An off-turn seat's disconnect is noticed only on its turn, so an early reconnect can miss
+frames. The match-owned driver deferred to Phase 41 is the fix.
+
+Deferred to Phase 39: rendering a hidden game in the *live* local CLI (`arena.cli.play`) from the
+human seat's perspective. No hidden game is registered yet, so nothing leaks today.
 
 ---
 

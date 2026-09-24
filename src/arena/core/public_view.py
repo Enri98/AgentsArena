@@ -59,6 +59,45 @@ DUMP_PUBLIC_CHANCE_OUTCOME_METHOD = "dump_public_chance_outcome"
 Viewer = Seat | None
 
 
+class FullView:
+    """Sentinel for "no redaction": the authoritative, full view.
+
+    Only the server (and archived-transcript tooling) should ever hold it for a
+    hidden-information game. A distinct type rather than a magic value, so it can
+    never be confused with seat ``0`` or with ``None`` (the public).
+    """
+
+    _instance: "FullView | None" = None
+
+    def __new__(cls) -> "FullView":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "FULL_VIEW"
+
+
+FULL_VIEW = FullView()
+
+#: Seats a viewer may name. Two-seat today; widen with N-player.
+VIEWER_SEATS: tuple[Seat, ...] = (0, 1)
+
+
+def check_viewer(viewer: object) -> None:
+    """Reject anything that is not ``None`` or a real seat id.
+
+    Without this, ``-1`` would index a per-seat tuple from the end and hand a
+    viewer the *last* seat's private data, and ``True`` (an ``int`` subclass)
+    would be treated as seat 1.
+    """
+
+    if viewer is None:
+        return
+    if type(viewer) is not int or viewer not in VIEWER_SEATS:
+        raise ValueError(f"A viewer is a seat in {VIEWER_SEATS} or None, not {viewer!r}.")
+
+
 def _has_hook(obj: object, name: str) -> bool:
     return callable(getattr(obj, name, None))
 
@@ -123,6 +162,9 @@ def dump_state_for_seat(serializer: Any, state: Any, seat: Seat) -> JSONMapping:
     game that lacks the hook.
     """
 
+    check_viewer(seat)
+    if seat is None:
+        raise ValueError("dump_state_for_seat needs a seat; use dump_public_state for None.")
     if _has_hook(serializer, DUMP_STATE_FOR_SEAT_METHOD):
         return serializer.dump_state_for_seat(state, seat)
     return serializer.dump_state(state)
@@ -131,6 +173,7 @@ def dump_state_for_seat(serializer: Any, state: Any, seat: Seat) -> JSONMapping:
 def dump_state_for_viewer(serializer: Any, state: Any, viewer: Viewer) -> JSONMapping:
     """``dump_state_for_seat`` for a seat, ``dump_public_state`` for the public."""
 
+    check_viewer(viewer)
     if viewer is None:
         return dump_public_state(serializer, state)
     return dump_state_for_seat(serializer, state, viewer)
@@ -144,6 +187,7 @@ def dump_state_for_viewer(serializer: Any, state: Any, viewer: Viewer) -> JSONMa
 def dump_config_for_seat(serializer: Any, config: Any, seat: Seat) -> JSONMapping:
     """Serialize what ``seat`` may see of the config; the whole config by default."""
 
+    check_viewer(seat)
     if _has_hook(serializer, DUMP_CONFIG_FOR_SEAT_METHOD):
         return serializer.dump_config_for_seat(config, seat)
     return serializer.dump_config(config)
@@ -158,6 +202,7 @@ def dump_public_config(serializer: Any, config: Any) -> JSONMapping:
 
 
 def dump_config_for_viewer(serializer: Any, config: Any, viewer: Viewer) -> JSONMapping:
+    check_viewer(viewer)
     if viewer is None:
         return dump_public_config(serializer, config)
     return dump_config_for_seat(serializer, config, viewer)
@@ -179,6 +224,7 @@ def dump_chance_outcome_for_viewer(
     information.
     """
 
+    check_viewer(viewer)
     if viewer is None and _has_hook(serializer, DUMP_PUBLIC_CHANCE_OUTCOME_METHOD):
         return serializer.dump_public_chance_outcome(outcome)
     if viewer is not None and _has_hook(serializer, DUMP_CHANCE_OUTCOME_FOR_SEAT_METHOD):
@@ -230,9 +276,13 @@ __all__: Sequence[str] = [
     "DUMP_PUBLIC_CONFIG_METHOD",
     "DUMP_PUBLIC_STATE_METHOD",
     "DUMP_STATE_FOR_SEAT_METHOD",
+    "FULL_VIEW",
+    "FullView",
     "LOAD_PUBLIC_STATE_METHOD",
     "PUBLIC_STATE_METHOD",
+    "VIEWER_SEATS",
     "Viewer",
+    "check_viewer",
     "dump_chance_outcome_for_viewer",
     "dump_config_for_seat",
     "dump_config_for_viewer",

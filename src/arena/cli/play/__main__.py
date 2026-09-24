@@ -235,6 +235,18 @@ def _run_remote(
     return 0 if lifecycle == "finished" else 1
 
 
+def _pig_target(text: str) -> int:
+    """argparse type for --pig-target: a clean usage error, not a pydantic trace."""
+
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an integer: {text!r}") from None
+    if not 1 <= value <= 1000:
+        raise argparse.ArgumentTypeError("must be between 1 and 1000")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m arena.cli.play")
     parser.add_argument("--game", choices=sorted(cli_game_ids()), required=True)
@@ -248,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--nim-pile-size", type=int, default=7, dest="nim_pile_size"
     )
-    parser.add_argument("--pig-target", type=int, default=50, dest="pig_target")
+    parser.add_argument("--pig-target", type=_pig_target, default=50, dest="pig_target")
     parser.add_argument("--ollama-host", default="http://localhost:11434", dest="ollama_host")
     parser.add_argument(
         "--ollama-temperature", type=float, default=0.3, dest="ollama_temperature"

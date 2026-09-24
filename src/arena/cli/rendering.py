@@ -54,10 +54,17 @@ def render_match_screen(screen_payload: Mapping[str, Any]) -> str:
 def _render_header(status: Mapping[str, Any]) -> str:
     lifecycle = status["lifecycle"]
     color = _LIFECYCLE_COLORS.get(lifecycle, "")
-    return (
+    header = (
         f"{BOLD}Match {status['match_id']} — {status['game_id']}{RESET}"
         f"  {color}{lifecycle}{RESET}"
     )
+    view = status.get("view", "full")
+    if view == "seat":
+        seat = status.get("viewer_seat")
+        header += f"\n{DIM}Seat {seat}'s view: hidden information redacted{RESET}"
+    elif view == "public":
+        header += f"\n{DIM}Public view: hidden information redacted{RESET}"
+    return header
 
 
 def _render_board(status: Mapping[str, Any]) -> str | None:

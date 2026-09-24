@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from arena.core.chance import is_chance_node
@@ -13,6 +14,7 @@ from arena.core.public_view import (
     dump_public_state,
     dump_state_for_seat,
     load_public_state,
+    public_state,
 )
 from arena.core.seats import is_seat
 from arena.core.serializer import Serializer
@@ -22,10 +24,13 @@ from arena.core.serializer import Serializer
 class GameContractBundle(Protocol):
     """Fixture bundle contract used by the shared game-contract assertions.
 
-    A hidden-information game's bundle must also define
-    ``private_variant_state`` and ``private_variant_blind_seat``: a state equal to
-    ``near_terminal_state`` except for information the blind seat may not see.
+    A hidden-information game's bundle must also define ``private_variants``
+    (a sequence of :class:`PrivateVariant`, covering every seat as the blind one)
+    and, if it has chance nodes, ``chance_state`` plus ``private_outcome_variants``.
     See :func:`assert_seat_view_contract`.
+
+    A game that opens at a chance node must define ``opening_outcomes``: the
+    outcomes that take ``initial_state(config)`` to ``bundle.initial_state``.
 
     A bundle may also define ``terminal_action``: the action that takes
     ``near_terminal_state`` to ``terminal_state``, when that is not
@@ -51,12 +56,21 @@ def assert_valid_initial_state(bundle: GameContractBundle) -> None:
 
     if is_chance_node(rules_engine, initial_state):
         # A game that opens at a chance node (a deal, an opening roll) has no seat
-        # to move until the match resolves it, so the bundle supplies a settled
-        # post-opening state instead; the rest of this contract checks that one.
-        initial_state = bundle.initial_state
+        # to move until the opening resolves. The bundle names the outcomes, and the
+        # engine must reach bundle.initial_state from its own initial state by
+        # applying them: a settled state the bundle merely asserts proves nothing.
+        outcomes = getattr(bundle, "opening_outcomes", None)
+        assert outcomes, (
+            "initial state contract failed: a game that opens at a chance node must "
+            "supply bundle.opening_outcomes"
+        )
+        for outcome in outcomes:
+            assert is_chance_node(rules_engine, initial_state), (
+                "initial state contract failed: more opening_outcomes than chance nodes"
+            )
+            initial_state = rules_engine.apply_chance(initial_state, outcome).state
         assert not is_chance_node(rules_engine, initial_state), (
-            "initial state contract failed: for a game that opens at a chance node, "
-            "bundle.initial_state must be a settled state after the opening resolves"
+            "initial state contract failed: opening_outcomes do not settle the opening"
         )
     assert initial_state == bundle.initial_state, (
         "initial state contract failed: rules engine did not reproduce the bundle's "
@@ -264,16 +278,50 @@ def assert_public_view_contract(bundle: GameContractBundle) -> None:
     )
 
 
+@dataclass(frozen=True)
+class PrivateVariant:
+    """Two values that differ only in what ``blind_seat`` may not see.
+
+    For states, ``state`` and ``variant`` are game states; for chance outcomes
+    (``private_outcome_variants``) they are outcomes.
+    """
+
+    state: object
+    variant: object
+    blind_seat: int
+
+
+def _visible_events(events: Sequence[object], viewer: object) -> list[dict]:
+    from arena.match.transcript import dump_domain_event, filter_event_payloads
+
+    return filter_event_payloads(
+        [dump_domain_event(event).model_dump(mode="json") for event in events], viewer
+    )
+
+
+def _assert_indistinguishable(
+    label: str, blind: int, pairs: dict[str, tuple[object, object]]
+) -> None:
+    for name, (a, b) in pairs.items():
+        assert a == b, (
+            f"seat view contract failed: {name} lets seat {blind} distinguish {label} "
+            f"that differ only in information it may not see"
+        )
+
+
 def assert_seat_view_contract(bundle: GameContractBundle) -> None:
     """Assert that what each seat receives contains nothing it may not see.
 
-    A perfect-information game's per-seat views must equal the full state and
-    config. A hidden-information game is checked by **indistinguishability**: the
-    bundle's ``private_variant_state`` differs from ``near_terminal_state`` only in
-    information ``private_variant_blind_seat`` is not entitled to, so everything
-    that seat receives — its state view, its observation, and the public view —
-    must be byte-identical between the two. Any field that let the seat tell them
-    apart would be a leak.
+    A perfect-information game's per-seat views must equal the full values.
+
+    A hidden-information game is checked by **indistinguishability**. Each
+    :class:`PrivateVariant` pairs two states that differ only in information its
+    ``blind_seat`` may not see. Everything that seat receives must be identical
+    across the pair: its state view, its observation (object and dump), its legal
+    actions, the public view, the engine's ``public_state`` — and, one step on,
+    the events and state view produced by every action legal in both. Variants
+    must cover every seat as the blind one. Chance outcomes get the same
+    treatment through ``private_outcome_variants`` applied at ``chance_state``.
     """
 
     definition = bundle.definition
@@ -295,31 +343,139 @@ def assert_seat_view_contract(bundle: GameContractBundle) -> None:
         ), "seat view contract failed: public config must equal the full config"
         return
 
-    variant = getattr(bundle, "private_variant_state", None)
-    blind = getattr(bundle, "private_variant_blind_seat", None)
-    assert variant is not None and blind is not None, (
+    variants: Sequence[PrivateVariant] = getattr(bundle, "private_variants", None) or ()
+    assert variants, (
         "seat view contract failed: a hidden-information game's bundle must supply "
-        "private_variant_state and private_variant_blind_seat"
+        "private_variants"
     )
-    assert serializer.dump_state(variant) != serializer.dump_state(state), (
-        "seat view contract failed: private_variant_state must differ from "
-        "near_terminal_state in its private information"
+    assert {v.blind_seat for v in variants} == {0, 1}, (
+        "seat view contract failed: private_variants must cover every seat as blind_seat"
     )
 
-    views = {
-        "dump_state_for_seat": lambda s: dump_state_for_seat(serializer, s, blind),
-        "dump_observation": lambda s: serializer.dump_observation(engine.observation(s, blind)),
-        "dump_public_state": lambda s: dump_public_state(serializer, s),
-    }
-    for name, view in views.items():
-        assert view(state) == view(variant), (
-            f"seat view contract failed: {name} lets seat {blind} distinguish states "
-            f"that differ only in information it may not see"
+    for pv in variants:
+        _assert_state_variant(engine, serializer, pv)
+
+    if getattr(definition, "has_chance_nodes", False):
+        chance_state = getattr(bundle, "chance_state", None)
+        outcome_variants: Sequence[PrivateVariant] = (
+            getattr(bundle, "private_outcome_variants", None) or ()
         )
+        assert chance_state is not None and outcome_variants, (
+            "seat view contract failed: a hidden-information game with chance nodes must "
+            "supply chance_state and private_outcome_variants"
+        )
+        assert is_chance_node(engine, chance_state), (
+            "seat view contract failed: chance_state must be at a chance node"
+        )
+        assert {v.blind_seat for v in outcome_variants} == {0, 1}, (
+            "seat view contract failed: private_outcome_variants must cover every seat"
+        )
+        for ov in outcome_variants:
+            _assert_outcome_variant(engine, serializer, chance_state, ov)
 
-    assert dump_state_for_seat(serializer, state, blind) != serializer.dump_state(state), (
+
+def _assert_state_variant(engine: object, serializer: object, pv: PrivateVariant) -> None:
+    blind, a, b = pv.blind_seat, pv.state, pv.variant
+    assert serializer.dump_state(a) != serializer.dump_state(b), (
+        "seat view contract failed: a private variant must differ in its private information"
+    )
+    assert dump_state_for_seat(serializer, a, blind) != serializer.dump_state(a), (
         "seat view contract failed: a hidden-information game's per-seat state must "
         "redact the full state"
+    )
+
+    obs_a, obs_b = engine.observation(a, blind), engine.observation(b, blind)
+    _assert_indistinguishable(
+        "states",
+        blind,
+        {
+            "dump_state_for_seat": (
+                dump_state_for_seat(serializer, a, blind),
+                dump_state_for_seat(serializer, b, blind),
+            ),
+            "the observation object": (obs_a, obs_b),
+            "dump_observation": (
+                serializer.dump_observation(obs_a),
+                serializer.dump_observation(obs_b),
+            ),
+            "legal_actions": (engine.legal_actions(a, blind), engine.legal_actions(b, blind)),
+            "dump_public_state": (
+                dump_public_state(serializer, a),
+                dump_public_state(serializer, b),
+            ),
+            "the engine's public_state": (public_state(engine, a), public_state(engine, b)),
+        },
+    )
+
+    if engine.is_terminal(a) or is_chance_node(engine, a):
+        return
+    mover = engine.current_seat(a)
+    assert mover == engine.current_seat(b), (
+        f"seat view contract failed: whose turn it is lets seat {blind} distinguish states"
+    )
+    common = [x for x in engine.legal_actions(a, mover) if x in engine.legal_actions(b, mover)]
+    for action in common:
+        ta, tb = engine.apply_action(a, mover, action), engine.apply_action(b, mover, action)
+        _assert_indistinguishable(
+            f"the results of {action!r}",
+            blind,
+            {
+                "events": (_visible_events(ta.events, blind), _visible_events(tb.events, blind)),
+                "public events": (
+                    _visible_events(ta.events, None),
+                    _visible_events(tb.events, None),
+                ),
+                "dump_state_for_seat after the move": (
+                    dump_state_for_seat(serializer, ta.state, blind),
+                    dump_state_for_seat(serializer, tb.state, blind),
+                ),
+                "dump_public_state after the move": (
+                    dump_public_state(serializer, ta.state),
+                    dump_public_state(serializer, tb.state),
+                ),
+            },
+        )
+
+
+def _assert_outcome_variant(
+    engine: object, serializer: object, chance_state: object, ov: PrivateVariant
+) -> None:
+    from arena.core.public_view import dump_chance_outcome_for_viewer
+
+    blind, a, b = ov.blind_seat, ov.state, ov.variant
+    assert serializer.dump_chance_outcome(a) != serializer.dump_chance_outcome(b), (
+        "seat view contract failed: an outcome variant must differ in its private part"
+    )
+    ta, tb = engine.apply_chance(chance_state, a), engine.apply_chance(chance_state, b)
+    _assert_indistinguishable(
+        "chance outcomes",
+        blind,
+        {
+            "dump_chance_outcome_for_seat": (
+                dump_chance_outcome_for_viewer(serializer, a, blind),
+                dump_chance_outcome_for_viewer(serializer, b, blind),
+            ),
+            "dump_public_chance_outcome": (
+                dump_chance_outcome_for_viewer(serializer, a, None),
+                dump_chance_outcome_for_viewer(serializer, b, None),
+            ),
+            "chance events": (
+                _visible_events(ta.events, blind),
+                _visible_events(tb.events, blind),
+            ),
+            "public chance events": (
+                _visible_events(ta.events, None),
+                _visible_events(tb.events, None),
+            ),
+            "dump_state_for_seat after the outcome": (
+                dump_state_for_seat(serializer, ta.state, blind),
+                dump_state_for_seat(serializer, tb.state, blind),
+            ),
+            "dump_public_state after the outcome": (
+                dump_public_state(serializer, ta.state),
+                dump_public_state(serializer, tb.state),
+            ),
+        },
     )
 
 
@@ -372,6 +528,22 @@ def assert_chance_contract(bundle: GameContractBundle) -> None:
     )
 
     validate_match_transcript(definition, first)
+
+    if not getattr(definition, "has_hidden_information", False):
+        from arena.core.public_view import dump_chance_outcome_for_viewer
+
+        playout = _first_legal_playout(definition, seed)
+        for turn in playout.turns:
+            if turn.kind != "chance":
+                continue
+            full = definition.serializer.dump_chance_outcome(turn.outcome)
+            for viewer in (0, 1, None):
+                assert dump_chance_outcome_for_viewer(
+                    definition.serializer, turn.outcome, viewer
+                ) == full, (
+                    "chance contract failed: a perfect-information game must show every "
+                    "viewer the whole chance outcome"
+                )
 
     text = json.dumps(first)
     for fragment in (str(seed), f"{seed:x}", f"{seed:X}"):
@@ -433,6 +605,7 @@ def _state_semantics_match(
 
 __all__: Sequence[str] = [
     "GameContractBundle",
+    "PrivateVariant",
     "assert_chance_contract",
     "assert_game_contract",
     "assert_illegal_action_rejection",
