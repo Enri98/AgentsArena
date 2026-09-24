@@ -10,8 +10,11 @@ from arena.core.config import BaseGameConfig
 class Connect4Config(BaseGameConfig):
     """Boundary-facing configuration for a Connect 4 board."""
 
-    rows: int = Field(default=6, ge=4)
-    columns: int = Field(default=7, ge=4)
+    # Bounded: every snapshot carries the whole board, so an unbounded board
+    # made one match's transcript as large as a client liked (Phase 40 stores
+    # transcripts; see the review notes in IMPLEMENTATION_PLAN.md).
+    rows: int = Field(default=6, ge=4, le=20)
+    columns: int = Field(default=7, ge=4, le=20)
     connect_length: int = Field(default=4, ge=2)
 
     @model_validator(mode="after")

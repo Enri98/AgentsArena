@@ -147,3 +147,11 @@ def test_without_the_setting_the_header_is_ignored() -> None:
     with TestClient(app) as client:
         assert client.get(url, headers={"Fly-Client-IP": "1.1.1.1"}).status_code == 404
         assert client.get(url, headers={"Fly-Client-IP": "2.2.2.2"}).status_code == 429
+
+
+def test_an_unopenable_store_is_a_usage_error(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a directory")
+    with pytest.raises(SystemExit) as info:
+        _run_main(monkeypatch, ["--transcript-store", f"sqlite:{blocker / 'db.sqlite3'}"])
+    assert info.value.code == 2

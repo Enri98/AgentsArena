@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -347,7 +348,11 @@ def test_open_transcript_store_parses_specs(tmp_path: Path) -> None:
         store.close()
 
 
-@pytest.mark.parametrize("spec", ["", "memory:x", "file", "file:", "sqlite", "postgres:x"])
+@pytest.mark.parametrize(
+    "spec",
+    ["", "memory:x", "memory:", "file", "file:", "file:  ", "sqlite", "sqlite::memory:",
+     "sqlite:file:x?mode=memory", "postgres:x"],
+)
 def test_open_transcript_store_refuses_unknown_specs(spec: str) -> None:
     with pytest.raises(ValueError):
         open_transcript_store(spec)
@@ -360,7 +365,7 @@ def test_the_memory_default_is_bounded_below_the_durable_default() -> None:
 # ── Review of Slice 1 ──────────────────────────────────────────────────────
 
 
-def test_a_record_from_the_future_expires(make) -> None:
+def test_a_record_from_the_future_is_redated_and_then_expires(make) -> None:
     from arena.server.transcript_store import FUTURE_SLACK_S
 
     clock = Clock()
@@ -368,9 +373,35 @@ def test_a_record_from_the_future_expires(make) -> None:
     clock.now += FUTURE_SLACK_S + 3600  # the wall clock jumps forward...
     store.put(_mid(1), b"{}", audience="public")
     clock.now -= FUTURE_SLACK_S + 3600  # ...and is corrected
-    assert store.get(_mid(1)) is None
-    store.put(_mid(2), b"{}", audience="public")
-    assert store.get(_mid(2)) is not None
+    got = store.get(_mid(1))
+    assert got is not None and got.ended_at == clock.now  # re-dated to now
+    clock.now += 100
+    assert store.get(_mid(1)) is None  # and it expires on the normal TTL
+
+
+def test_a_clock_stepping_back_deletes_nothing(make) -> None:
+    from arena.server.transcript_store import FUTURE_SLACK_S
+
+    clock = Clock()
+    store = make(RetentionPolicy(ttl_s=10_000), clock)
+    for i in range(5):
+        store.put(_mid(i), b"{}", audience="public")
+    clock.now -= FUTURE_SLACK_S + 600  # every record now looks future-dated
+    store.put(_mid(9), b"{}", audience="public")
+    store.sweep()
+    assert all(store.get(_mid(i)) is not None for i in (0, 1, 2, 3, 4, 9))
+
+
+def test_room_is_made_before_the_write(make) -> None:
+    clock = Clock()
+    store = make(RetentionPolicy(max_bytes=30), clock)
+    store.put(_mid(1), b"x" * 15, audience="public")
+    clock.now += 1
+    store.put(_mid(2), b"x" * 15, audience="public")
+    clock.now += 1
+    # 30 bytes held; a 20-byte record needs both older ones gone first.
+    store.put(_mid(3), b"x" * 20, audience="public")
+    assert [store.get(_mid(i)) is not None for i in (1, 2, 3)] == [False, False, True]
 
 
 def test_a_put_after_the_clock_stepped_back_is_kept(make) -> None:
@@ -427,3 +458,55 @@ def test_a_locked_file_does_not_break_the_file_store(
     locked = False
     store.sweep()  # the retry deletes both leftovers
     assert os.listdir(tmp_path) == []
+
+
+def test_a_failed_file_write_leaves_no_partial_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import builtins
+
+    store = FileTranscriptStore(tmp_path, time_fn=Clock())
+    real_open = builtins.open
+
+    class Full:
+        def __init__(self, handle):  # type: ignore[no-untyped-def]
+            self.handle = handle
+
+        def __enter__(self):  # type: ignore[no-untyped-def]
+            return self
+
+        def __exit__(self, *exc):  # type: ignore[no-untyped-def]
+            self.handle.close()
+
+        def write(self, data: bytes) -> int:
+            raise OSError(28, "No space left on device")
+
+    def full_open(path, mode="r", *args, **kwargs):  # type: ignore[no-untyped-def]
+        handle = real_open(path, mode, *args, **kwargs)
+        return Full(handle) if "w" in mode and str(path).endswith(".tmp") else handle
+
+    monkeypatch.setattr(builtins, "open", full_open)
+    with pytest.raises(OSError):
+        store.put(MID, b"{}", audience="public")
+    monkeypatch.setattr(builtins, "open", real_open)
+    assert os.listdir(tmp_path) == []
+    store.put(MID, b"{}", audience="public")  # and the store still works
+    assert store.get(MID) is not None
+
+
+def test_a_sqlite_store_recovers_from_a_full_database(tmp_path: Path) -> None:
+    clock = Clock()
+    store = SqliteTranscriptStore(tmp_path / "t.sqlite3", RetentionPolicy(ttl_s=100), time_fn=clock)
+    try:
+        # Cap the database's size to stand in for a full disk.
+        store._db.execute("PRAGMA max_page_count = 40")
+        big = b"x" * 60_000
+        with pytest.raises(sqlite3.Error) as info:
+            for i in range(100):
+                store.put(_mid(i), big, audience="public")
+        assert "full" in str(info.value).lower()  # the real error, not a rollback error
+        clock.now += 100  # everything stored so far expires
+        store.put(_mid(999), big, audience="public")  # room is made first
+        assert store.get(_mid(999)) is not None
+    finally:
+        store.close()

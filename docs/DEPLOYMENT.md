@@ -263,8 +263,9 @@ To keep them across restarts, give the server a volume and a durable store.
    ```
 
 3. Deploy (`flyctl deploy`). The server logs a `server_config` line at startup naming the store.
-   It runs as UID 1000. If it logs `transcript_store_failed` with a permission error, the
-   volume's root is owned by root. Fix that once:
+   It runs as UID 1000. If it exits at startup with `cannot open transcript store ...:
+   Permission denied` (or logs `transcript_store_failed` later), the volume's root is owned by
+   root. Fix that once:
 
    ```powershell
    flyctl ssh console -C "chown 1000:1000 /data"
@@ -283,20 +284,32 @@ Every setting is a flag of `python -m arena.server` and an environment variable;
 | `ARENA_TRANSCRIPT_STORE` | `--transcript-store` | `memory` | `memory`, `file:DIR`, or `sqlite:PATH` |
 | `ARENA_TRANSCRIPT_TTL_S` | `--transcript-ttl-s` | `604800` (7 days) | Seconds a transcript is kept after its match ends |
 | `ARENA_TRANSCRIPT_MAX_ENTRIES` | `--transcript-max-entries` | `10000` | Most transcripts kept; the oldest go first |
-| `ARENA_TRANSCRIPT_MAX_BYTES` | `--transcript-max-bytes` | 1 GiB (64 MiB for `memory`) | Most bytes of transcripts kept; the oldest go first |
-| `ARENA_TRANSCRIPT_MAX_RECORD_BYTES` | `--transcript-max-record-bytes` | 64 MiB (4 MiB for `memory`) | Largest single transcript kept |
+| `ARENA_TRANSCRIPT_MAX_BYTES` | `--transcript-max-bytes` | 512 MiB (64 MiB for `memory`) | Most bytes of transcripts kept; the oldest go first |
+| `ARENA_TRANSCRIPT_MAX_RECORD_BYTES` | `--transcript-max-record-bytes` | 8 MiB (4 MiB for `memory`) | Largest single transcript kept |
 | `ARENA_CLIENT_IP_HEADER` | `--client-ip-header` | unset | Header with the client address, set by your proxy |
 
 Retention is enforced on every read, so an expired transcript returns `404` at once. The byte cap
-is what stops a client that plays many long matches from filling the volume. One transcript
-at the server's 5000-turn cap is about 2 MB. The caps are global and drop the oldest first, so
-a client that plays many long matches can push other transcripts out before their TTL: with
-the in-memory default, a few dozen capped matches fill 64 MiB. A durable store with the 1 GiB
-default holds about 500 of them.
+is what stops a client that plays many long matches from filling the volume: keep it well below
+the volume size (the 512 MiB default leaves a 1 GB volume room for file-system and SQLite
+overhead). Room for a new transcript is made before it is written, so a store at its cap, or a
+disk that filled anyway, recovers by evicting rather than refusing every write.
+
+How big a transcript gets depends on the game and its length. A 5000-turn Pig match (the
+server's turn cap) is about 2 MB, while the largest boards the configs allow run to several MB.
+Anything over the per-record cap is simply not stored. The caps are global and drop the oldest
+first, so one client that plays many long matches can push other transcripts out before their
+TTL:
+- the in-memory default fills with a few dozen maximal matches;
+- a durable store with the 512 MiB default holds at least 64 of the largest (8 MiB) and hundreds
+  of typical ones.
+
+Per-client quotas would need accounts, which are deferred. Reads are bounded too: 30 per IP per
+minute, and at most 4 at a time server-wide, since each holds a whole transcript in memory.
 
 A record dated more than five minutes in the future (the clock stepped forward, then back) is
-treated as expired, and on Windows a file another process holds open is deleted on a later
-sweep instead of failing the write.
+re-dated to the present rather than deleted, so a clock step never erases transcripts. On
+Windows, a file another process holds open is deleted on a later sweep instead of failing the
+write.
 
 **`ARENA_CLIENT_IP_HEADER` matters behind any proxy.** Rate limits (§13 of the protocol) are
 per client address, and behind Fly's proxy every connection comes from the proxy. Without the

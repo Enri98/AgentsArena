@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sqlite3
 from collections.abc import Sequence
 
 
@@ -62,14 +63,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--transcript-max-bytes",
         type=_positive_int,
         default=_env("ARENA_TRANSCRIPT_MAX_BYTES"),
-        help="Most bytes of transcripts kept (default: 1 GiB on disk, 64 MiB in memory). "
+        help="Most bytes of transcripts kept (default: 512 MiB on disk, 64 MiB in memory). "
         "Env: ARENA_TRANSCRIPT_MAX_BYTES.",
     )
     parser.add_argument(
         "--transcript-max-record-bytes",
         type=_positive_int,
         default=_env("ARENA_TRANSCRIPT_MAX_RECORD_BYTES"),
-        help="Largest single transcript kept (default: 64 MiB on disk, 4 MiB in memory). "
+        help="Largest single transcript kept (default: 8 MiB on disk, 4 MiB in memory). "
         "Env: ARENA_TRANSCRIPT_MAX_RECORD_BYTES.",
     )
     parser.add_argument(
@@ -134,6 +135,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         store = build_transcript_store(args)
     except (ValueError, argparse.ArgumentTypeError) as exc:
         parser.error(str(exc))
+    except (OSError, sqlite3.Error) as exc:
+        # An unwritable volume (root-owned /data, say): a clear message, not a
+        # traceback in a crash loop.
+        parser.error(f"cannot open transcript store {args.transcript_store!r}: {exc}")
 
     from arena.server.logging_setup import configure_logging
 

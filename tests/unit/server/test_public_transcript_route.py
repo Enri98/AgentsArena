@@ -84,3 +84,46 @@ def test_the_app_closes_its_store_on_shutdown() -> None:
     with TestClient(_app(transcript_store=Tracking())):
         pass
     assert closed == [True]
+
+
+def test_error_responses_are_not_cacheable() -> None:
+    with TestClient(_app()) as client:
+        resp = client.get(f"/matches/{MID}/public-transcript")
+    assert resp.status_code == 404
+    assert resp.headers["cache-control"] == "private, no-store"
+
+
+def test_a_save_finishing_between_the_checks_is_not_a_404() -> None:
+    # The pending flag is read first; the store then has the record.
+    app = _app()
+
+    class SavesDuringGet(MemoryTranscriptStore):
+        def get(self, match_id: str):  # type: ignore[no-untyped-def]
+            match = app.state.match_registry.get(match_id)
+            if not match.transcript_settled:
+                self.put(match_id, b'{"late": true}', audience="public")
+                match.transcript_settled = True
+            return super().get(match_id)
+
+    app.state.transcript_store = SavesDuringGet()
+    with TestClient(app) as client:
+        match_id = client.post("/matches", json=_MATCH).json()["match_id"]
+        resp = client.get(f"/matches/{match_id}/public-transcript")
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("game_id", "config"),
+    [
+        ("connect4", {"rows": 21, "columns": 7}),
+        ("connect4", {"rows": 6, "columns": 500}),
+        ("nim", {"num_piles": 1000, "max_pile_size": 1}),
+        ("nim", {"num_piles": 3, "max_pile_size": 101}),
+    ],
+)
+def test_board_sizes_are_bounded(game_id: str, config: dict) -> None:
+    # An unbounded board made one match's stored transcript as large as a
+    # client liked.
+    with TestClient(_app()) as client:
+        resp = client.post("/matches", json={"game_id": game_id, "game_config": config})
+    assert resp.status_code == 400

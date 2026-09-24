@@ -187,7 +187,7 @@ is not holding a seat, and seat-scoped transcripts are not available over HTTP.
 
 Retention is a server setting: by default a transcript is kept for 7 days from the end of the
 match, and at most 10,000 transcripts (plus a byte cap) are kept, oldest dropped first. A
-single transcript over the per-record cap (64 MiB with a durable store, 4 MiB in memory) is not
+single transcript over the per-record cap (8 MiB with a durable store, 4 MiB in memory) is not
 stored. The caps are global, so many long matches from one client can push out older
 transcripts sooner than their TTL; size the byte cap for the deployment (docs/DEPLOYMENT.md).
 
@@ -754,7 +754,8 @@ information.
   dropped seat out of its own reconnect. Every new connection has 10 s to send its hello.
 - Max concurrent spectators per match: **16**, counted separately, so spectators can never
   lock a seat out of its own reconnect.
-- Max public-transcript reads per source IP per minute (Phase 40): **30**.
+- Max public-transcript reads per source IP per minute (Phase 40): **30**; at most **4** are
+  served at once, server-wide (each holds a whole transcript in memory).
 
 The server also bounds its match registry: at most 1000 matches. When it is full it sheds
 finished matches first, then never-started ones (which also expire after an hour), oldest

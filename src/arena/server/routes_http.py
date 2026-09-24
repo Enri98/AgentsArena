@@ -313,11 +313,22 @@ async def get_public_transcript(match_id: str, request: Request) -> Response:
         try:
             limiter.check_transcript_read(ip=_client_ip(request))
         except RateLimitExceeded as exc:
-            return _error_response(429, "rate_limited", exc.message)
+            return _no_store(_error_response(429, "rate_limited", exc.message))
 
-    store: TranscriptStore = request.app.state.transcript_store
     if is_valid_match_id(match_id):
-        record = await asyncio.to_thread(store.get, match_id)
+        # Whether the save is still pending is read BEFORE the store: read
+        # after, a save finishing in between answered 404 for a transcript that
+        # had just come to exist.
+        registry: MatchRegistry = request.app.state.match_registry
+        try:
+            pending = not registry.get(match_id).transcript_settled
+        except MatchNotFound:
+            pending = False
+
+        store: TranscriptStore = request.app.state.transcript_store
+        # A read holds the whole body in memory; bound how many run at once.
+        async with _read_slots(request.app.state):
+            record = await asyncio.to_thread(store.get, match_id)
         if record is not None:
             return Response(
                 content=record.body,
@@ -325,25 +336,42 @@ async def get_public_transcript(match_id: str, request: Request) -> Response:
                 # The URL is a capability: keep it out of shared caches.
                 headers={"Cache-Control": "private, no-store"},
             )
-
-        registry: MatchRegistry = request.app.state.match_registry
-        try:
-            match = registry.get(match_id)
-        except MatchNotFound:
-            match = None
-        if match is not None and not match.transcript_settled:
-            return _error_response(
-                409,
-                "transcript_not_ready",
-                "The match has not ended, or its transcript is still being stored; "
-                "retry after match_finished or match_aborted.",
+        if pending:
+            return _no_store(
+                _error_response(
+                    409,
+                    "transcript_not_ready",
+                    "The match has not ended, or its transcript is still being stored; "
+                    "retry after match_finished or match_aborted.",
+                )
             )
 
-    return _error_response(
-        404,
-        "match_not_found",
-        "No public transcript for this match: unknown id, expired, or never stored.",
+    return _no_store(
+        _error_response(
+            404,
+            "match_not_found",
+            "No public transcript for this match: unknown id, expired, or never stored.",
+        )
     )
+
+
+#: Concurrent public-transcript reads per server. Each holds a whole body (up to
+#: the store's per-record cap) in memory while it is read and sent.
+MAX_CONCURRENT_TRANSCRIPT_READS: int = 4
+
+
+def _read_slots(app_state: Any) -> asyncio.Semaphore:
+    slots = getattr(app_state, "transcript_read_slots", None)
+    if slots is None:
+        slots = asyncio.Semaphore(MAX_CONCURRENT_TRANSCRIPT_READS)
+        app_state.transcript_read_slots = slots
+    return slots
+
+
+def _no_store(response: JSONResponse) -> JSONResponse:
+    # A 404 or 409 for a capability URL is no more cacheable than a 200.
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 # ---------------------------------------------------------------------------
