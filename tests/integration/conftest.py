@@ -11,10 +11,13 @@ retry at the test level if needed, but this has not been needed in practice.
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 import uvicorn
@@ -35,10 +38,11 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-@pytest.fixture(scope="module")
-def running_server() -> RunningServer:  # type: ignore[return]
+@contextlib.contextmanager
+def serve(app: Any) -> Iterator[RunningServer]:
+    """Run ``app`` on an ephemeral port in a background thread for the block."""
+
     port = _free_port()
-    app = create_app(rate_limiter=RateLimiter.unlimited())
     # websockets-sansio avoids a cancellation bug in the legacy websockets_impl
     # where cancelling a pending receive_text() task corrupts the ASGI receive
     # state, causing the next receive_text() call from run_match to see a stale
@@ -65,10 +69,17 @@ def running_server() -> RunningServer:  # type: ignore[return]
             raise RuntimeError(f"uvicorn server did not start within 10 s on port {port}")
         time.sleep(0.05)
 
-    yield RunningServer(
-        http_base_url=f"http://127.0.0.1:{port}",
-        ws_base_url=f"ws://127.0.0.1:{port}",
-    )
+    try:
+        yield RunningServer(
+            http_base_url=f"http://127.0.0.1:{port}",
+            ws_base_url=f"ws://127.0.0.1:{port}",
+        )
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
 
-    server.should_exit = True
-    thread.join(timeout=10)
+
+@pytest.fixture(scope="module")
+def running_server() -> Iterator[RunningServer]:
+    with serve(create_app(rate_limiter=RateLimiter.unlimited())) as running:
+        yield running

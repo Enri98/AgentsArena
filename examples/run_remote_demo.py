@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Demo: two Ollama agents play a game on a remote arena.server."
     )
     parser.add_argument("--server-url", required=True, help="WebSocket base URL, e.g. ws://127.0.0.1:8080")
-    parser.add_argument("--game", required=True, choices=["connect4", "tictactoe", "nim"])
+    parser.add_argument("--game", required=True, choices=["connect4", "tictactoe", "nim", "pig"])
     parser.add_argument("--model-seat-0", default="llama3.2")
     parser.add_argument("--model-seat-1", default="llama3.2")
     parser.add_argument("--out-dir", default="./runs/remote")

@@ -12,11 +12,13 @@ def register_builtin_games(registry: GameRegistry) -> None:
 
     from arena.games.connect4.definition import register_connect4
     from arena.games.nim.definition import register_nim
+    from arena.games.pig.definition import register_pig
     from arena.games.tictactoe.definition import register_tictactoe
 
     register_connect4(registry)
     register_tictactoe(registry)
     register_nim(registry)
+    register_pig(registry)
 
 
 def build_default_registry() -> GameRegistry:
@@ -31,6 +33,7 @@ __all__: Sequence[str] = [
     "build_default_registry",
     "connect4",
     "nim",
+    "pig",
     "tictactoe",
     "register_builtin_games",
 ]

@@ -13,7 +13,14 @@ from arena.core.serializer import Serializer
 
 @runtime_checkable
 class GameContractBundle(Protocol):
-    """Fixture bundle contract used by the shared game-contract assertions."""
+    """Fixture bundle contract used by the shared game-contract assertions.
+
+    A bundle may also define ``terminal_action``: the action that takes
+    ``near_terminal_state`` to ``terminal_state``, when that is not
+    ``legal_action``. Pig needs it — only ``roll`` is legal as a turn opens, and
+    only ``hold`` can end the game. It is optional so existing bundles are
+    unaffected.
+    """
 
     definition: object
     config: object
@@ -129,15 +136,16 @@ def assert_terminal_result_consistency(bundle: GameContractBundle) -> None:
 
     rules_engine = bundle.definition.rules_engine
     near_terminal_seat = rules_engine.current_seat(bundle.near_terminal_state)
+    terminal_action = _terminal_action(bundle)
     transition = rules_engine.apply_action(
         bundle.near_terminal_state,
         near_terminal_seat,
-        bundle.legal_action,
+        terminal_action,
     )
 
     assert transition.state == bundle.terminal_state, (
         "terminal/result contract failed: near_terminal_state should reach terminal_state via "
-        "bundle.legal_action"
+        "bundle.terminal_action (defaulting to bundle.legal_action)"
     )
     assert rules_engine.is_terminal(bundle.terminal_state), (
         "terminal/result contract failed: terminal_state must be terminal"
@@ -305,6 +313,10 @@ def assert_game_contract(bundle: GameContractBundle) -> None:
     assert_chance_contract(bundle)
 
 
+def _terminal_action(bundle: GameContractBundle) -> object:
+    return getattr(bundle, "terminal_action", None) or bundle.legal_action
+
+
 def _state_semantics_match(
     rules_engine: object,
     original_state: object,
@@ -340,6 +352,7 @@ def _state_semantics_match(
 
 __all__: Sequence[str] = [
     "GameContractBundle",
+    "assert_chance_contract",
     "assert_game_contract",
     "assert_illegal_action_rejection",
     "assert_legal_action_generation",

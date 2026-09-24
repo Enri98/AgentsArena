@@ -15,6 +15,7 @@ from arena.mcp import games as _games  # noqa: F401
 from arena.mcp._adapters import MCP_GAME_ADAPTERS
 from arena.mcp.games.connect4 import CONNECT4_ACTION_SCHEMA
 from arena.mcp.games.nim import NIM_ACTION_SCHEMA
+from arena.mcp.games.pig import PIG_ACTION_SCHEMA
 from arena.mcp.games.tictactoe import TICTACTOE_ACTION_SCHEMA
 
 
@@ -31,5 +32,6 @@ __all__: Sequence[str] = [
     "CONNECT4_ACTION_SCHEMA",
     "TICTACTOE_ACTION_SCHEMA",
     "NIM_ACTION_SCHEMA",
+    "PIG_ACTION_SCHEMA",
     "game_action_schema",
 ]

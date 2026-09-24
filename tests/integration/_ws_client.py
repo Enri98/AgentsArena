@@ -42,6 +42,8 @@ async def play_scripted(
     ws: ClientConnection,
     seat: int,
     choose: Callable[[ObservationRequestPayload], dict[str, Any]],
+    *,
+    frames: list[str] | None = None,
 ) -> tuple[dict[str, Any], RuntimeTranscriptPayload]:
     """Drive one seat's side of a match from handshake to match_finished.
 
@@ -61,6 +63,8 @@ async def play_scripted(
         Integer seat id (0 or 1); placed in the hello and action_response envelopes.
     choose:
         Callable that maps an `ObservationRequestPayload` to a raw action dict.
+    frames:
+        If given, every raw text frame this seat receives is appended to it.
     """
     from arena.adapters.in_process import ActionResponsePayload
     from arena.adapters.websocket.envelope import (
@@ -86,12 +90,18 @@ async def play_scripted(
     )
     await send_envelope(ws, hello)
 
-    welcome = await recv_envelope(ws)
+    async def _recv() -> WireEnvelope:  # type: ignore[valid-type]
+        raw = await ws.recv()
+        if frames is not None:
+            frames.append(raw if isinstance(raw, str) else raw.decode())
+        return loads(raw)
+
+    welcome = await _recv()
     assert welcome.type == "welcome", f"Expected welcome, got {welcome.type}"
     game_id: str = welcome.payload.game_id  # type: ignore[union-attr]
 
     while True:
-        env = await recv_envelope(ws)
+        env = await _recv()
 
         if env.type == "match_state":
             continue

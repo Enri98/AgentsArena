@@ -98,10 +98,14 @@ def start_match(
 
     rng: ChanceRng | None = None
     if definition.has_chance_nodes:
-        rng = ChanceRng(
-            seed=seed if seed is not None else secrets.randbits(CHANCE_SEED_BITS)
-        )
+        rng = ChanceRng(seed=seed if seed is not None else _mint_seed())
     return _start(definition, config, rng)
+
+
+def _mint_seed() -> int:
+    """A fresh secret seed. A seam so tests can learn the seed a server used."""
+
+    return secrets.randbits(CHANCE_SEED_BITS)
 
 
 def start_replay_match(

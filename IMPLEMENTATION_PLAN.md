@@ -3734,7 +3734,44 @@ seed out of config fixed nothing. **Owner decision (2026-09-24): chance becomes 
   any chance turn. Both are now optional, with `kind` and `outcome` added; the CLI history renders
   chance turns.
 
-#### Slice 4 - Exemplar stochastic game + adapter registrations
+#### Slice 4 - Exemplar stochastic game + adapter registrations — ✅ COMPLETE (2026-09-24)
+
+**Pig** (`arena.games.pig`, owner decision 2026-09-24): each turn the active seat rolls a die until
+it holds, banking the turn total, or rolls a 1 and loses it. The first seat to bank `target_score`
+(default 50, to keep agent matches short) wins.
+
+- Every roll is a chance node. `apply_action(roll)` only sets `roll_pending`; the face comes from
+  `sample_chance` / `apply_chance`. A turn must open with a roll (holding on zero is illegal), so two
+  agents can't stall a match by passing forever.
+- `target_score` lives in state, so `result()` is derivable from state alone. Config has no seed
+  field, and a test asserts it.
+- Registered in the default registry and in all three adapter registries: CLI (`roll`/`hold`, `r`/`h`,
+  `--pig-target`), MCP (`choice` enum schema), and Ollama (`PigPromptBuilder` with a hold-at-20
+  heuristic and an explicit "holding now wins" cue). `examples/run_remote_demo.py` accepts `--game pig`.
+- The shared contract harness takes an optional `terminal_action` on a bundle, defaulting to
+  `legal_action`. Pig needs it: only `roll` is legal as a turn opens, and only `hold` can end the game.
+- `tests/integration/test_pig_happy_path.py`, over real TCP with a spectator attached:
+  every committed turn reaches both seats and the spectator in order; the transcript validates
+  without the seed; the same seed reproduces the match through the server; and **the seed appears in
+  no frame any client receives.** `_mint_seed` in `arena.match.local_match` is the seam that pins it.
+- `tests/integration/test_chance_opening.py` runs a second server with the coin fixture registered,
+  proving opening chance turns go out before the first `match_state`.
+- Manual check: two local `qwen2.5:1.5b` Ollama agents finished a 20-point match through
+  `python -m arena.cli.play`, and the replay viewer rendered every frame.
+
+### Phase 37 status — ✅ COMPLETE (2026-09-24)
+
+All acceptance criteria met:
+- same seed + same actions → identical transcript: `assert_chance_contract`, and through the server.
+- replay never re-rolls: `start_replay_match` applies recorded outcomes and never samples.
+- the seed is not derivable from anything either seat receives: asserted locally (transcript,
+  snapshots, observations, `repr`) and over the wire (every frame to both seats and a spectator).
+- the three deterministic games are untouched apart from mechanical changes. They carry no generator.
+- `WIRE_SCHEMA_VERSION == 2`; a v1-only client is refused at `hello` with `4400`.
+- ruff + pytest green: **821 passed**.
+
+Also landed early, ahead of Phase 38's list: **multi-version decode** (Slice 2). Phase 38 only needs
+to add `3` to the supported sets.
 
 
 ---
@@ -3754,9 +3791,12 @@ Scope:
 - `public_snapshot` added to `TurnCommittedBody` as a new field (deferred here from Phase 36, where
   it would have been byte-identical churn); spectators switch to it
 - `WIRE_SCHEMA_VERSION` bumped to `3`
-- **the codec must accept more than one version.** `codec.py:53` raises `SchemaVersionMismatch` on
-  anything `!= WIRE_SCHEMA_VERSION`; negotiating `supported_schema_versions` requires decode-time
-  dispatch. This is not currently in any phase's scope.
+- ~~**the codec must accept more than one version.**~~ **Done in Phase 37 Slice 2**:
+  `SUPPORTED_WIRE_SCHEMA_VERSIONS` and the runtime validators already accept several versions. Here
+  it only needs `3` added.
+- chance outcomes in hidden-information games: a chance turn's `outcome` and its events can be
+  private (Liar's Dice's opening roll holds both hands), so per-seat transcripts and event filtering
+  must cover `turn_record.outcome`, not just `post_snapshot` and `events`.
 - per-seat `post_snapshot` for hidden-information games; `_broadcast`'s serialize-once optimization
   (`runtime_bridge.py:197`) must become per-recipient
 - domain events gain `is_public`; the server filters non-public events to entitled seats

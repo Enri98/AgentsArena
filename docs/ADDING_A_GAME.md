@@ -1,10 +1,10 @@
 # Adding a New Game
 
-AgentsArena v1 supports deterministic, perfect-information, sequential, 2-seat
-games. Any new game in v1 must respect those constraints. Stochasticity,
-imperfect information, more than two seats, and simultaneous moves are explicit
-v2 work — see `docs/RFC_IMPERFECT_INFORMATION.md` and the "Deferred to v2"
-section of `CLAUDE.md`.
+AgentsArena supports perfect-information, sequential, 2-seat games. Since
+Phase 37 a game may be **stochastic** — dice, draws, deals — through chance
+nodes; see "Games with chance nodes" below, with Pig (`src/arena/games/pig/`)
+as the reference. Imperfect information (Phase 38), simultaneous moves
+(Phase 41), and more than two seats are still out of scope.
 
 The work splits cleanly across one core game package and three per-layer
 adapter modules. Each adapter layer maintains its own self-registering registry
@@ -327,16 +327,47 @@ The PostToolUse hook handles this automatically on Claude Code sessions. Per
 - **Mutating events with non-JSON-native fields.** Use `list[int]`, not
   `tuple[int, ...]`, for event fields that are dumped verbatim; transcripts
   validate strictly. See `NimObjectsTaken.remaining`.
-- **`schema_version` drift.** Runtime payloads pin `schema_version=1`. New
+- **`schema_version` drift.** Runtime payloads are at `schema_version=2`. New
   games inherit this; bumping it is an explicit, separate change.
 
-## Out of scope for v1
+## Games with chance nodes
 
-- Stochasticity (random draws, dice, shuffled decks)
-- Imperfect information (hidden hands, private state)
+A chance node is a state where no seat acts and a random outcome resolves
+instead. Pig (`src/arena/games/pig/`) is the reference: every `roll` action
+leads to a chance node, and the die face is the outcome.
+
+1. Set `has_chance_nodes=True` on the `GameDefinition`. Registration rejects the
+   game unless all five hooks below exist.
+2. On the rules engine:
+   - `is_chance_node(state) -> bool`
+   - `sample_chance(state, rng: ChanceRng) -> (outcome, ChanceRng)` — draw with
+     `rng.draw(n)` and return the advanced generator. Never keep an RNG anywhere
+     else.
+   - `apply_chance(state, outcome) -> TransitionResult` — **revalidate the
+     outcome**, as `apply_action` revalidates actions. Replayed outcomes are
+     untrusted input.
+   - `legal_actions` returns `()` and `validate_action` raises at a chance node.
+3. On the serializer: `dump_chance_outcome` / `load_chance_outcome`. The outcome
+   is a small frozen dataclass, **not** an `Action`, so no seat can submit it.
+4. Emit an event describing each outcome. Clients cannot recompute chance, so
+   `turn_committed.events` and `turn_record.outcome` are how they learn it.
+
+**Never put a seed or generator in config or state.** Both are broadcast to
+every seat and spectator in each snapshot, and either would let a seat predict
+the dice. The match owns the generator (`LocalMatch.rng`); `start_match` mints a
+secret seed unless you pass `seed=` for reproducibility.
+
+`arena.match` drains chance nodes as part of stepping, so `current_seat` is only
+ever asked about a state where a seat is to move. The shared contract suite runs
+`assert_chance_contract`: the same seed reproduces the transcript, replay
+validates without the seed, and the seed never appears in the transcript. If only
+one action can end the game, set `terminal_action` on your contract bundle, as
+Pig's does.
+
+## Still out of scope
+
+- Imperfect information (hidden hands, private state) — Phase 38
+- Simultaneous moves — Phase 41
 - More than two seats
-- Simultaneous moves
 
-These require schema, runtime, and protocol changes covered in
-`docs/RFC_IMPERFECT_INFORMATION.md`. See also the "Deferred to v2" section of
-`CLAUDE.md`.
+See the "v2 roadmap" section of `IMPLEMENTATION_PLAN.md`.

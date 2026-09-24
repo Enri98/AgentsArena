@@ -78,7 +78,19 @@ still owned by the seat-1 handler. Both things that motivated the refactor — t
 spectator attachment — were solved without it, and its only remaining consumer is Phase 41s
 simultaneous-move loop. Build it there rather than speculatively.
 
-Active phase: **37 — chance-node primitive**. This one carries the bump to `schema_version=2`.
+**Phase 37 is complete** (2026-09-24), carrying the wire bump to `schema_version=2`. Shipped: the
+chance-node contract (`arena.core.chance`), `kind`/`outcome` transcript turns, load-bearing
+`turn_committed.events`, multi-version decode, and **Pig** (`arena.games.pig`) as the exemplar game,
+registered in every adapter registry. 821 tests pass.
+
+**The chance seed is private to the match.** The first draft put `ChanceRng(seed, counter)` in game
+state. But state is broadcast as `post_snapshot`, so anyone could run it forward and predict every
+roll. Chance is now nature's action: `sample_chance(state, rng)` draws an outcome live,
+`apply_chance(state, outcome)` applies and revalidates it, and the generator lives on
+`LocalMatch.rng`, never in state, config, or any payload. Transcripts record outcomes, and replay
+(`start_replay_match`) applies them without the seed.
+
+Active phase: **38 — imperfect-information contract**, carrying the bump to `schema_version=3`.
 
 The Phase 36-38 specs were revised on 2026-09-22 after an adversarial review that checked every
 claim against the code. Three findings are worth carrying forward, because each is easy to
@@ -87,9 +99,11 @@ rediscover the hard way:
 - **A slow spectator can abort a match.** `_broadcast` (`runtime_bridge.py:188`) awaits `send_text`
   sequentially inside `run_match`; one blocked send suspends the driver while the per-turn deadline
   timer keeps running, and the active seat is blamed for `turn_deadline_expired`.
-- **A seed in config is public.** `send_welcome` (`runtime_bridge.py:1021`) dumps `match_config` to
-  both seats, and `_build_snapshot` (`local_match.py:99`) embeds it in every `SnapshotEnvelope`.
-  Phase 38's `dump_state_for_seat` covers `state`, not `config`.
+- **A seed in config is public — and so is a seed in state.** `send_welcome` dumps `match_config` to
+  both seats, `_build_snapshot` embeds config in every `SnapshotEnvelope`, and every
+  `post_snapshot` carries the full state. Phase 37 keeps the generator on `LocalMatch` for this reason.
+  Phase 38's `dump_state_for_seat` covers `state`, not `config`, and a chance turn's `outcome` can
+  itself be private (Liar's Dice's opening roll).
 - **`_handle_reconnect` never replays the transcript** (`routes_ws.py:289-353`) despite protocol
   §11 promising it. It sends `welcome` + one `match_state` and nothing else.
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from arena.mcp.games import connect4 as _connect4  # noqa: F401
 from arena.mcp.games import nim as _nim  # noqa: F401
+from arena.mcp.games import pig as _pig  # noqa: F401
 from arena.mcp.games import tictactoe as _tictactoe  # noqa: F401
 
 __all__: tuple[str, ...] = ()
