@@ -355,3 +355,75 @@ def test_open_transcript_store_refuses_unknown_specs(spec: str) -> None:
 
 def test_the_memory_default_is_bounded_below_the_durable_default() -> None:
     assert MemoryTranscriptStore().policy.max_bytes < RetentionPolicy().max_bytes
+
+
+# ── Review of Slice 1 ──────────────────────────────────────────────────────
+
+
+def test_a_record_from_the_future_expires(make) -> None:
+    from arena.server.transcript_store import FUTURE_SLACK_S
+
+    clock = Clock()
+    store = make(RetentionPolicy(ttl_s=100), clock)
+    clock.now += FUTURE_SLACK_S + 3600  # the wall clock jumps forward...
+    store.put(_mid(1), b"{}", audience="public")
+    clock.now -= FUTURE_SLACK_S + 3600  # ...and is corrected
+    assert store.get(_mid(1)) is None
+    store.put(_mid(2), b"{}", audience="public")
+    assert store.get(_mid(2)) is not None
+
+
+def test_a_put_after_the_clock_stepped_back_is_kept(make) -> None:
+    clock = Clock()
+    store = make(RetentionPolicy(max_entries=2), clock)
+    store.put(_mid(1), b"{}", audience="public")
+    store.put(_mid(2), b"{}", audience="public")
+    clock.now -= 60
+    store.put(_mid(3), b"{}", audience="public")
+    assert store.get(_mid(3)) is not None
+
+
+def test_a_record_over_the_per_record_cap_is_refused(make) -> None:
+    store = make(RetentionPolicy(max_bytes=1000, max_record_bytes=100))
+    with pytest.raises(TranscriptRejected):
+        store.put(MID, b"x" * 101, audience="public")
+    store.put(MID, b"x" * 100, audience="public")
+
+
+def test_a_closed_store_refuses_puts_and_finds_nothing(make) -> None:
+    from arena.server.transcript_store import StoreClosed
+
+    store = make()
+    store.put(MID, b"{}", audience="public")
+    store.close()
+    with pytest.raises(StoreClosed):
+        store.put(MID, b"{}", audience="public")
+    assert store.get(MID) is None
+    assert store.sweep() == 0
+    store.close()  # idempotent
+
+
+def test_a_locked_file_does_not_break_the_file_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Windows refuses to delete a file another process holds open.
+    clock = Clock()
+    store = FileTranscriptStore(tmp_path, RetentionPolicy(ttl_s=100), time_fn=clock)
+    store.put(MID, b"old", audience="public")
+    real_unlink = Path.unlink
+    locked = True
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if locked:
+            raise PermissionError(32, "in use")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    clock.now += 1
+    store.put(MID, b"new", audience="public")  # the old file cannot go yet
+    assert store.get(MID).body == b"new"  # type: ignore[union-attr]
+    clock.now += 200
+    assert store.sweep() == 1  # does not raise either
+    locked = False
+    store.sweep()  # the retry deletes both leftovers
+    assert os.listdir(tmp_path) == []

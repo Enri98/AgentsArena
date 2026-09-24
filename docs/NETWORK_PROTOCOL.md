@@ -186,7 +186,10 @@ outlives a restart. Only the public transcript is ever stored or served: holding
 is not holding a seat, and seat-scoped transcripts are not available over HTTP.
 
 Retention is a server setting: by default a transcript is kept for 7 days from the end of the
-match, and at most 10,000 transcripts (plus a byte cap) are kept, oldest dropped first.
+match, and at most 10,000 transcripts (plus a byte cap) are kept, oldest dropped first. A
+single transcript over the per-record cap (64 MiB with a durable store, 4 MiB in memory) is not
+stored. The caps are global, so many long matches from one client can push out older
+transcripts sooner than their TTL; size the byte cap for the deployment (docs/DEPLOYMENT.md).
 
 Errors:
 
@@ -861,6 +864,19 @@ The Python reference SDK (`arena.sdk`) consumes these schemas at install time vi
 Pydantic models; it does not need to fetch from `/schemas/payloads` at runtime. Non-Python SDKs
 fetch once during build/codegen and pin to the same `schema_version` they support. Servers MUST
 keep `/schemas/payloads` byte-stable for a given `schema_version`; any change is a version bump.
+
+**Envelope consistency (v3).** The JSON Schemas describe each field; a `RuntimeTranscriptPayload`
+or `SessionStatusPayload` must also agree with itself, and the reference implementation rejects
+one that does not:
+
+- `lifecycle` is one of `created`, `running`, `finished`, `aborted`, and `abort` is present
+  exactly when it is `aborted`;
+- players have distinct seats and distinct `player_id`s;
+- `viewer_seat` is a seat exactly when `view` is `"seat"`, and `null` otherwise;
+- a transcript's `view` and `viewer_seat` equal those of the `match_transcript` it wraps (a
+  pre-v3 inner transcript carries none and is full);
+- in a view other than `"full"`, `abort.cause_message` is `null` (the text of an exception can
+  carry anything, including an agent's reasoning about its own hand).
 
 **Key payload shapes** (informative summary; the JSON Schemas are authoritative):
 

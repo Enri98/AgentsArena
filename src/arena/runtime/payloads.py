@@ -117,7 +117,10 @@ class RuntimeResultPayload(BaseModel):
     payload: JSONMapping = Field(default_factory=dict)
 
 
-RuntimeLifecycleValue = Literal["created", "running", "finished", "aborted"]
+#: Lifecycle values an envelope may carry. Checked by a validator rather than
+#: typed as a Literal: the field's JSON Schema is published at
+#: /schemas/payloads, which must stay byte-stable within a wire version.
+_LIFECYCLES = frozenset(lifecycle.value for lifecycle in RuntimeLifecycle)
 
 
 def _check_envelope(
@@ -130,6 +133,8 @@ def _check_envelope(
 ) -> None:
     """What every status and transcript envelope must agree with itself on."""
 
+    if lifecycle not in _LIFECYCLES:
+        raise ValueError(f"unknown lifecycle {lifecycle!r}")
     if (lifecycle == RuntimeLifecycle.ABORTED.value) != (abort is not None):
         raise ValueError("abort is present exactly when the lifecycle is 'aborted'")
     seats = [player.seat for player in players]
@@ -151,7 +156,7 @@ class RuntimeSessionStatusPayload(BaseModel):
     schema_version: Literal[1, 2, 3]
     match_id: str = Field(min_length=1)
     game_id: str = Field(min_length=1)
-    lifecycle: RuntimeLifecycleValue
+    lifecycle: str = Field(min_length=1)
     players: list[RuntimePlayerPayload]
     current_seat: int | None
     turn_count: int
@@ -183,7 +188,7 @@ class RuntimeTranscriptPayload(BaseModel):
     game_id: str = Field(min_length=1)
     # Accepts every version this build reads; older ones stay readable.
     schema_version: Literal[1, 2, 3]
-    lifecycle: RuntimeLifecycleValue
+    lifecycle: str = Field(min_length=1)
     players: list[RuntimePlayerPayload]
     events: list[RuntimeEventPayload]
     abort: RuntimeAbortPayload | None

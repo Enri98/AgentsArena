@@ -50,6 +50,16 @@ DEFAULT_MAX_ENTRIES: int = 10_000
 DEFAULT_MAX_BYTES: int = 1 << 30
 #: The in-memory default shares the process with everything else.
 DEFAULT_MEMORY_MAX_BYTES: int = 64 << 20
+#: Largest single transcript kept. Eviction is global and oldest-first, so one
+#: record may push out others; bounding each record bounds how much one long
+#: match can. A match at the server's 5000-turn cap is about 2 MB.
+DEFAULT_MAX_RECORD_BYTES: int = 64 << 20
+DEFAULT_MEMORY_MAX_RECORD_BYTES: int = 4 << 20
+#: A record stamped this far in the future is treated as expired. The wall
+#: clock can step forward and back (NTP, a restored VM); a record written
+#: during such a step would otherwise never expire, and would always sort as
+#: newest, so the caps would evict every legitimate record before it.
+FUTURE_SLACK_S: float = 300.0
 
 #: Match ids are ``secrets.token_urlsafe(16)``. Anything else is refused before
 #: it reaches a path or a query, so an id cannot traverse out of the directory.
@@ -70,12 +80,15 @@ class RetentionPolicy:
 
     ``ttl_s`` counts from the moment the match ended. When a new record would
     exceed ``max_entries`` or ``max_bytes``, the records that ended first are
-    dropped. A single transcript larger than ``max_bytes`` is not stored.
+    dropped (never the one just stored). A transcript larger than
+    ``record_limit`` (the smaller of ``max_record_bytes`` and ``max_bytes``) is
+    not stored.
     """
 
     ttl_s: float = DEFAULT_TTL_S
     max_entries: int = DEFAULT_MAX_ENTRIES
     max_bytes: int = DEFAULT_MAX_BYTES
+    max_record_bytes: int = DEFAULT_MAX_RECORD_BYTES
 
     def __post_init__(self) -> None:
         if not self.ttl_s > 0:
@@ -84,6 +97,17 @@ class RetentionPolicy:
             raise ValueError(f"max_entries must be at least 1, got {self.max_entries!r}.")
         if self.max_bytes < 1:
             raise ValueError(f"max_bytes must be at least 1, got {self.max_bytes!r}.")
+        if self.max_record_bytes < 1:
+            raise ValueError(
+                f"max_record_bytes must be at least 1, got {self.max_record_bytes!r}."
+            )
+
+    @property
+    def record_limit(self) -> int:
+        return min(self.max_record_bytes, self.max_bytes)
+
+    def is_expired(self, ended_at: float, now: float) -> bool:
+        return now - ended_at >= self.ttl_s or ended_at - now > FUTURE_SLACK_S
 
 
 @dataclass(frozen=True)
@@ -116,7 +140,12 @@ class TranscriptStore(Protocol):
         """Delete expired records. Returns how many were deleted."""
 
     def close(self) -> None:
-        """Release files or connections. The store is unusable afterwards."""
+        """Release files or connections. Afterwards ``put`` raises ``StoreClosed``
+        and ``get`` finds nothing."""
+
+
+class StoreClosed(RuntimeError):
+    """The store was closed (the server is shutting down)."""
 
 
 def _check_put(policy: RetentionPolicy, match_id: str, body: bytes, audience: str) -> None:
@@ -126,10 +155,10 @@ def _check_put(policy: RetentionPolicy, match_id: str, body: bytes, audience: st
         raise TranscriptRejected("Not a valid match id.")
     if not isinstance(body, bytes):
         raise TranscriptRejected("A transcript body must be bytes.")
-    if len(body) > policy.max_bytes:
+    if len(body) > policy.record_limit:
         raise TranscriptRejected(
-            f"The transcript is {len(body)} bytes; the store keeps at most "
-            f"{policy.max_bytes}."
+            f"The transcript is {len(body)} bytes; the store keeps transcripts of at "
+            f"most {policy.record_limit}."
         )
 
 
@@ -155,11 +184,17 @@ class _Index:
         if old is not None:
             self.total_bytes -= old[1]
 
-    def expired(self, now: float, ttl_s: float) -> list[str]:
-        return [mid for mid, (ended, _) in self.entries.items() if now - ended >= ttl_s]
+    def expired(self, now: float, policy: RetentionPolicy) -> list[str]:
+        return [
+            mid for mid, (ended, _) in self.entries.items() if policy.is_expired(ended, now)
+        ]
 
-    def over_caps(self, policy: RetentionPolicy) -> list[str]:
-        """The oldest ids to drop so the rest fit the caps."""
+    def over_caps(self, policy: RetentionPolicy, keep: str | None = None) -> list[str]:
+        """The oldest ids to drop so the rest fit the caps; never ``keep``.
+
+        ``keep`` is the record just stored. After the clock stepped backwards it
+        would sort as the oldest and be dropped the moment it was stored.
+        """
 
         count, size = len(self.entries), self.total_bytes
         if count <= policy.max_entries and size <= policy.max_bytes:
@@ -168,6 +203,8 @@ class _Index:
         for mid, (_, entry_size) in sorted(self.entries.items(), key=lambda kv: kv[1][0]):
             if count <= policy.max_entries and size <= policy.max_bytes:
                 break
+            if mid == keep:
+                continue
             doomed.append(mid)
             count -= 1
             size -= entry_size
@@ -183,20 +220,26 @@ class MemoryTranscriptStore:
         *,
         time_fn: Callable[[], float] = time.time,
     ) -> None:
-        self.policy = policy or RetentionPolicy(max_bytes=DEFAULT_MEMORY_MAX_BYTES)
+        self.policy = policy or RetentionPolicy(
+            max_bytes=DEFAULT_MEMORY_MAX_BYTES,
+            max_record_bytes=DEFAULT_MEMORY_MAX_RECORD_BYTES,
+        )
         self._now = time_fn
         self._lock = threading.Lock()
         self._index = _Index()
         self._bodies: dict[str, bytes] = {}
+        self._closed = False
 
     def put(self, match_id: str, body: bytes, *, audience: str) -> StoredTranscript:
         _check_put(self.policy, match_id, body, audience)
         with self._lock:
+            if self._closed:
+                raise StoreClosed("The transcript store is closed.")
             now = self._now()
             self._index.add(match_id, now, len(body))
             self._bodies[match_id] = body
-            self._drop(self._index.expired(now, self.policy.ttl_s))
-            self._drop(self._index.over_caps(self.policy))
+            self._drop(self._index.expired(now, self.policy))
+            self._drop(self._index.over_caps(self.policy, keep=match_id))
             return StoredTranscript(match_id, now, body)
 
     def get(self, match_id: str) -> StoredTranscript | None:
@@ -206,19 +249,20 @@ class MemoryTranscriptStore:
             entry = self._index.entries.get(match_id)
             if entry is None:
                 return None
-            if self._now() - entry[0] >= self.policy.ttl_s:
+            if self.policy.is_expired(entry[0], self._now()):
                 self._drop([match_id])
                 return None
             return StoredTranscript(match_id, entry[0], self._bodies[match_id])
 
     def sweep(self) -> int:
         with self._lock:
-            doomed = self._index.expired(self._now(), self.policy.ttl_s)
+            doomed = self._index.expired(self._now(), self.policy)
             self._drop(doomed)
             return len(doomed)
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             self._index = _Index()
             self._bodies.clear()
 
@@ -226,6 +270,26 @@ class MemoryTranscriptStore:
         for mid in match_ids:
             self._index.discard(mid)
             self._bodies.pop(mid, None)
+
+
+def _fsync_directory(directory: Path) -> None:
+    """Make a rename or unlink in ``directory`` durable (POSIX only).
+
+    Windows has no directory handle to fsync; NTFS journals the rename.
+    """
+
+    if os.name == "nt":
+        return
+    try:
+        fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _file_key(match_id: str) -> str:
@@ -266,6 +330,11 @@ class FileTranscriptStore:
         self._lock = threading.Lock()
         self._index = _Index()
         self._files: dict[str, Path] = {}
+        # Files that could not be deleted yet (Windows refuses to delete a file
+        # another process holds open: an indexer, a backup, a virus scanner).
+        # Out of the index already; retried on every put and sweep.
+        self._orphans: set[Path] = set()
+        self._closed = False
         self._load()
 
     def _load(self) -> None:
@@ -275,7 +344,7 @@ class FileTranscriptStore:
                 continue
             path = Path(entry.path)
             if self._TMP_NAME.fullmatch(entry.name):
-                path.unlink(missing_ok=True)  # our interrupted write
+                self._unlink(path)  # our interrupted write
                 continue
             parsed = self._NAME.fullmatch(entry.name)
             if parsed is None:
@@ -291,15 +360,18 @@ class FileTranscriptStore:
             for ended_at, mid, path, size in sorted(found):
                 previous = self._files.get(mid)
                 if previous is not None:
-                    previous.unlink(missing_ok=True)  # a replaced record left behind
+                    self._unlink(previous)  # a replaced record left behind
                 self._index.add(mid, ended_at, size)
                 self._files[mid] = path
-            self._drop(self._index.expired(self._now(), self.policy.ttl_s))
+            self._drop(self._index.expired(self._now(), self.policy))
             self._drop(self._index.over_caps(self.policy))
 
     def put(self, match_id: str, body: bytes, *, audience: str) -> StoredTranscript:
         _check_put(self.policy, match_id, body, audience)
         with self._lock:
+            if self._closed:
+                raise StoreClosed("The transcript store is closed.")
+            self._retry_orphans()
             now = self._now()
             key = _file_key(match_id)
             path = self.directory / f"{key}.{int(now * 1000)}.json"
@@ -309,13 +381,16 @@ class FileTranscriptStore:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, path)
+            _fsync_directory(self.directory)
+            # The new file is in place: the index follows it before anything
+            # else can fail, so a get never serves the replaced body.
             previous = self._files.get(match_id)
-            if previous is not None and previous != path:
-                previous.unlink(missing_ok=True)
             self._index.add(match_id, now, len(body))
             self._files[match_id] = path
-            self._drop(self._index.expired(now, self.policy.ttl_s))
-            self._drop(self._index.over_caps(self.policy))
+            if previous is not None and previous != path:
+                self._unlink(previous)
+            self._drop(self._index.expired(now, self.policy))
+            self._drop(self._index.over_caps(self.policy, keep=match_id))
             return StoredTranscript(match_id, now, body)
 
     def get(self, match_id: str) -> StoredTranscript | None:
@@ -325,7 +400,7 @@ class FileTranscriptStore:
             entry = self._index.entries.get(match_id)
             if entry is None:
                 return None
-            if self._now() - entry[0] >= self.policy.ttl_s:
+            if self.policy.is_expired(entry[0], self._now()):
                 self._drop([match_id])
                 return None
             try:
@@ -338,12 +413,14 @@ class FileTranscriptStore:
 
     def sweep(self) -> int:
         with self._lock:
-            doomed = self._index.expired(self._now(), self.policy.ttl_s)
+            self._retry_orphans()
+            doomed = self._index.expired(self._now(), self.policy)
             self._drop(doomed)
             return len(doomed)
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             self._index = _Index()
             self._files.clear()
 
@@ -352,7 +429,21 @@ class FileTranscriptStore:
             self._index.discard(mid)
             path = self._files.pop(mid, None)
             if path is not None:
-                path.unlink(missing_ok=True)
+                self._unlink(path)
+
+    def _unlink(self, path: Path) -> None:
+        """Delete ``path`` if possible; remember it for a retry if not."""
+
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            self._orphans.add(path)
+        else:
+            self._orphans.discard(path)
+
+    def _retry_orphans(self) -> None:
+        for path in list(self._orphans):
+            self._unlink(path)
 
 
 class SqliteTranscriptStore:
@@ -386,6 +477,7 @@ class SqliteTranscriptStore:
             "CREATE INDEX IF NOT EXISTS public_transcripts_ended_at"
             " ON public_transcripts (ended_at)"
         )
+        self._closed = False
         with self._lock:
             self._expire(self._now())
             self._enforce_caps()
@@ -393,6 +485,8 @@ class SqliteTranscriptStore:
     def put(self, match_id: str, body: bytes, *, audience: str) -> StoredTranscript:
         _check_put(self.policy, match_id, body, audience)
         with self._lock:
+            if self._closed:
+                raise StoreClosed("The transcript store is closed.")
             now = self._now()
             self._db.execute("BEGIN IMMEDIATE")
             try:
@@ -402,7 +496,7 @@ class SqliteTranscriptStore:
                     (match_id, now, len(body), body),
                 )
                 self._expire(now)
-                self._enforce_caps()
+                self._enforce_caps(keep=match_id)
             except BaseException:
                 self._db.execute("ROLLBACK")
                 raise
@@ -413,6 +507,8 @@ class SqliteTranscriptStore:
         if not is_valid_match_id(match_id):
             return None
         with self._lock:
+            if self._closed:
+                return None
             row = self._db.execute(
                 "SELECT ended_at, body FROM public_transcripts WHERE match_id = ?",
                 (match_id,),
@@ -420,7 +516,7 @@ class SqliteTranscriptStore:
             if row is None:
                 return None
             ended_at, body = row
-            if self._now() - ended_at >= self.policy.ttl_s:
+            if self.policy.is_expired(ended_at, self._now()):
                 self._db.execute(
                     "DELETE FROM public_transcripts WHERE match_id = ?", (match_id,)
                 )
@@ -429,19 +525,24 @@ class SqliteTranscriptStore:
 
     def sweep(self) -> int:
         with self._lock:
+            if self._closed:
+                return 0
             return self._expire(self._now())
 
     def close(self) -> None:
         with self._lock:
-            self._db.close()
+            if not self._closed:
+                self._closed = True
+                self._db.close()
 
     def _expire(self, now: float) -> int:
         cursor = self._db.execute(
-            "DELETE FROM public_transcripts WHERE ended_at <= ?", (now - self.policy.ttl_s,)
+            "DELETE FROM public_transcripts WHERE ended_at <= ? OR ended_at > ?",
+            (now - self.policy.ttl_s, now + FUTURE_SLACK_S),
         )
         return cursor.rowcount
 
-    def _enforce_caps(self) -> None:
+    def _enforce_caps(self, keep: str | None = None) -> None:
         count, size = self._db.execute(
             "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM public_transcripts"
         ).fetchone()
@@ -453,6 +554,8 @@ class SqliteTranscriptStore:
         ):
             if count <= self.policy.max_entries and size <= self.policy.max_bytes:
                 break
+            if mid == keep:
+                continue
             doomed.append(mid)
             count -= 1
             size -= entry_size
@@ -479,13 +582,17 @@ def open_transcript_store(spec: str, policy: RetentionPolicy | None = None) -> T
 __all__ = [
     "DEFAULT_MAX_BYTES",
     "DEFAULT_MAX_ENTRIES",
+    "DEFAULT_MAX_RECORD_BYTES",
     "DEFAULT_MEMORY_MAX_BYTES",
+    "DEFAULT_MEMORY_MAX_RECORD_BYTES",
+    "FUTURE_SLACK_S",
     "DEFAULT_TTL_S",
     "FileTranscriptStore",
     "MemoryTranscriptStore",
     "PUBLIC_AUDIENCE",
     "RetentionPolicy",
     "SqliteTranscriptStore",
+    "StoreClosed",
     "StoredTranscript",
     "TranscriptRejected",
     "TranscriptStore",

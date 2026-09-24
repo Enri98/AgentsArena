@@ -66,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
         "Env: ARENA_TRANSCRIPT_MAX_BYTES.",
     )
     parser.add_argument(
+        "--transcript-max-record-bytes",
+        type=_positive_int,
+        default=_env("ARENA_TRANSCRIPT_MAX_RECORD_BYTES"),
+        help="Largest single transcript kept (default: 64 MiB on disk, 4 MiB in memory). "
+        "Env: ARENA_TRANSCRIPT_MAX_RECORD_BYTES.",
+    )
+    parser.add_argument(
         "--client-ip-header",
         default=_env("ARENA_CLIENT_IP_HEADER"),
         help=(
@@ -85,7 +92,9 @@ def build_transcript_store(args: argparse.Namespace):  # type: ignore[no-untyped
     from arena.server.transcript_store import (
         DEFAULT_MAX_BYTES,
         DEFAULT_MAX_ENTRIES,
+        DEFAULT_MAX_RECORD_BYTES,
         DEFAULT_MEMORY_MAX_BYTES,
+        DEFAULT_MEMORY_MAX_RECORD_BYTES,
         DEFAULT_TTL_S,
         RetentionPolicy,
         open_transcript_store,
@@ -98,6 +107,10 @@ def build_transcript_store(args: argparse.Namespace):  # type: ignore[no-untyped
         max_bytes=int(
             args.transcript_max_bytes
             or (DEFAULT_MEMORY_MAX_BYTES if in_memory else DEFAULT_MAX_BYTES)
+        ),
+        max_record_bytes=int(
+            args.transcript_max_record_bytes
+            or (DEFAULT_MEMORY_MAX_RECORD_BYTES if in_memory else DEFAULT_MAX_RECORD_BYTES)
         ),
     )
     return open_transcript_store(args.transcript_store, policy)
@@ -113,6 +126,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             ("transcript_ttl_s", _positive_float),
             ("transcript_max_entries", _positive_int),
             ("transcript_max_bytes", _positive_int),
+            ("transcript_max_record_bytes", _positive_int),
         ):
             value = getattr(args, name)
             if isinstance(value, str):
@@ -142,6 +156,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         transcript_ttl_s=store.policy.ttl_s,
         transcript_max_entries=store.policy.max_entries,
         transcript_max_bytes=store.policy.max_bytes,
+        transcript_max_record_bytes=store.policy.max_record_bytes,
         client_ip_header=args.client_ip_header,
     )
 

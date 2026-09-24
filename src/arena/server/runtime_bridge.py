@@ -359,7 +359,7 @@ def _build_match_state_body(
             current_seat = local_match.rules_engine.current_seat(local_match.state)
 
     if session.abort is not None:
-        abort_dict = _dump_abort_dict(session.abort)
+        abort_dict = _dump_abort_dict(session.abort, session)
 
     return MatchStateBody(
         lifecycle=lc,
@@ -370,14 +370,26 @@ def _build_match_state_body(
     )
 
 
-def _dump_abort_dict(abort: AbortMetadata) -> dict:
-    payload = RuntimeAbortPayload(
+def _wire_abort(abort: AbortMetadata, session: MatchSession) -> RuntimeAbortPayload:
+    """An abort as a seat or spectator receives it.
+
+    No recipient of a hidden-information game gets ``cause_message``: it is
+    ``str(exception)`` and can carry anything (the transcripts drop it the
+    same way). Server aborts carry no cause today; this keeps one from leaking
+    if they ever do.
+    """
+
+    hidden = session.definition.has_hidden_information
+    return RuntimeAbortPayload(
         reason=abort.reason.value,
         message=abort.message,
         cause_type=abort.cause_type,
-        cause_message=abort.cause_message,
+        cause_message=None if hidden else abort.cause_message,
     )
-    return payload.model_dump(mode="json")
+
+
+def _dump_abort_dict(abort: AbortMetadata, session: MatchSession) -> dict:
+    return _wire_abort(abort, session).model_dump(mode="json")
 
 
 @dataclass
@@ -845,12 +857,7 @@ async def _broadcast_match_aborted(
     conns: "MatchConnections",
     session: MatchSession,
 ) -> None:
-    abort_payload = RuntimeAbortPayload(
-        reason=session.abort.reason.value,
-        message=session.abort.message,
-        cause_type=session.abort.cause_type,
-        cause_message=session.abort.cause_message,
-    )
+    abort_payload = _wire_abort(session.abort, session)
 
     def build(viewer: Viewer) -> Any:
         return MatchAbortedEnvelope(

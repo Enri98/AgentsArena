@@ -284,11 +284,19 @@ Every setting is a flag of `python -m arena.server` and an environment variable;
 | `ARENA_TRANSCRIPT_TTL_S` | `--transcript-ttl-s` | `604800` (7 days) | Seconds a transcript is kept after its match ends |
 | `ARENA_TRANSCRIPT_MAX_ENTRIES` | `--transcript-max-entries` | `10000` | Most transcripts kept; the oldest go first |
 | `ARENA_TRANSCRIPT_MAX_BYTES` | `--transcript-max-bytes` | 1 GiB (64 MiB for `memory`) | Most bytes of transcripts kept; the oldest go first |
+| `ARENA_TRANSCRIPT_MAX_RECORD_BYTES` | `--transcript-max-record-bytes` | 64 MiB (4 MiB for `memory`) | Largest single transcript kept |
 | `ARENA_CLIENT_IP_HEADER` | `--client-ip-header` | unset | Header with the client address, set by your proxy |
 
 Retention is enforced on every read, so an expired transcript returns `404` at once. The byte cap
 is what stops a client that plays many long matches from filling the volume. One transcript
-at the server's 5000-turn cap is about 2 MB.
+at the server's 5000-turn cap is about 2 MB. The caps are global and drop the oldest first, so
+a client that plays many long matches can push other transcripts out before their TTL: with
+the in-memory default, a few dozen capped matches fill 64 MiB. A durable store with the 1 GiB
+default holds about 500 of them.
+
+A record dated more than five minutes in the future (the clock stepped forward, then back) is
+treated as expired, and on Windows a file another process holds open is deleted on a later
+sweep instead of failing the write.
 
 **`ARENA_CLIENT_IP_HEADER` matters behind any proxy.** Rate limits (§13 of the protocol) are
 per client address, and behind Fly's proxy every connection comes from the proxy. Without the
