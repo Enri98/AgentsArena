@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_serializer
 
 from arena.runtime import (
     RuntimeAbortPayload,
@@ -61,13 +61,19 @@ class UIScreenRuntimeEventPayload(BaseModel):
 
 
 class UIScreenTurnPayload(BaseModel):
-    """Accepted game turn data for transcript/history screens."""
+    """Accepted game turn data for transcript/history screens.
+
+    A chance turn (Phase 37) has no seat and no action; it carries the recorded
+    `outcome` instead, and `kind` tells the two apart.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     turn_index: int = Field(ge=1)
-    seat: int = Field(ge=0)
-    action: JSONMapping
+    kind: str = "action"
+    seat: int | None = Field(default=None, ge=0)
+    action: JSONMapping | None = None
+    outcome: JSONMapping | None = None
     events: list[JSONMapping]
     result: UIScreenResultPayload | None
     post_snapshot: JSONMapping
@@ -88,6 +94,18 @@ class _MatchEventPayload(BaseModel):
 
     event_type: str = Field(min_length=1)
     payload: JSONMapping = Field(default_factory=dict)
+    is_public: bool = True
+    audience: list[int] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_public_marker(self, handler: Any) -> Any:
+        # Mirrors arena.match.MatchEventPayload: public events keep their
+        # pre-Phase-38 shape.
+        data = handler(self)
+        if self.is_public:
+            data.pop("is_public", None)
+            data.pop("audience", None)
+        return data
 
 
 class _MatchResultPayload(BaseModel):
@@ -98,13 +116,22 @@ class _MatchResultPayload(BaseModel):
 
 
 class _MatchTurnPayload(BaseModel):
+    """Mirrors arena.match.MatchTurnPayload for validation at the UI boundary.
+
+    Phase 37: a chance turn has no seat and no action, so both are optional and
+    `kind` distinguishes them; it carries the recorded `outcome` instead.
+    Defaults keep a v1 transcript valid.
+    """
+
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    seat: int = Field(ge=0)
-    action: JSONMapping
+    seat: int | None = Field(default=None, ge=0)
+    action: JSONMapping | None = None
     events: list[_MatchEventPayload]
     result: _MatchResultPayload | None
     post_snapshot: _SnapshotPayload
+    kind: str = "action"
+    outcome: JSONMapping | None = None
 
 
 class _MatchTranscriptPayload(BaseModel):
@@ -115,6 +142,8 @@ class _MatchTranscriptPayload(BaseModel):
     config: JSONMapping
     initial_snapshot: _SnapshotPayload
     turns: list[_MatchTurnPayload]
+    view: Literal["full", "seat", "public"] = "full"
+    viewer_seat: int | None = None
 
 
 class UIMatchStatusPayload(BaseModel):
@@ -134,6 +163,10 @@ class UIMatchStatusPayload(BaseModel):
     latest_snapshot: JSONMapping | None
     state_payload: JSONMapping | None
     abort: UIScreenAbortPayload | None
+    #: Phase 38: whose perspective this is — ``"full"``, ``"seat"`` (with
+    #: ``viewer_seat``), or ``"public"``. A renderer should label a redacted view.
+    view: Literal["full", "seat", "public"] = "full"
+    viewer_seat: int | None = None
 
 
 class UIMatchTranscriptPayload(BaseModel):
@@ -150,6 +183,8 @@ class UIMatchTranscriptPayload(BaseModel):
     runtime_events: list[UIScreenRuntimeEventPayload]
     turns: list[UIScreenTurnPayload]
     abort: UIScreenAbortPayload | None
+    view: Literal["full", "seat", "public"] = "full"
+    viewer_seat: int | None = None
 
 
 class UIMatchScreenPayload(BaseModel):
@@ -162,10 +197,16 @@ class UIMatchScreenPayload(BaseModel):
     transcript: UIMatchTranscriptPayload
 
 
-def build_match_status(payload: JSONMapping) -> JSONMapping:
-    """Build deterministic screen-level status data from a runtime status payload."""
+def build_match_status(payload: JSONMapping, *, seat: int | None = None) -> JSONMapping:
+    """Build deterministic screen-level status data from a runtime status payload.
+
+    ``seat`` (Phase 38) declares whose perspective is being rendered. The UI
+    never redacts — it is a pure adapter — so it refuses a payload redacted for
+    anyone else rather than silently rendering the wrong seat's view.
+    """
 
     status = validate_session_status(payload)
+    _ensure_perspective(status.view, status.viewer_seat, seat, context="status")
     latest_snapshot = (
         status.latest_snapshot.model_dump(mode="json")
         if status.latest_snapshot is not None
@@ -184,14 +225,20 @@ def build_match_status(payload: JSONMapping) -> JSONMapping:
         latest_snapshot=latest_snapshot,
         state_payload=_snapshot_state(latest_snapshot),
         abort=_dump_abort(status.abort),
+        view=status.view,
+        viewer_seat=status.viewer_seat,
     )
     return screen_payload.model_dump(mode="json")
 
 
-def build_match_transcript(payload: JSONMapping) -> JSONMapping:
-    """Build deterministic screen-level history data from a runtime transcript payload."""
+def build_match_transcript(payload: JSONMapping, *, seat: int | None = None) -> JSONMapping:
+    """Build deterministic screen-level history data from a runtime transcript payload.
+
+    ``seat`` works as in :func:`build_match_status`.
+    """
 
     transcript = RuntimeTranscriptPayload.model_validate(payload)
+    _ensure_perspective(transcript.view, transcript.viewer_seat, seat, context="transcript")
     screen_payload = UIMatchTranscriptPayload(
         schema_version=UI_ADAPTER_SCHEMA_VERSION,
         runtime_schema_version=transcript.schema_version,
@@ -209,6 +256,8 @@ def build_match_transcript(payload: JSONMapping) -> JSONMapping:
         ],
         turns=_dump_turns(transcript.match_transcript),
         abort=_dump_abort(transcript.abort),
+        view=transcript.view,
+        viewer_seat=transcript.viewer_seat,
     )
     return screen_payload.model_dump(mode="json")
 
@@ -217,12 +266,13 @@ def build_match_screen(
     *,
     status_payload: JSONMapping,
     transcript_payload: JSONMapping,
+    seat: int | None = None,
 ) -> JSONMapping:
     """Combine matching runtime status and transcript payloads for a match screen."""
 
-    status = UIMatchStatusPayload.model_validate(build_match_status(status_payload))
+    status = UIMatchStatusPayload.model_validate(build_match_status(status_payload, seat=seat))
     transcript = UIMatchTranscriptPayload.model_validate(
-        build_match_transcript(transcript_payload)
+        build_match_transcript(transcript_payload, seat=seat)
     )
     _ensure_screen_inputs_match(status, transcript)
 
@@ -232,6 +282,26 @@ def build_match_screen(
         transcript=transcript,
     )
     return screen_payload.model_dump(mode="json")
+
+
+def _ensure_perspective(
+    view: str, viewer_seat: int | None, seat: int | None, *, context: str
+) -> None:
+    """Refuse a payload redacted for a different perspective than requested.
+
+    A full view (every perfect-information payload, and archived full
+    transcripts) serves any perspective.
+    """
+
+    if view == "full":
+        return
+    if seat is None:
+        return
+    if view != "seat" or viewer_seat != seat:
+        who = f"seat {viewer_seat}" if view == "seat" else "the public"
+        raise ValueError(
+            f"This {context} is redacted for {who}; it cannot be rendered as seat {seat}'s view."
+        )
 
 
 def _dump_players(
@@ -298,8 +368,10 @@ def _dump_turn(*, turn_index: int, turn: _MatchTurnPayload) -> UIScreenTurnPaylo
     post_snapshot = turn.post_snapshot.model_dump(mode="json")
     return UIScreenTurnPayload(
         turn_index=turn_index,
+        kind=turn.kind,
         seat=turn.seat,
         action=turn.action,
+        outcome=turn.outcome,
         events=[event.model_dump(mode="json") for event in turn.events],
         result=_dump_match_result(
             turn.result.model_dump(mode="json") if turn.result is not None else None
@@ -332,6 +404,12 @@ def _ensure_screen_inputs_match(
         raise ValueError(
             "UI status and transcript payloads refer to different game ids: "
             f"{status.game_id!r} != {transcript.game_id!r}."
+        )
+    if (status.view, status.viewer_seat) != (transcript.view, transcript.viewer_seat):
+        raise ValueError(
+            "UI status and transcript payloads are different perspectives: "
+            f"{(status.view, status.viewer_seat)!r} != "
+            f"{(transcript.view, transcript.viewer_seat)!r}."
         )
     if status.runtime_schema_version != transcript.runtime_schema_version:
         raise ValueError(

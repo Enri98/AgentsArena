@@ -19,8 +19,14 @@ def main() -> None:
     import uvicorn
 
     from arena.server.app import create_app
+    from arena.server.config import UVICORN_WS_IMPL
 
-    uvicorn.run(create_app(), host=args.host, port=args.port)
+    # The legacy websockets implementation corrupts its receive state when a
+    # pending receive_text() is cancelled, which the first-arriving seat's handler
+    # does while waiting for its opponent. The seat is then marked disconnected
+    # the moment the match starts, and every match aborts peer_disconnected. The
+    # test servers always ran sansio, which is why only real deployments broke.
+    uvicorn.run(create_app(), host=args.host, port=args.port, ws=UVICORN_WS_IMPL)
 
 
 if __name__ == "__main__":

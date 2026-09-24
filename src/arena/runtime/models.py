@@ -61,6 +61,9 @@ class AbortReason(StrEnum):
     TURN_DEADLINE_EXPIRED = "turn_deadline_expired"
     PEER_DISCONNECTED = "peer_disconnected"
     HEARTBEAT_TIMEOUT = "heartbeat_timeout"
+    # The server's per-match turn cap (Phase 38 hardening): a game that can loop
+    # forever must not pin server resources.
+    TURN_LIMIT_EXCEEDED = "turn_limit_exceeded"
 
 
 @dataclass(frozen=True)

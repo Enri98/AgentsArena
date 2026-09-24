@@ -22,6 +22,8 @@ from arena.adapters.websocket.messages import (
     MSG_OBSERVATION_REQUEST,
     MSG_PING,
     MSG_PONG,
+    MSG_SPECTATOR_HELLO,
+    MSG_SPECTATOR_WELCOME,
     MSG_TURN_COMMITTED,
     MSG_WELCOME,
     ActionRejectedBody,
@@ -34,6 +36,8 @@ from arena.adapters.websocket.messages import (
     ObservationRequestBody,
     PingBody,
     PongBody,
+    SpectatorHelloBody,
+    SpectatorWelcomeBody,
     TurnCommittedBody,
     WelcomeBody,
 )
@@ -110,6 +114,16 @@ class ErrorEnvelope(_EnvelopeBase):
     payload: ErrorBody
 
 
+class SpectatorHelloEnvelope(_EnvelopeBase):
+    type: Literal["spectator_hello"] = MSG_SPECTATOR_HELLO
+    payload: SpectatorHelloBody
+
+
+class SpectatorWelcomeEnvelope(_EnvelopeBase):
+    type: Literal["spectator_welcome"] = MSG_SPECTATOR_WELCOME
+    payload: SpectatorWelcomeBody
+
+
 WireEnvelope = Annotated[
     Union[
         HelloEnvelope,
@@ -124,6 +138,8 @@ WireEnvelope = Annotated[
         PingEnvelope,
         PongEnvelope,
         ErrorEnvelope,
+        SpectatorHelloEnvelope,
+        SpectatorWelcomeEnvelope,
     ],
     Field(discriminator="type"),
 ]
@@ -141,6 +157,8 @@ _ENVELOPE_TYPES: dict[str, type] = {
     MSG_PING: PingEnvelope,
     MSG_PONG: PongEnvelope,
     MSG_ERROR: ErrorEnvelope,
+    MSG_SPECTATOR_HELLO: SpectatorHelloEnvelope,
+    MSG_SPECTATOR_WELCOME: SpectatorWelcomeEnvelope,
 }
 
 

@@ -112,6 +112,8 @@ def test_running_status_maps_to_deterministic_json_safe_screen_payload() -> None
         "latest_snapshot": runtime_status["latest_snapshot"],
         "state_payload": runtime_status["latest_snapshot"]["state"],
         "abort": None,
+        "view": "full",
+        "viewer_seat": None,
     }
     assert "events" not in screen_status
     assert UIMatchStatusPayload.model_validate(screen_status).match_id == "ui-running"
@@ -248,7 +250,7 @@ def test_transcript_mapping_rejects_unknown_runtime_schema_version() -> None:
         _winning_policies(),
     )
     transcript = dump_runtime_transcript(session)
-    transcript["schema_version"] = 2
+    transcript["schema_version"] = 99
 
     with pytest.raises(ValidationError):
         build_match_transcript(transcript)

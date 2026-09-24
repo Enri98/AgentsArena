@@ -3197,3 +3197,920 @@ Acceptance criteria:
 Status (Phases 27 - 35):
 - ✅ Phases 27 - 35 all complete. v1 milestone reached.
 - ✅ Phase 35 stdio-subprocess MCP e2e test landed in `tests/integration/test_mcp_stdio_e2e.py`. No known v1 follow-ups remain.
+
+---
+
+## Post-v1 work (outside the numbered roadmap)
+
+Landed after the v1 milestone. These were not planned phases; they are recorded here so the
+plan stays the single source of truth for what exists.
+
+### `3da879a` — Nim game
+Third game vertical slice (`src/arena/games/nim/`). Registered in `build_default_registry()`,
+ships a `NimPromptBuilder`, action schemas in `arena.mcp`, CLI renderer and parser, and is
+exercised by `examples/run_remote_demo.py` and the integration tests.
+
+### `68b011a` — per-layer adapter registries
+Collapsed per-game `if game_id == ...` dispatch into one registry per layer:
+`arena.cli.games`, `arena.mcp.games`, and `arena.agents.ollama._adapters`. Each per-game module
+registers its adapter at import time; the package `__init__` imports the submodules so the
+registrations fire on package load.
+
+**Consequence for future games:** a new game registers with each layer's registry. Do not add
+dispatch branches. `docs/ADDING_A_GAME.md` documents the full checklist.
+
+### `a408787` — `docs/ADDING_A_GAME.md` + scaffold CLI
+A step-by-step guide plus `python -m arena.games.scaffold`, which generates a complete game
+package skeleton (config, state, action, observation, events, rules, serializer, definition)
+and the matching test files.
+
+### `cce1846` — `docs/RFC_IMPERFECT_INFORMATION.md`
+A draft RFC for imperfect-information game support. **Status: draft awaiting owner decisions.
+Not approved. No code attached.** It proposes Phases 36-40:
+
+| Phase | Scope |
+|-------|-------|
+| 36 | Contract additions (`has_hidden_information`, `RulesEngine.public_state`, `Serializer.dump_public_state`), perfect-info behaviour unchanged |
+| 37 | Liar's Dice vertical slice, served over the v1 wire, with a deliberately failing information-leak test |
+| 38 | Wire `schema_version` 1 → 2: per-seat `post_snapshot`, per-seat transcripts, SDK/MCP updates |
+| 39 | Spectator endpoint `WS /matches/{id}/spectate` with public-view payloads |
+| 40 | Docs, replay tooling, example, Ollama prompt builder for the new game |
+
+**The RFC's seven open questions were answered by the owner on 2026-09-22.** Several answers
+diverge from the RFC's own recommendations, and the phase table above is superseded by the
+approved roadmap in the next section. The RFC remains useful as background analysis of the
+contract problem; it is no longer the plan of record.
+
+---
+
+## Known gaps in shipped v1
+
+Recorded 2026-09-22. None of these block the v1 claim; all of them block a public launch.
+
+1. **Protocol §13 rate limits are specified but not implemented.** No per-IP connection cap,
+   no match-creation throttle, no per-match connection cap. Close code `4429` is emitted
+   nowhere in `src/`. With no auth in v1, this is the top pre-deployment item.
+2. **No CI.** No `.github/` workflow exists. `ruff` and `pytest` run only on the developer's
+   machine.
+3. **Never deployed.** `fly.toml` still carries the placeholder `app = "arena-server"`. The
+   Phase 34 acceptance criterion ("the user can run `examples/run_remote_demo.py
+   --server-url wss://...` against a deployed server") is documented and reproducible on
+   paper but has not been executed against a real public host.
+4. **SDK is not installable by third parties.** Joining a match requires cloning the repo;
+   `agents-arena` is not published to PyPI. This is the largest gap between the shipped code
+   and the stated project goal of an open arena.
+
+
+
+---
+
+## v2 roadmap — Phases 36-42
+
+**Approved 2026-09-22.** Supersedes the phase table proposed in `docs/RFC_IMPERFECT_INFORMATION.md`.
+
+### Owner decisions of record
+
+| # | Question | Decision | Note |
+|---|----------|----------|------|
+| 1 | Exemplar imperfect-information game | **Liar's Dice (simplified, 2-player)** | Matches the RFC recommendation |
+| 2 | Randomness | **Build a real chance-node primitive** | Diverges from the RFC, which recommended seeded init-time randomness only |
+| 3 | Spectator timing | **Spectator FIRST**, before imperfect-information | Diverges from the RFC, which placed it after |
+| 4 | N-player | **Keep 2-seat, design the seams** | Audit hardcoded `2`s; shape the broadcast matrix N-ready where free |
+| 5 | Chance-node sequencing | **Chance nodes first, standalone** | Proven on a small stochastic perfect-information game before any hidden-information work |
+| 6 | TypeScript SDK | **After the wire settles** | Spectator viewer uses plain browser `WebSocket` glue, not a packaged SDK |
+| 7 | Public transcript distribution | **Both — HTTP endpoint after persistence exists** | Pulls transcript persistence out of the v2 deferral list |
+| 8 | Turn-loop generalization | **In scope, deferred until after Liar's Dice ships** | Owner revision on 2026-09-22; originally slotted before the imperfect-information contract |
+
+Two consequences worth stating plainly:
+
+- **Transcript persistence is no longer deferred.** Decision 7 makes it a prerequisite for the
+  HTTP transcript endpoint. It becomes Phase 40.
+- **Simultaneous-move support is now in scope**, but deliberately sequenced last among the
+  contract changes (Phase 41), so nothing blocks a playable Liar's Dice.
+
+### Ordering rationale
+
+**Revised 2026-09-22 after adversarial review.** The original rationale — that Phases 36 and 37
+both land with no `schema_version` bump — was checked against the code and found false for
+Phase 37: a real chance node has no slot in the transcript turn model, and adding one bumps a
+pinned `Literal[1]` that is embedded in the wire. Phase 36 was rescoped so it genuinely ships no
+new or changed wire fields (spectators get new message types, which §7 permits without a bump);
+Phase 37 now carries the bump to `2`, and Phase 38 bumps to `3`.
+
+Paying two bumps instead of one is cheap today because **no external client exists** — the cost is
+internal test churn, not an ecosystem migration. That stops being true the moment the SDK is
+published, which is why both bumps are sequenced before Phase 42.
+
+Phase 36 still ships something watchable before any protocol churn, and the transport refactor it
+forces (per-match connection registry, per-connection outbound queues, match-owned driver task) is
+required by Phases 38 and 41 regardless.
+
+| Phase | Scope | Wire |
+|-------|-------|------|
+| 36 | Spectator endpoint + transport refactor + §13 rate limits + CI | v1, no bump |
+| 37 | Chance-node primitive, standalone | **bump to 2** |
+| 38 | Imperfect-information contract, per-seat snapshots and transcripts | **bump to 3** |
+| 39 | Liar's Dice | no bump |
+| 40 | Transcript persistence + `GET /matches/{id}/public-transcript` | no bump |
+| 41 | Generalized turn loop (simultaneous moves) | **bump to 4** |
+| 42 | Docs, examples, packaged TypeScript SDK | no bump |
+
+---
+
+### Phase 36 - Spectator endpoint and the transport refactor it requires
+
+> **Revised 2026-09-22 after adversarial review.** The first draft of this phase claimed spectators
+> could receive `welcome` with `seat=null` and a `public_snapshot` in place of `post_snapshot`, with
+> no `schema_version` bump. Both claims are false against the code:
+> `WelcomeBody.seat: int = Field(ge=0)` under `strict=True` (`adapters/websocket/messages.py:76`)
+> rejects `None`, and `TurnCommittedBody.post_snapshot` (`messages.py:150`) is required, so it
+> cannot be omitted. Under §7 both are bumping changes. The phase was rescoped to ship **no new or
+> changed wire fields at all**.
+
+Objective:
+- ship `WS /matches/{id}/spectate` without bumping the wire, by giving spectators their own message
+  types and the existing `post_snapshot` — which, for the three perfect-information games, already
+  *is* the public view
+- do the transport refactor the spectator path forces, which Phases 38 and 41 both need anyway
+
+Scope:
+
+**Wire (additive only — §7 permits new message types without a bump):**
+- new message types `spectator_hello` and `spectator_welcome`, with their own body models, envelope
+  classes, and `_ENVELOPE_TYPES` registration. `WelcomeBody` and `HelloBody` are **not** modified.
+- spectators receive the existing `turn_committed` with its existing `post_snapshot`. No
+  `public_snapshot` field is introduced in this phase — it would be byte-identical to
+  `post_snapshot` for all three games and would be rewritten in Phase 38. It lands there instead.
+- spectators receive `match_state`, `turn_committed`, `match_finished`, `match_aborted`,
+  `ping`/`pong`, `error`. They never receive `observation_request` or `action_rejected`. An
+  `action_response` arriving on a spectator connection is answered with `error` and the connection
+  is closed.
+
+**Transport refactor (the bulk of the phase):**
+- replace the fixed `conns: tuple[SeatConnection, SeatConnection]` threaded through `run_match`
+  (`runtime_bridge.py:521`) and all six broadcast helpers (`_broadcast` 188,
+  `_broadcast_match_state` 206, `_broadcast_turn_committed` 221, `_broadcast_match_finished` 251,
+  `_broadcast_match_aborted` 265, `_close_both` 285) with a **per-match connection registry** read
+  at each send site, holding 2 seat slots plus N spectator slots.
+- **per-connection bounded outbound queue with its own writer task.** Today `_broadcast`
+  (`runtime_bridge.py:188-203`) awaits `send_text` sequentially inside `run_match`; a spectator
+  whose send buffer fills suspends the match driver, the per-turn deadline timer keeps running, and
+  the match aborts with `turn_deadline_expired` blaming an innocent seat. Overflow policy: drop the
+  spectator and close its socket. Seats keep their existing direct-send semantics.
+- **match-owned driver task.** `run_match` is currently owned by the seat-1 handler
+  (`routes_ws.py:244-281`) with seat 0 idling on `done_event`. Move it to a task owned by the match
+  so connections attach and detach independently of who drives. Phase 41 requires this regardless.
+- spectator read loop draining `pong` frames, separate from the writer task.
+
+**Safety prerequisites — moved INTO this phase, previously "out of scope":**
+- implement protocol §13 rate limits: per-IP concurrent connection cap, per-IP match-creation
+  throttle, per-match concurrent connection cap, close code `4429`. The spectator endpoint is an
+  unauthenticated, unlimited fan-out primitive and must not open before these exist. Note §13 is
+  currently specified-but-unimplemented; there is no existing cap of 4 to "raise".
+- `MatchRegistry` eviction: a TTL or cap reaping finished/abandoned `Match` records and the
+  per-match dicts on `app.state` (`_ws_seat_slots`, `_ws_ready_events`, `_ws_done_events`,
+  `_ws_reconnect_events`, `_ws_reconnect_conns`). Spectators holding sockets against dead matches
+  make the existing leak materially worse.
+- CI: a `.github/workflows` running `ruff` + `pytest` on push. Seven phases and two wire bumps
+  without CI is not defensible.
+
+**Core contract additions (no server impact, safe to land first):**
+- `GameDefinition.has_hidden_information: bool = False`.
+- `RulesEngine.public_state(state)` and `Serializer.dump_public_state` / `load_public_state`.
+  Note `RulesEngine` and `Serializer` are `@runtime_checkable` Protocols (`rules_engine.py:36`,
+  `serializer.py:28`), **not** base classes, so "a default mixin" requires the three existing
+  serializers to inherit it. Either add the mixin to all three concrete serializers explicitly, or
+  make the defaults free functions that fall back to `dump_state`. Adding methods to a
+  `@runtime_checkable` Protocol changes `isinstance` results at `testing/contracts.py:160` and five
+  test sites — check them.
+- a registration-time gate: the server refuses to serve a game declaring
+  `has_hidden_information=True` until Phase 38 lands, per protocol §11.
+
+**Behaviour that must be specified before Slice 3 starts:**
+- spectator attaching to a `created` (not yet started) match: receives `match_state` with
+  `lifecycle="created"` and waits.
+- spectator attached to a match that never starts (seat 0 connects then drops before seat 1
+  arrives — `routes_ws.py:232-241` returns with no abort and no `done_event.set()`): the registry
+  eviction above must reap it, or the spectator coroutine hangs for the process lifetime.
+- replay-on-attach race: subscribe first, then send the history snapshot, with a `turn_index`
+  watermark so a turn committing during attach is neither lost nor duplicated.
+- close semantics: `_close_both` closes exactly two sockets; spectators must be closed on
+  `match_finished` and on every one of the eight `_broadcast_match_aborted` return points in
+  `run_match` (lines 589, 668, 698, 736, 765, 790, 874, 919).
+
+Out of scope:
+- `public_snapshot`, `seat=null`, and any redaction (all Phase 38)
+- a designed web UI; the viewer page is a functional demo
+- spectator authentication
+
+Acceptance criteria:
+- `ruff` + `pytest` green, and green **in CI**
+- a third client attaches to a running Connect 4 match, receives every committed turn live, and
+  never receives `observation_request` or `action_rejected`
+- **a deliberately stalled spectator does not affect the match**: a test that attaches a spectator
+  which never reads, then completes a full match between two seats with no deadline abort
+- seats behave identically with 0, 1, and N spectators attached
+- a spectator attaching mid-match receives history then live updates, with no gap and no duplicate
+  at the join boundary
+- a spectator attaching to a finished match receives the terminal lifecycle and closes cleanly
+- exceeding a §13 cap closes with `4429`; a test covers each cap
+- an abandoned match is evicted and its `app.state` entries released
+- `WIRE_SCHEMA_VERSION` is still `1` at the end of this phase, asserted by test
+- `tests/unit/server/test_routes_ws.py::test_spectate_reserved_closes_4404` is replaced (this phase
+  intentionally changes that behaviour)
+
+#### Slice 0 - Prerequisites — ✅ COMPLETE (2026-09-22)
+
+Shipped:
+- `.github/workflows/ci.yml` — ruff + pytest on push, PR, and manual dispatch; Python 3.11,
+  pip cache keyed on `pyproject.toml`, installs `.[dev,server,mcp]`.
+- `src/arena/server/rate_limits.py` — `RateLimiter` implementing the §13 caps with injectable
+  limits and clock, plus `RateLimiter.unlimited()` for tests. Three of four caps are wired:
+  per-IP connections and per-match connections close `4429`; match creation returns
+  `HTTP 429 rate_limited`. **The per-match action cap is implemented and unit-tested but not yet
+  wired** — its enforcement point is inside the turn loop that Slice 2 rewrites, so wiring it now
+  would mean doing it twice. Slice 2 owns it.
+- `MatchRegistry` eviction — `delete(match_id)` and `evict_expired()` with lifecycle-aware policy
+  (terminal matches kept `MATCH_RETENTION_S`, non-terminal presumed abandoned after
+  `MATCH_MAX_AGE_S`, hard ceiling `MAX_TRACKED_MATCHES` shedding oldest first). Sweep triggers on
+  `create()`, so no background task. An `on_evict` hook lets `create_app` release the per-match
+  dicts on `app.state` and the limiter's per-match counters.
+- `create_app(..., rate_limiter=...)` for injection; the four existing test call sites pass
+  `RateLimiter.unlimited()` because the suite shares one client address.
+- `tests/unit/server/test_rate_limits.py` (12 tests) and `tests/unit/server/test_match_eviction.py`
+  (9 tests).
+
+Note for Slice 2: a play-channel handler currently holds its §13 connection slot until the match
+ends, because seat 0's handler blocks on `done_event` and a reconnecting client's old handler does
+the same. With the spec'd per-match cap of 4 ("across seats and reconnects in grace"), a match
+surviving two reconnects can exhaust its own slots. The match-owned driver task in Slice 2 lets
+superseded handlers return immediately and fixes this; until then the cap is effectively
+"2 seats plus 2 reconnects per match".
+
+#### Slice 1 - Core contract additions — ✅ COMPLETE (2026-09-22)
+
+Shipped:
+- `src/arena/core/public_view.py` — `public_state`, `dump_public_state`, `load_public_state`,
+  `validate_public_view`, and the `*_declares_public_state` predicates.
+- `GameDefinition.has_hidden_information: bool = False` (additive, defaulted).
+- `IncompletePublicView(ConfigError)` raised by `GameRegistry.register` when a game declares hidden
+  information without implementing the redaction hooks — a declaration not backed by an
+  implementation would broadcast private state to every seat.
+- `MatchRegistry.create` refuses hidden-information games outright (protocol §11); the v1 wire
+  cannot serve them without leaking. Phase 38 lifts this.
+- `assert_public_view_contract` in the shared game contract suite: a game without hidden
+  information must expose a public view **identical** to its full state (that equality is exactly
+  what makes the Slice 3 spectator channel safe), and a game declaring hidden information must
+  actually differ.
+- `tests/unit/core/test_public_view.py` (12 tests) plus a §11 gate test.
+
+**Design note — free functions, not Protocol members.** The spec originally said to add
+`public_state` / `dump_public_state` to the `RulesEngine` and `Serializer` Protocols with a default
+mixin. Both are `@runtime_checkable`, and such a Protocol tests for method *presence*: adding a
+member makes every existing engine and serializer fail `isinstance` until it implements the new
+method, breaking `testing/contracts.py` and several test sites. The helpers are therefore free
+functions that detect the hook and fall back to `dump_state`. A test asserts every shipped game
+still satisfies both Protocols.
+
+#### Interlude - the pre-existing WebSocket test flake
+
+Found while verifying Slice 1, and **not caused by it**: a pristine checkout hangs on the same test
+selection that the working tree passes. Measured on the full suite, the hang lands on
+`tests/unit/server/test_routes_ws.py::test_connect4_happy_path_full_match`.
+
+Mechanism, from a captured failure log: the real deadlock is in this file's own TestClient drain
+logic (`_play_full_match`, whose docstring already documents an empirically-tuned drain order to
+dodge Starlette portal deadlocks). The test stops draining mid-match; the server then sits until
+the per-turn deadline expires and aborts. Meanwhile `run_match` — owned by seat 1's connection
+handler — stays parked, and leaked drivers accumulate across the file until one blows a later
+test's budget.
+
+Mitigations landed now:
+- `pytest-timeout` added to `[dev]` with `--timeout=120 --timeout-method=thread` in `addopts`, so a
+  hang **fails** instead of blocking CI forever. The thread method is required: these hangs live in
+  portal threads and signal-based timeouts do not exist on Windows.
+- Short per-turn deadlines in the WS tests, which unblock the drain deadlock sooner. Measured full-
+  suite hang rate: 30 s default ≈ 75%, 10 s ≈ 75%, 2 s ≈ 25%.
+
+**This is Slice 2's problem to finish.** A match-owned driver task means an abandoned match releases
+its driver immediately instead of parking for a deadline, which removes the accumulation entirely.
+Revisit the `_play_full_match` drain harness in the same slice.
+
+#### Slice 2 - Transport refactor — 🔶 IN PROGRESS (2026-09-22)
+
+Landed:
+- **`MatchConnections`** (`runtime_bridge.py`) replaces the fixed
+  `tuple[SeatConnection, SeatConnection]` threaded through `run_match` and all six broadcast
+  helpers. It keeps `conns[seat]` addressable so the driver body was untouched, and iteration
+  yields every broadcast recipient — which is how Slice 3 attaches spectators without editing the
+  broadcast helpers again. Reconnect now calls `replace_seat` instead of rebuilding a tuple.
+  Published on `app.state._ws_match_conns` (released by the eviction hook) so a spectator handler
+  can find a running match without reaching into the seat handler that started it.
+- **Per-connection bounded outbox + writer task.** `SeatConnection` gains
+  `outbox: asyncio.Queue(maxsize=OUTBOX_MAXSIZE)` and `writer_task`; `_send` enqueues and
+  `_writer_loop` drains. Before the writer starts (the handshake) `_send` still writes inline, so
+  handshake ordering is unchanged. `_close_both` drains each outbox before closing — terminal
+  frames are queued like any other, so closing early would drop `match_finished`/`match_aborted`.
+  This closes the advisor's B3: `_broadcast` used to `await send_text` per connection from inside
+  `run_match`, so one blocked send suspended the driver while the per-turn deadline kept running,
+  aborting the match and blaming whichever seat was active.
+
+- **§13 per-match action cap wired** at the turn-loop receive point (deferred here from Slice 0).
+  Exceeding it closes that seat with 4429; the closed socket surfaces as a disconnect and the
+  existing grace path decides the outcome, so no new abort reason was needed. Covered end-to-end by
+  `tests/integration/test_action_rate_limit.py`.
+
+  Found while testing it: the cap counts frames the server actually *reads*, i.e. those from the
+  active seat. An off-turn seat's frames sit unread until its turn, so they are not counted when
+  sent. The cap bounds match-loop work, not raw inbound traffic — the connection caps bound that.
+  Documented in protocol §13.
+
+Still to do in this slice:
+- match-owned driver task (currently still owned by the seat-1 handler)
+
+**Resolution of the WebSocket test flake.** The writer tasks did not fix it — measurement showed
+the deadlock is on the *receive* side of the Starlette TestClient portal, not on sends. Root cause:
+`tests/unit/server/test_routes_ws.py` drove **two** WebSocket sessions through a **single** portal,
+and the same scenarios are already covered over real sockets by `tests/integration/`. The four
+multi-connection TestClient tests were therefore removed, with coverage preserved:
+
+| Removed (TestClient, one shared portal) | Covered by (real uvicorn + real sockets) |
+|---|---|
+| `test_connect4_happy_path_full_match` | `test_match_happy_path.py::test_connect4_happy_path` |
+| `test_tictactoe_happy_path_full_match` | `test_match_happy_path.py::test_tictactoe_happy_path` |
+| `test_malformed_envelope_after_welcome` | `test_match_happy_path.py::test_malformed_envelope_after_handshake` |
+| `test_illegal_action_retry_budget_exhaustion` | **newly ported** to `test_retry_budget.py` |
+
+The retry-budget case had no integration equivalent, so it was ported rather than dropped — and the
+port is stronger: on real sockets the messages can be asserted in the order protocol §8.6 actually
+specifies, instead of the "send both illegal actions first, then drain" contortion the old test
+needed to dodge a portal deadlock.
+
+`tests/unit/server/test_routes_ws.py` keeps the six single-connection close-code tests, which are
+fast and stable. **Rule going forward: one WebSocket per TestClient test. Anything needing two
+live sockets belongs in `tests/integration/`.**
+
+#### Slice 3 - Spectator handler — ✅ COMPLETE (2026-09-23)
+
+Shipped:
+- **`spectator_hello` / `spectator_welcome`** message types, bodies, envelopes, and
+  `_ENVELOPE_TYPES` entries. `WIRE_SCHEMA_VERSION` is still `1`. New message types rather than
+  widening `hello`/`welcome`, because `WelcomeBody.seat` is `int` under `strict=True` and cannot
+  carry `null` — reusing `welcome` for a seatless client was impossible without a bump.
+- **`SpectatorConnection`**, deliberately shaped like `SeatConnection` so `_send`, `_writer_loop`
+  and `_stop_writer` work on it unchanged.
+- **The spectate handler** replaces the `4404` stub: match lookup, hello, version negotiation,
+  `spectator_welcome`, subscribe, read loop, and cleanup on every exit path. It holds a §13
+  connection slot exactly like the play channel.
+- **Attach-time history rides in `spectator_welcome.transcript`.** There is no history message for
+  a running match, and inventing one would be a wire addition this phase avoids. The welcome is
+  queued *before* the connection joins the broadcast set, with no suspension in between (`_send`
+  only serialises and calls `put_nowait`), so live frames always follow the history they continue —
+  this is the join race the spec called out, closed without needing a watermark.
+- **Pending spectators**: one attaching before both seats parks in `app.state._ws_pending_spectators`
+  and the seat handler folds it in when it builds the registry.
+- **A spectator that acts is refused** with `protocol_violation` and disconnected; junk frames are
+  ignored, since a spectator must not be able to corrupt a match.
+- **A spectator that falls behind is dropped**, not allowed to slow the match: `_broadcast` sheds
+  any spectator whose outbox overflowed, cancelling rather than draining its writer.
+- Protocol doc: §4 promoted from reserved to live, §18 matrix gains a real spectator column, new
+  §8.13 documents both message types, §1.2 no longer lists spectators as a non-goal.
+- `tests/integration/test_spectator.py` (5 tests, real sockets) plus 3 unit tests.
+
+Acceptance criteria met: a third client receives every committed turn live and never
+`observation_request` or `action_rejected`; seats behave identically with 0, 1, and 3 spectators;
+a late arrival gets the full transcript then a clean close; version mismatch closes `4400`.
+
+#### Slice 4 - Static viewer page — ✅ COMPLETE (2026-09-23)
+
+`examples/spectator/index.html` — one self-contained page, ~120 lines of plain browser `WebSocket`
+glue, no build step and no dependencies. Renders the `board` grid for Connect 4 and Tic-Tac-Toe,
+`piles` for Nim, and raw JSON for anything else, so a new game is watchable before it has a
+renderer. Replays `spectator_welcome.transcript` on attach, then live turns; answers `ping`.
+`examples/spectator/README.md` has the run-through. Manual acceptance; every field it reads was
+checked against the shipped models.
+
+Explicitly not a packaged SDK — Phase 42 may add a TypeScript client once the wire settles.
+
+---
+
+### Phase 37 - Chance-node primitive
+
+> **Revised 2026-09-22 after adversarial review.** The first draft claimed this phase needs no wire
+> bump. That is false for a *real* chance node: `TurnRecord` (`match/local_match.py:31-38`) requires
+> `seat` and `action`; `MatchTurnPayload` (`match/transcript.py:48-57`) requires both under
+> `extra="forbid"`; and `validate_match_transcript` (`transcript.py:203`) replays only via
+> `apply_match_action(match, turn.seat, turn.action)`. A node with no seat and no action has no slot.
+> Adding one bumps `MATCH_TRANSCRIPT_SCHEMA_VERSION`, which bumps
+> `RuntimeTranscriptPayload.schema_version: Literal[1]` (`runtime/payloads.py:111`), which is
+> embedded in `MatchFinishedBody.transcript` — a wire bump. Separately,
+> `turn_committed.events` is hardcoded to `[]` (`runtime_bridge.py:241`) and `turn_record["events"]`
+> carries only class-name strings, so making events load-bearing is itself a §7 semantic change.
+>
+> **Resolution: this phase bumps the wire to `schema_version=2`.** Phase 38 then bumps to `3`.
+> Paying two bumps is cheap right now because no external client exists — the cost is internal test
+> churn, not an ecosystem migration. The alternative, merging 37 into 38, was rejected because it
+> produces one phase large enough that a failure is hard to localize.
+
+Objective:
+- support genuinely stochastic games without abandoning reproducibility, proven on a small
+  stochastic perfect-information game before any hidden-information work depends on it
+
+Scope:
+- a chance-node contract in `arena.core`: a state may be at a chance node rather than a seat's turn.
+  `RulesEngine.current_seat` becomes `Seat | None`; **every call site must be audited** —
+  `runtime_bridge.py:609` indexes `conns[active_seat]` and raises `TypeError` on `None`, plus
+  `runtime_bridge.py:140`, `runtime/payloads.py:138`, `runtime/session.py:155`,
+  `adapters/in_process.py:104`, `server/routes_http.py:178`, `match/policy.py:33`, eight sites in
+  `testing/contracts.py`, all three games, and `games/scaffold/_templates.py:222`.
+- transcript turn records gain a kind discriminator so a chance resolution is a first-class turn
+  with no seat and no action. `MATCH_TRANSCRIPT_SCHEMA_VERSION` bumps;
+  `RuntimeTranscriptPayload.schema_version` widens from `Literal[1]`.
+- `turn_committed.events` becomes load-bearing: chance outcomes are serialized domain events, not
+  class-name strings. This replaces the hardcoded `events=[]` at `runtime_bridge.py:241`.
+- ~~**seeded RNG lives in serialized state, not config.**~~ **Superseded by Slice 3:** state is
+  broadcast as `post_snapshot` just like config is, so a generator in state is equally public — a
+  seat could run it forward and predict every roll. The generator lives on `LocalMatch` instead;
+  see Slice 3.
+- **the seed must not be reachable from config.** `send_welcome` dumps the full `match_config` to
+  both seats (`runtime_bridge.py:1021, 1046`) and `_build_snapshot` embeds
+  `serializer.dump_config(config)` in *every* `SnapshotEnvelope` (`local_match.py:99-105`), which is
+  broadcast as `post_snapshot` and stored in every transcript turn. A seed in config is therefore
+  public — in Phase 39 either seat could rerun the initial roll and derive the opponent's dice, and
+  an information-leak test that inspects only `state` would still pass. Phase 38's
+  `dump_state_for_seat` covers `state`, **not** `config`. The seed is minted server-side, recorded
+  outside the broadcast config, and never appears in `welcome.match_config` or any snapshot.
+- replay never re-rolls: chance outcomes come from recorded events.
+- one small stochastic perfect-information game as the proof, registered in all three adapter
+  registries.
+- the shared game test contract gains a determinism-under-seed case.
+
+Out of scope:
+- hidden information (Phase 38); simultaneous moves (Phase 41)
+
+Acceptance criteria:
+- same seed + same action sequence reproduces a logically equivalent transcript across processes
+- a replayed transcript never re-rolls
+- **the seed is not derivable from anything either seat receives**, asserted by test
+- the three existing deterministic games are unaffected; their tests pass with only the
+  mechanical `Seat | None` and schema-version changes
+- `WIRE_SCHEMA_VERSION == 2`; a v1 client is refused with a clear error
+- ruff + pytest green
+
+#### Slice 1 - Chance-node contract and seeded RNG — ✅ COMPLETE (2026-09-23)
+
+- `arena.core.chance`: `ChanceRng` (a frozen `(seed, counter)` pair), the `is_chance_node` /
+  `resolve_chance` hooks (replaced in Slice 3 by `sample_chance` / `apply_chance`), and
+  `validate_chance_support`.
+- `GameDefinition.has_chance_nodes`, enforced at registration like the public-view declaration.
+- `ChanceRng` draws are hash-based and rejection-sampled: reproducible across processes and Python
+  builds, and unbiased. A `random.Random` could not be used — its 625-int internal state is
+  interpreter-tied, and transcript validation compares post-state snapshots exactly on every turn,
+  so the generator has to round-trip and compare equal.
+
+**Design note — `current_seat` keeps its signature.** The spec floated widening it to `Seat | None`,
+which would mean auditing 27 call sites. Instead callers check `is_chance_node` first — the same
+shape as the `is_terminal` guard the codebase already uses before asking whose turn it is. This is
+not a weakening, because `arena.match` **drains chance nodes as part of stepping**: a settled match
+never rests at a node where nobody is to move. The spec explicitly allowed "well-defined or
+explicitly absent".
+
+#### Slice 2 - Transcript turn kinds, load-bearing events, and the wire bump — ✅ COMPLETE (2026-09-23)
+
+- `TurnRecord` and `MatchTurnPayload` gained `kind`; `seat` and `action` are null on a chance turn.
+- `start_match` and `apply_match_action` drain chance nodes, recording each as its own turn, with a
+  `MAX_CONSECUTIVE_CHANCE_STEPS` guard so an engine that never settles raises instead of hanging.
+- **Replay does not re-roll.** `validate_match_transcript` replays only action turns; the drain
+  regenerates the chance turns, and a full recorded-vs-replayed comparison proves they landed in the
+  same positions with the same outcomes.
+- `turn_committed.events` is load-bearing: real serialized domain events instead of the previous
+  hardcoded empty list plus class-name strings. That was harmless while every game was
+  deterministic, because a client could recompute anything it missed. A chance outcome cannot be
+  recomputed, so it has to be on the wire.
+- **Versions bumped to 2:** wire, runtime transcript, runtime status (`arena.ui` cross-checks the
+  last two as a matched pair), and `MATCH_TRANSCRIPT_SCHEMA_VERSION`.
+- **Multi-version decode landed here rather than in Phase 38.** The codec emits
+  `WIRE_SCHEMA_VERSION` but accepts everything in `SUPPORTED_WIRE_SCHEMA_VERSIONS`; the runtime
+  payload validators do the same. A build that can only read what it writes cannot migrate without a
+  flag day. A v1-only client is still refused at `hello` with `4400` — it genuinely cannot parse a
+  v2 transcript — so the SDK advertises `[1, 2]`.
+- Protocol §7 gains a version-history table (§7.1); the doc header states the current version.
+
+#### Slice 3 - Seed provenance and non-disclosure — ✅ COMPLETE (2026-09-24)
+
+**The Slice 1/2 design leaked the seed.** It put `ChanceRng(seed, counter)` in game state, reasoning
+that only config was broadcast. But every `post_snapshot` carries `dump_state(...)` to both seats and
+every spectator, so anyone could run the generator forward and predict every future roll. Moving the
+seed out of config fixed nothing. **Owner decision (2026-09-24): chance becomes nature's action.**
+
+- Engine hooks are now `is_chance_node(state)`, `sample_chance(state, rng) -> (outcome, rng)`, and
+  `apply_chance(state, outcome) -> TransitionResult`. `apply_chance` revalidates the outcome, the
+  same way `apply_action` revalidates an action. `resolve_chance` is gone.
+- Serializer hooks `dump_chance_outcome` / `load_chance_outcome`. `validate_chance_support` requires
+  all five hooks at registration; an engine without them could record a turn it can't replay.
+- **The generator lives on `LocalMatch.rng`** (`repr=False, compare=False`), never in state or
+  config. `ChanceRng.__repr__` hides the seed too, so it can't reach a log line.
+  `start_match(..., seed=None)` mints `secrets.randbits(128)` for a chance game, because a
+  predictable default seed would be public. `Arena.start_session(..., seed=)` passes it through. The
+  seed is never serialized anywhere.
+- Chance turns record `outcome` (`TurnRecord.outcome`, `MatchTurnPayload.outcome`, the UI mirror, and
+  `turn_committed.turn_record.outcome`). **Replay applies the recorded outcome:**
+  `start_replay_match` never samples; it waits at each chance node for `apply_match_chance`. A
+  transcript validates without the seed. Tampered or impossible outcomes are rejected, the latter by
+  the engine itself.
+- Still `schema_version=2`. The v2 shape was unreleased, so adding the optional `outcome` field before
+  the phase closes costs no bump.
+- `assert_chance_contract` in `arena.testing` (and in `assert_game_contract`): same seed → same
+  transcript, replay without the seed validates, and the seed never appears in the transcript.
+- `arena.testing.chance_factory`: a coin-flip fixture game that opens at a chance node and returns
+  to one after every move.
+
+**Two Slice 2 bugs fixed along the way:**
+- The server broadcast `turn_committed` only for `turns[-1]`. When an action was followed by chance
+  turns, **the action's own `turn_committed` was never sent**, and neither were opening chance turns.
+  Now `_broadcast_turns_committed(since=...)` sends every committed turn, opening ones included.
+  `TurnAccepted.turn_index` is the action's own index, not the post-step turn count.
+- `UIScreenTurnPayload` required `seat` and `action`, so the replay viewer would have crashed on
+  any chance turn. Both are now optional, with `kind` and `outcome` added; the CLI history renders
+  chance turns.
+
+#### Slice 4 - Exemplar stochastic game + adapter registrations — ✅ COMPLETE (2026-09-24)
+
+**Pig** (`arena.games.pig`, owner decision 2026-09-24): each turn the active seat rolls a die until
+it holds, banking the turn total, or rolls a 1 and loses it. The first seat to bank `target_score`
+(default 50, to keep agent matches short) wins.
+
+- Every roll is a chance node. `apply_action(roll)` only sets `roll_pending`; the face comes from
+  `sample_chance` / `apply_chance`. A turn must open with a roll (holding on zero is illegal), so two
+  agents can't stall a match by passing forever.
+- `target_score` lives in state, so `result()` is derivable from state alone. Config has no seed
+  field, and a test asserts it.
+- Registered in the default registry and in all three adapter registries: CLI (`roll`/`hold`, `r`/`h`,
+  `--pig-target`), MCP (`choice` enum schema), and Ollama (`PigPromptBuilder` with a hold-at-20
+  heuristic and an explicit "holding now wins" cue). `examples/run_remote_demo.py` accepts `--game pig`.
+- The shared contract harness takes an optional `terminal_action` on a bundle, defaulting to
+  `legal_action`. Pig needs it: only `roll` is legal as a turn opens, and only `hold` can end the game.
+- `tests/integration/test_pig_happy_path.py`, over real TCP with a spectator attached:
+  every committed turn reaches both seats and the spectator in order; the transcript validates
+  without the seed; the same seed reproduces the match through the server; and **the seed appears in
+  no frame any client receives.** `_mint_seed` in `arena.match.local_match` is the seam that pins it.
+- `tests/integration/test_chance_opening.py` runs a second server with the coin fixture registered,
+  proving opening chance turns go out before the first `match_state`.
+- Manual check: two local `qwen2.5:1.5b` Ollama agents finished a 20-point match through
+  `python -m arena.cli.play`, and the replay viewer rendered every frame.
+
+### Phase 37 status — ✅ COMPLETE (2026-09-24)
+
+All acceptance criteria met:
+- same seed + same actions → identical transcript: `assert_chance_contract`, and through the server.
+- replay never re-rolls: `start_replay_match` applies recorded outcomes and never samples.
+- the seed is not derivable from anything either seat receives: asserted locally (transcript,
+  snapshots, observations, `repr`) and over the wire (every frame to both seats and a spectator).
+- the three deterministic games are untouched apart from mechanical changes. They carry no generator.
+- `WIRE_SCHEMA_VERSION == 2`; a v1-only client is refused at `hello` with `4400`.
+- ruff + pytest green: **821 passed**.
+
+Also landed early, ahead of Phase 38's list: **multi-version decode** (Slice 2). Phase 38 only needs
+to add `3` to the supported sets.
+
+
+---
+
+### Phase 38 - Imperfect-information contract and wire `schema_version=3` — ✅ COMPLETE (2026-09-24)
+
+Objective:
+- make per-seat information asymmetry a first-class contract
+
+Scope:
+- concrete observation types become the sole per-seat boundary: `dump_observation` MUST contain
+  nothing the receiving seat is not entitled to see; the generic test contract enforces this for any
+  game declaring `has_hidden_information=True`
+- `Serializer.dump_state_for_seat(state, seat)`; default is `dump_state`
+- **`dump_config_for_seat` / config redaction**, closing the leak identified in Phase 37: `welcome`
+  and every `SnapshotEnvelope` carry config verbatim today
+- `public_snapshot` added to `TurnCommittedBody` as a new field (deferred here from Phase 36, where
+  it would have been byte-identical churn); spectators switch to it
+- `WIRE_SCHEMA_VERSION` bumped to `3`
+- ~~**the codec must accept more than one version.**~~ **Done in Phase 37 Slice 2**:
+  `SUPPORTED_WIRE_SCHEMA_VERSIONS` and the runtime validators already accept several versions. Here
+  it only needs `3` added.
+- chance outcomes in hidden-information games: a chance turn's `outcome` and its events can be
+  private (Liar's Dice's opening roll holds both hands), so per-seat transcripts and event filtering
+  must cover `turn_record.outcome`, not just `post_snapshot` and `events`.
+- per-seat `post_snapshot` for hidden-information games; `_broadcast`'s serialize-once optimization
+  (`runtime_bridge.py:197`) must become per-recipient
+- domain events gain `is_public`; the server filters non-public events to entitled seats
+- `dump_runtime_transcript(session, seat=...)`; seat-scoped transcripts on the play channel, public
+  transcript on the spectate channel; a `view` discriminator so a client can tell which it holds
+- **reconnect transcript replay must actually be implemented.** Protocol §11 promises it, but
+  `_handle_reconnect` (`routes_ws.py:289-353`) sends only `welcome` + one `match_state` and no
+  history. Phase 36's watermarked replay machinery is reused here.
+- a test asserting **no information is added** across a disconnect boundary
+- `POST /matches` refuses a client that cannot negotiate the required version for a
+  hidden-information game; `GET /matches/{id}` stops exposing `match_config` (§4's documented v1 leak)
+- `arena.sdk`, `arena.mcp`, `arena.ui` (`build_match_status(..., seat=None)`), and the
+  `arena.cli` replay viewer (`--seat N`) updated
+
+Out of scope:
+- the exemplar hidden-information game (Phase 39); N-player; simultaneous moves (Phase 41)
+
+Acceptance criteria:
+- seat 0's `post_snapshot` provably excludes seat 1's private state, and so does
+  `welcome.match_config` and every transcript turn
+- perfect-information games produce semantically identical payloads to Phase 37
+- reconnect on a hidden-information game replays only the seat's own history, and adds no
+  information
+- architecture tests still pass
+- ruff + pytest green
+
+#### Slice 1 - Contract tightening, per-seat and per-config serializers — ✅ COMPLETE (2026-09-24)
+
+Core and contract only: no wire change, and the server still refuses hidden-information games
+(`hidden_information_unsupported`) until Slice 2 can serve per-seat snapshots.
+
+- `arena.core.public_view` gains per-viewer dumps. A *viewer* is a seat, or `None` for the public:
+  `dump_state_for_seat`, `dump_config_for_seat` / `dump_public_config`, and
+  `dump_chance_outcome_for_viewer` (hooks `dump_chance_outcome_for_seat` /
+  `dump_public_chance_outcome`), plus `*_for_viewer` dispatchers. They are detected hooks, like the
+  Phase 36 ones, so the `@runtime_checkable` Protocols stay untouched.
+- **Registration gate tightened.** A hidden-information game must implement `dump_state_for_seat`,
+  and, if it also has chance nodes, both outcome hooks. A deal is private (Liar's Dice's opening roll
+  holds both hands), so its outcome can't go to every viewer whole. Config hooks stay optional: with
+  seeds designed out of config in Phase 37, config holds only parameters.
+- `arena.match.build_snapshot_for_viewer(definition, config, state, viewer)`, ready for Slice 2's
+  per-recipient broadcast. The authoritative `post_snapshot` is unchanged; it is what replay compares.
+- **`assert_seat_view_contract`**, part of `assert_game_contract`. Perfect-information games: every
+  per-seat view equals the full value. Hidden-information games are tested by
+  **indistinguishability**. The bundle supplies `private_variant_state`, differing from
+  `near_terminal_state` only in what `private_variant_blind_seat` may not see. That seat's state view,
+  observation, and the public view must be identical across the two. This is the generic enforcement
+  of "`dump_observation` contains nothing the seat is not entitled to see".
+- The initial-state contract accepts a game that opens at a chance node, checking the bundle's
+  settled post-opening state instead.
+- `arena.testing.hidden_factory`: a secrets game that deals each seat a private digit at an opening
+  chance node — the smallest game with a private share of state and a private chance outcome.
+  Tests prove the contract catches a leak through each of the three views.
+#### Adversarial review of Phase 37 and Slice 1 — fixes landed with Slices 2-3 (2026-09-24)
+
+Owner rule (2026-09-24): **dispatch adversarial reviewer subagents between one feature and the
+next.** Two reviewers checked `00fc9f0`+`ab388f8` (chance/Pig) and `cf7bf64` (seat views).
+Every confirmed finding is fixed, with a regression test:
+
+- **The seat-view contract was too weak (5 high).** It checked one blind seat and one state, never
+  looked at chance outcomes or events, and compared only serialized observations. Leaky games
+  passed. Bundles now supply `private_variants` (a `PrivateVariant` list covering every seat, over
+  several states) and, for chance games, `chance_state` plus `private_outcome_variants`. Across
+  each pair the contract checks the blind seat's state view, observation (object and dump), legal
+  actions, the public view, and the engine's `public_state`. It then steps once and compares the
+  resulting events and views. `tests/unit/core/test_seat_view_contract.py` reproduces every leak
+  the review found and shows it now fails.
+- **The opening-chance initial-state check was a tautology.** Bundles now supply
+  `opening_outcomes`, and the engine must reach `bundle.initial_state` by applying them.
+- **Viewers are validated** (`check_viewer`). `-1` used to index the last seat's secret, and `True`
+  acted as seat 1.
+- **The transcript validator accepted forged shapes:** any `schema_version`, seat/action on a chance
+  turn, an outcome on an action turn, chance turns in v1, and transcripts ending at a pending chance
+  node. All are rejected now, and engine rejections during replay surface as `ValueError` with the
+  domain error as the cause.
+- **Pig could run forever** (always roll, never bank). The server now caps every match at
+  `MAX_TURNS_PER_MATCH` (5000). Beyond it the match aborts with the new `turn_limit_exceeded` reason.
+- **Duplicate spectator turns / reconnect stall.** A reconnected seat had no writer task, so sends
+  awaited its socket inside `run_match`. That broke the Phase 36 no-stall constraint and opened an
+  await mid-broadcast, where an attaching spectator could get turns twice. `replace_seat` now starts
+  a writer. Broadcasts never yield until every recipient is queued; slow spectators are closed in the
+  background. Spectators also carry a turn watermark from their welcome.
+- **MCP `make_move` returned a stale turn** as its confirmation. It now returns the caller's own
+  action turn and drops other turns, which are already in the session history.
+- `/schemas/payloads` reported wire version 1: `server.config.WIRE_SCHEMA_VERSION` now re-exports the
+  codec's constant.
+- **Chance hooks without `has_chance_nodes`** registered, then deadlocked at the first roll; they are
+  now rejected. **Out-of-range seeds** failed mid-match, blaming the acting seat; `ChanceRng`
+  validates at construction.
+- Smaller items: the browser spectator advertised `[1]`, so it had been refused since Phase 37, and
+  it never rendered chance turns. `PIG_ACTION_SCHEMA` gains `additionalProperties: false`, and
+  `--pig-target` gets a clean usage error.
+
+Not fixed: a *buggy engine* whose `apply_chance` raises while being drained after a seat's action is
+still reported against that seat. With seeds validated, this only happens with a broken engine.
+
+#### Slices 2-3 - Wire v3: per-recipient payloads, per-seat transcripts, reconnect replay — ✅ COMPLETE (2026-09-24)
+
+Built together, because the server's per-recipient broadcast and per-seat transcripts are the same
+code.
+
+- **Wire `schema_version=3`**; runtime transcript/status and match transcript also move to 3, and all
+  decoders accept 1-3. The SDK advertises `[1, 2, 3]`.
+- **Events gain visibility.** `DomainEvent.visible_to(viewer)` defaults to public. `is_public` and
+  `audience()` are serialized only for non-public events, so perfect-information payloads are
+  unchanged.
+- **Views.** Transcripts declare `view` (`full`/`seat`/`public`) and `viewer_seat`. Only a full
+  transcript loads or replays. `dump_match_transcript_for_viewer`, `turn_record_for_viewer`, and
+  `redact_match_transcript` in `arena.match`; `dump_runtime_transcript(session, viewer=...)`,
+  `dump_session_status(session, viewer=...)`, and `redact_runtime_transcript` /
+  `redact_session_status` in `arena.runtime`. The default is `FULL_VIEW`, a sentinel distinct from
+  seat 0 and from `None`. A seat's view also drops the other seat's `PolicyDecided` /
+  `PolicyRetried` runtime events: an agent's "thought" can name its hand.
+- **Per-recipient broadcast** (`_broadcast_per_viewer`). Each distinct view is built and serialized
+  once. `turn_committed` carries the recipient's `post_snapshot`, a new `public_snapshot`, and
+  filtered events and outcomes. `match_finished`/`match_aborted` carry each recipient's own
+  transcript. `welcome.match_config` is per seat.
+- **Reconnect replay (§11).** `welcome.transcript` carries the seat's own transcript on reconnect,
+  and the reconnect hello now negotiates the version.
+- The server's `hidden_information_unsupported` gate is lifted. `POST /matches` accepts optional
+  `supported_schema_versions`; `GET /matches/{id}` exposes no config.
+- `arena.ui`: `build_match_status/transcript/screen(..., seat=None)` refuse a payload redacted for a
+  different perspective. `arena.cli` replay viewer: `--seat N` redacts a saved full transcript to
+  that seat's view. SDK: `Session.replayed_transcript`. MCP: the `make_move` fix above.
+- **Acceptance** (`tests/integration/test_hidden_information.py`, real TCP): with the secrets fixture
+  game, two matches in which seat 0 holds the same digit and seat 1 a different one produce
+  **byte-identical frames for seat 0 and for a spectator**, once per-match ids are removed. Seat 1's
+  frames differ, which shows the comparison can detect a difference. The server's full transcript
+  still replays, and a seat's transcript is refused for replay. A reconnect replays exactly the
+  turns the seat was sent live, field for field.
+
+Deferred to Phase 39: rendering a hidden game in the *live* local CLI (`arena.cli.play`) from the
+human seat's perspective. No hidden game is registered yet, so nothing leaks today.
+
+#### Adversarial review of Slices 2-3, and a real-server check — fixes landed (2026-09-24)
+
+Two more reviewers attacked `fae369c`: one on the leak surface, one on correctness. Every
+confirmed finding is fixed with a regression test.
+
+- **High: post-match seat hijack.** A finished match releases its seats, and the match id, which
+  every spectator holds, was enough to claim one and read that seat's private transcript. Now
+  `hello` and reconnects are refused (`4410 match_over`) once the driver has ended, and resume
+  tokens are invalidated. Residual, documented in protocol §11: until both seats are claimed,
+  anyone who can spectate can take a seat. That is inherent to capability-by-match-id; separate
+  spectate capabilities belong with real auth (deferred).
+- **Off-turn reconnect** used to abort the match and blame the reconnecting seat. The reconnect
+  handler now swaps the new connection in within the same uninterrupted step that builds its
+  replay transcript: no gap, no duplicate, active seat or not. The driver uses the already-swapped
+  connection, and the old `reconnect_event.clear()` race is gone.
+- **Attach/detach DoS:** transcripts are cached per (match, view, progress). Perfect-information
+  broadcasts are built once, not three times.
+- **Contract:** the one-step check now compares the blind seat's observation and legal actions
+  after the move or outcome. `revealing_actions` lets a showdown (Liar's Dice "call") reveal
+  legitimately.
+- **UI/CLI:** status and transcript must be the same perspective. The CLI redacts each full file
+  independently, and `--seat` gets an argparse type. The UI event mirror keeps public events'
+  shape.
+- **Validator:** forged `is_public`/`audience` markers are rejected. `transcript_view_for`
+  validates its viewer.
+- **MCP:** an out-of-turn `make_move` returns `not_committed` when the next observation arrives,
+  instead of waiting 30 s while the seat's deadline runs.
+- **Small fixes:**
+  - a public-view build failure sheds spectators instead of crashing the driver;
+  - a failed spectator welcome closes the spectator;
+  - a replaced seat's writer is stopped;
+  - `create_app(max_turns_per_match=)`;
+  - envelopes and welcome share one match id.
+- Docs: §6/§7 version and negotiation text, README version asserts, CLAUDE.md's
+  `adapters.websocket` import rule (the architecture test allows `arena.runtime.payloads`).
+
+**The production server has been broken for every match, found by running the real stack.**
+`python -m arena.server`, which the Dockerfile runs, aborted every match `peer_disconnected`, for
+two reasons:
+1. uvicorn's default `websockets` implementation corrupts its receive state when a pending
+   `receive_text()` is cancelled, and the first-arriving seat's handler does exactly that while
+   waiting for its opponent. The test servers always ran `websockets-sansio`, so CI never saw it.
+   The entry point now uses `UVICORN_WS_IMPL = "websockets-sansio"`, pinned by a test.
+2. The §13 action cap closed a seat with `4429` at 2 actions per second, which fast bots exceed
+   instantly. The cap now **throttles** at 10 per second: reads are delayed, bounding work the
+   same way, and a flooder only burns its own turn deadline.
+
+After both fixes, two Ollama agents played Pig to completion through `examples/run_remote_demo.py`
+against a real `python -m arena.server`, and both seats' transcripts validated.
+
+#### Third adversarial review (of the fix commit) — fixes landed (2026-09-24)
+
+A reviewer attacked the concurrency changes in `198fc6c`. Every confirmed finding is fixed with a
+test in `tests/integration/test_reconnect_hardening.py` or `tests/unit/server/test_transcript_cache.py`:
+
+- **Half-open takeover.** A reconnect while the old socket was still open swapped the connection,
+  but the driver kept reading the old socket, and the match expired blaming the seat. The reconnect
+  handler now closes the superseded socket, so the driver's normal disconnect path takes over with
+  the new connection.
+- **Reconnect before the match starts** was silently lost or wedged the match. It is refused
+  (`4409 match_not_started`); a fresh `hello` is the right path. The leaked writer task is fixed.
+- **Superseded handlers held their protocol 13 connection slot** until the match ended, so the
+  third reconnect in a match was refused `4429`. A superseded connection's handler now returns.
+- **Throttle vs. deadline.** The action window is shared by both seats, and its wait was charged
+  to the acting seat's deadline. An action that has arrived now counts as on time.
+- **Transcript cache.** Keyed per turn, it neither bounded CPU nor memory. It is replaced by
+  incremental per-(match, viewer) transcripts: each turn is rendered for a viewer once, a warm
+  rebuild does no per-turn work, the LRU is bounded, and entries are dropped on match eviction.
+- `uvicorn>=0.35`: sansio is absent in older versions. The narrow first-seat slot race is closed.
+
+After these fixes the real server again completed a fast-bot match and a two-agent Ollama Pig
+match. 918 tests pass.
+
+Still open, documented: a buggy engine whose chance resolution raises after an action is reported
+against the acting seat; `examples/run_remote_demo.py` assumes identical, replayable seat
+transcripts and needs adapting for Liar's Dice (Phase 39).
+
+---
+
+### Phase 39 - Liar's Dice
+
+Objective:
+- prove Phases 37 and 38 together with a game that is unplayable without both
+
+Scope:
+- full vertical slice under `src/arena/games/liarsdice/`: config (dice per seat, faces, seed),
+  state (per-seat dice, current bid, current bidder), actions (`Bid(quantity, face)`, `Call`),
+  observation (own dice + bid history only), events, rules, serializer, definition with
+  `has_hidden_information=True`
+- initial dice roll resolved through the Phase 37 chance-node primitive
+- registrations in all three adapter registries: `arena.cli.games`, `arena.mcp.games`,
+  `arena.agents.ollama._adapters`
+- `LiarsDicePromptBuilder` for Ollama agents
+- `examples/run_liarsdice_demo.py` mirroring `run_remote_demo.py`
+
+Out of scope:
+- N-player Liar's Dice (2-seat only)
+- advanced variants (wild ones, palifico, spot-on calls) unless they fall out for free
+
+Acceptance criteria:
+- the information-leak test passes: neither seat can observe the other's dice at any point in a
+  full match, over the wire, including on reconnect and in the final transcript
+- a spectator sees the bid history and the reveal, never the hidden dice mid-match
+- two Ollama agents complete a match locally and over the server
+- replay from transcript reproduces the match exactly, including the initial roll
+- ruff + pytest green
+
+---
+
+### Phase 40 - Transcript persistence and public transcript endpoint
+
+Objective:
+- outlive the process, so a finished match has a URL
+
+Scope:
+- transcript persistence behind an interface, with a file-backed implementation as the default
+  and SQLite as the intended second
+- `GET /matches/{id}/public-transcript` serving the public transcript of a finished match
+- a retention policy — explicit TTL or cap, documented, enforced, and configurable
+- `docs/DEPLOYMENT.md` gains persistence configuration
+
+Out of scope:
+- seat-scoped transcripts over HTTP (possession of `match_id` is not seat authentication)
+- authentication or accounts
+- a queryable match archive, leaderboards, or statistics
+
+Acceptance criteria:
+- a finished match's public transcript is retrievable by HTTP after the WebSocket connections
+  close, and after a server restart when a durable backend is configured
+- a hidden-information match's public transcript leaks nothing private, asserted by test
+- retention is enforced; an expired match returns `404`
+- ruff + pytest green
+
+---
+
+### Phase 41 - Generalized turn loop (simultaneous moves)
+
+Status: **deferred by owner decision until after Phase 39 ships.**
+
+Objective:
+- support games where seats act simultaneously (rock-paper-scissors, sealed-bid auctions)
+
+Scope:
+- multi-pending-action variant of the turn loop in `arena.match` and `arena.runtime`
+- server collects one action per seat per round, with per-seat deadlines
+- wire bump to `schema_version=4`; `observation_request` may be outstanding to several seats
+  concurrently; the §18 broadcast matrix gains simultaneous-round semantics
+- SDK, MCP, CLI, and UI updated for concurrent pending actions
+
+Out of scope:
+- N-player (still 2 seats)
+- anything not required by a single simultaneous-move exemplar game
+
+Acceptance criteria:
+- one simultaneous-move exemplar game completes end-to-end over the wire
+- all sequential games are unaffected and their tests pass untouched
+- a seat that misses a simultaneous-round deadline produces the existing abort path
+- ruff + pytest green
+
+---
+
+### Phase 42 - Documentation, examples, and the TypeScript SDK
+
+Objective:
+- close the v2 loop and make the wire consumable outside Python
+
+Scope:
+- packaged TypeScript SDK, written once against the settled wire
+- `CLAUDE.md`, `AGENTS.md`, `docs/ADAPTER_BOUNDARIES.md`, `docs/ADDING_A_GAME.md`, and
+  `README.md` reconciled with the shipped v2 contract
+- `docs/NETWORK_PROTOCOL.md` consolidated at the shipped version, with superseded shapes kept
+  as appendices
+- the scaffold CLI extended to generate hidden-information and stochastic game skeletons
+
+Out of scope:
+- a designed web UI
+- authentication, matchmaking, metrics, tracing
+
+Acceptance criteria:
+- a TypeScript client completes a match against the server, and a TypeScript spectator renders one
+- the scaffold generates a working hidden-information game skeleton that passes the generic
+  contract suite
+- every doc claim about the wire matches the shipped code

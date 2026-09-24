@@ -30,6 +30,11 @@ MSG_MATCH_ABORTED = "match_aborted"
 MSG_PING = "ping"
 MSG_PONG = "pong"
 MSG_ERROR = "error"
+# Phase 36: spectator handshake. New message types rather than widening
+# hello/welcome, because §7 bumps the schema for type or semantic changes to
+# existing fields but allows new message types older clients can ignore.
+MSG_SPECTATOR_HELLO = "spectator_hello"
+MSG_SPECTATOR_WELCOME = "spectator_welcome"
 
 # ---------------------------------------------------------------------------
 # Shared player payload (mirrors RuntimePlayerPayload without importing runtime)
@@ -82,7 +87,11 @@ class WelcomeBody(BaseModel):
     per_action_retry_budget: int = Field(ge=0)
     disconnect_grace_ms: int = Field(ge=0)
     players: list[PlayerInfoBody]
+    #: The seat's own view of the config (Phase 38).
     match_config: dict[str, Any] = Field(default_factory=dict)
+    #: Phase 38: on a reconnect, the seat's transcript so far (protocol §11).
+    #: Null on a first connect, before the match has started.
+    transcript: RuntimeTranscriptPayload | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +156,12 @@ class TurnCommittedBody(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     turn_record: dict[str, Any]
+    #: The recipient's view: a seat's own, or the public's for a spectator.
     post_snapshot: dict[str, Any]
     events: list[dict[str, Any]] = Field(default_factory=list)
+    #: Phase 38: the public view, identical for every recipient. Equal to
+    #: post_snapshot for a perfect-information game.
+    public_snapshot: dict[str, Any] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +217,47 @@ class ErrorBody(BaseModel):
     message: str = Field(min_length=1)
 
 
+
+# ---------------------------------------------------------------------------
+# Phase 36 spectator handshake (not in the v1 §8 message list)
+# ---------------------------------------------------------------------------
+
+
+class SpectatorHelloBody(BaseModel):
+    """Body for spectator_hello.
+
+    A spectator holds no seat, so there is no ``requested_seat`` and no
+    ``resume_token``: possession of the match_id in the URL is the capability,
+    and a reconnecting spectator simply says hello again.
+    """
+
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    client_name: str = Field(min_length=1)
+    client_version: str = Field(min_length=1)
+    supported_schema_versions: list[int] = Field(min_length=1)
+
+
+class SpectatorWelcomeBody(BaseModel):
+    """Body for spectator_welcome.
+
+    Carries the attach-time history so a spectator joining mid-match can render
+    immediately. ``transcript`` is the public transcript, which for a
+    perfect-information game is the full one; it is None before the match starts.
+    """
+
+    model_config = ConfigDict(extra="ignore", strict=True)
+
+    match_id: str = Field(min_length=1)
+    game_id: str = Field(min_length=1)
+    game_schema_version: int = Field(ge=1)
+    lifecycle: str = Field(min_length=1)
+    schema_version: int = Field(ge=1)
+    negotiated_schema_version: int = Field(ge=1)
+    players: list[PlayerInfoBody]
+    turn_count: int = Field(ge=0)
+    transcript: RuntimeTranscriptPayload | None = None
+
 __all__: Sequence[str] = [
     "MSG_ACTION_REJECTED",
     "MSG_ACTION_RESPONSE",
@@ -215,6 +269,8 @@ __all__: Sequence[str] = [
     "MSG_OBSERVATION_REQUEST",
     "MSG_PING",
     "MSG_PONG",
+    "MSG_SPECTATOR_HELLO",
+    "MSG_SPECTATOR_WELCOME",
     "MSG_TURN_COMMITTED",
     "MSG_WELCOME",
     "ActionRejectedBody",
@@ -228,6 +284,8 @@ __all__: Sequence[str] = [
     "PingBody",
     "PlayerInfoBody",
     "PongBody",
+    "SpectatorHelloBody",
+    "SpectatorWelcomeBody",
     "TurnCommittedBody",
     "WelcomeBody",
 ]

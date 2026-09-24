@@ -30,6 +30,7 @@ from arena.adapters.websocket.envelope import (
 )
 from arena.adapters.websocket.messages import ActionResponseBody, HelloBody
 from arena.server.app import create_app
+from arena.server.rate_limits import RateLimiter
 from tests.integration._ws_client import (
     connect,
     recv_envelope,
@@ -52,7 +53,11 @@ def _free_port() -> int:
 def running_server_fast_hb() -> RunningServer:  # type: ignore[return]
     """Server with 200 ms heartbeat interval and 2 max misses for fast testing."""
     port = _free_port()
-    app = create_app(heartbeat_interval_ms=200, heartbeat_max_misses=2)
+    app = create_app(
+        heartbeat_interval_ms=200,
+        heartbeat_max_misses=2,
+        rate_limiter=RateLimiter.unlimited(),
+    )
     config = uvicorn.Config(
         app,
         host="127.0.0.1",
@@ -106,7 +111,7 @@ def _hello_env(seat: int, resume_token: str | None = None) -> HelloEnvelope:
         payload=HelloBody(
             client_name="test",
             client_version="0.1.0",
-            supported_schema_versions=[1],
+            supported_schema_versions=[1, 2, 3],
             auth=None,
             requested_seat=seat,
             resume_token=resume_token,

@@ -54,10 +54,17 @@ def render_match_screen(screen_payload: Mapping[str, Any]) -> str:
 def _render_header(status: Mapping[str, Any]) -> str:
     lifecycle = status["lifecycle"]
     color = _LIFECYCLE_COLORS.get(lifecycle, "")
-    return (
+    header = (
         f"{BOLD}Match {status['match_id']} — {status['game_id']}{RESET}"
         f"  {color}{lifecycle}{RESET}"
     )
+    view = status.get("view", "full")
+    if view == "seat":
+        seat = status.get("viewer_seat")
+        header += f"\n{DIM}Seat {seat}'s view: hidden information redacted{RESET}"
+    elif view == "public":
+        header += f"\n{DIM}Public view: hidden information redacted{RESET}"
+    return header
 
 
 def _render_board(status: Mapping[str, Any]) -> str | None:
@@ -133,6 +140,10 @@ def _render_turn_history(transcript: Mapping[str, Any]) -> str:
         return "Turn history: (none)"
     lines = ["Turn history:"]
     for turn in turns:
+        if turn.get("kind") == "chance":
+            outcome_str = json.dumps(turn.get("outcome"), sort_keys=True)
+            lines.append(f"  #{turn['turn_index']} chance outcome={outcome_str}")
+            continue
         action_str = json.dumps(turn["action"], sort_keys=True)
         lines.append(f"  #{turn['turn_index']} seat={turn['seat']} action={action_str}")
     return "\n".join(lines)

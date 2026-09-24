@@ -10,10 +10,23 @@ Instead this module drives the session turn-by-turn from a single async coroutin
 (run_match), called from the seat-1 WebSocket handler.  The seat-0 handler idles
 until the match is complete.
 
-Message sends use an asyncio.Lock per connection so that run_match can safely call
-ws.send_text on both WebSocket objects from the seat-1 handler coroutine without
-racing with the seat-0 handler.  (In practice only run_match sends after the match
-starts, so the lock is mostly uncontested.)
+Sending (Phase 36 Slice 2)
+--------------------------
+Recipients live in a MatchConnections registry rather than a fixed 2-tuple, so
+spectators can attach without touching the broadcast helpers.
+
+Each connection owns a bounded outbox drained by its own writer task.  run_match
+enqueues and never awaits a socket.  Before this, _broadcast awaited send_text on
+each connection in turn from inside run_match: one blocked send suspended the
+driver while the per-turn deadline kept running, so a slow or stalled reader
+aborted the match and the abort was attributed to whichever seat was active.
+A recipient that falls OUTBOX_MAXSIZE frames behind has frames dropped rather
+than being allowed to stall the match.
+
+An asyncio.Lock per connection still serialises the actual send_text calls, and
+the writer is the only thing that touches the socket once a match is running.
+Terminal frames are queued like any other, so _close_both drains each outbox
+before closing — otherwise clients would miss match_finished / match_aborted.
 
 Phase 32 features implemented here:
 - Per-turn deadline enforcement: asyncio.wait_for wraps _receive_action per turn.
@@ -29,6 +42,8 @@ from __future__ import annotations
 import asyncio
 import secrets as _secrets
 import uuid
+from collections import OrderedDict
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
 from typing import TYPE_CHECKING, Any
@@ -51,6 +66,7 @@ from arena.adapters.websocket import (
     MatchStateEnvelope,
     ObservationRequestEnvelope,
     PingEnvelope,
+    SpectatorWelcomeEnvelope,
     TurnCommittedEnvelope,
     WelcomeEnvelope,
     dumps,
@@ -66,11 +82,18 @@ from arena.adapters.websocket.messages import (
     ObservationRequestBody,
     PingBody,
     PlayerInfoBody,
+    SpectatorWelcomeBody,
     TurnCommittedBody,
     WelcomeBody,
 )
 from arena.core.exceptions import ArenaCoreError
-from arena.match.local_match import apply_match_action
+from arena.core.public_view import Viewer, dump_config_for_seat, dump_config_for_viewer
+from arena.match.local_match import apply_match_action, build_snapshot_for_viewer
+from arena.match.transcript import (
+    MATCH_TRANSCRIPT_SCHEMA_VERSION,
+    transcript_view_for,
+    turn_record_for_viewer,
+)
 from arena.runtime.models import (
     AbortMetadata,
     AbortReason,
@@ -84,6 +107,7 @@ from arena.runtime.payloads import (
     dump_runtime_transcript,
 )
 from arena.runtime.session import MatchSession
+from arena.server.config import MAX_TURNS_PER_MATCH
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -93,6 +117,9 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 WS_CLOSE_NORMAL = 1000
+#: Frames a single connection may have in flight before it is considered
+#: too slow. Well above any legitimate burst: one turn produces ~3 frames.
+OUTBOX_MAXSIZE = 64
 HEARTBEAT_CLOSE_CODE = 4408
 
 
@@ -109,6 +136,178 @@ class SeatConnection:
     pending_pong_nonce: str | None = None
     consecutive_heartbeat_misses: int = 0
     heartbeat_timed_out: bool = False
+    # Phase 36 Slice 2: bounded outbox drained by a per-connection writer task,
+    # so one slow reader cannot suspend the match driver.
+    outbox: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=OUTBOX_MAXSIZE))
+    writer_task: "asyncio.Task | None" = None
+    outbox_overflowed: bool = False
+    #: Set when a reconnect replaces this connection. Its handler then returns,
+    #: releasing its protocol 13 connection slot instead of holding it until the
+    #: match ends (the third reconnect in a match used to be refused 4429).
+    superseded: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@dataclass
+class SpectatorConnection:
+    """A read-only attachment to a match (Phase 36 Slice 3).
+
+    Deliberately shaped like SeatConnection so _send, _writer_loop and
+    _stop_writer work on it unchanged; ``seat`` is None because a spectator
+    holds none, and the send path only uses it for logging.
+
+    Spectators are never sent observation_request or action_rejected, and an
+    overflowing spectator is dropped rather than allowed to slow the match.
+    """
+
+    websocket: "WebSocket"
+    seat: int | None = None
+    send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    outbox: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=OUTBOX_MAXSIZE))
+    writer_task: "asyncio.Task | None" = None
+    outbox_overflowed: bool = False
+    #: Watermark: the first turn index this spectator has not yet been sent.
+    #: Its welcome carries every earlier turn in the transcript, so a
+    #: turn_committed below the watermark would be a duplicate.
+    next_turn_index: int = 0
+
+
+class MatchConnections:
+    """Live recipient registry for one match (Phase 36 Slice 2).
+
+    Replaces the fixed ``tuple[SeatConnection, SeatConnection]`` that used to be
+    threaded through ``run_match`` and every broadcast helper.
+
+    Two deliberate properties:
+
+    * Seats stay addressable by index, so existing ``conns[active_seat]`` call
+      sites are unchanged.
+    * Iteration yields every broadcast recipient. That is what lets Slice 3
+      attach spectators without editing the broadcast helpers again, and what
+      Phase 38 needs when a broadcast stops being one identical payload.
+
+    Seat membership is fixed at two; spectators come and go. Mutating methods are
+    only ever called from the single event loop that owns the match.
+    """
+
+    __slots__ = ("_seats", "_spectators")
+
+    def __init__(self, seat0: SeatConnection, seat1: SeatConnection) -> None:
+        self._seats: dict[int, SeatConnection] = {0: seat0, 1: seat1}
+        self._spectators: list[Any] = []
+
+    def __getitem__(self, seat: int) -> SeatConnection:
+        return self._seats[seat]
+
+    def __iter__(self) -> "Iterator[Any]":
+        yield from self._seats.values()
+        # Copied: a slow spectator may be dropped mid-broadcast.
+        yield from tuple(self._spectators)
+
+    def __len__(self) -> int:
+        return len(self._seats) + len(self._spectators)
+
+    def seats(self) -> tuple[SeatConnection, ...]:
+        """The two seat connections, in seat order."""
+
+        return (self._seats[0], self._seats[1])
+
+    def replace_seat(self, seat: int, conn: SeatConnection) -> None:
+        """Swap in a reconnected seat's new connection, with its own writer.
+
+        Without a writer, every send to the reconnected seat would await its
+        socket inside run_match, and a slow reader could stall the match driver
+        again, the Phase 36 constraint. It would also open an await point in the
+        middle of a broadcast, where a spectator could attach and receive turns
+        twice.
+        """
+
+        old = self._seats.get(seat)
+        if old is not None and old is not conn:
+            if old.writer_task is not None:
+                old.writer_task.cancel()
+                old.writer_task = None
+            old.superseded.set()
+        self._seats[seat] = conn
+        _start_writer(conn)
+
+    def add_spectator(self, conn: Any) -> None:
+        self._spectators.append(conn)
+
+    def remove_spectator(self, conn: Any) -> None:
+        try:
+            self._spectators.remove(conn)
+        except ValueError:
+            pass
+
+    def spectators(self) -> tuple[Any, ...]:
+        return tuple(self._spectators)
+
+
+def _get_match_conns(app_state: Any) -> dict[str, "MatchConnections"]:
+    """Per-match connection registries, keyed by match_id.
+
+    Published on app.state so a spectator handler (Slice 3) can attach to a
+    running match without reaching into the seat handler that started it.
+    Released by create_app's eviction hook.
+    """
+    if not hasattr(app_state, "_ws_match_conns"):
+        app_state._ws_match_conns = {}
+    return app_state._ws_match_conns
+
+
+def _get_pending_spectators(app_state: Any) -> dict[str, list["SpectatorConnection"]]:
+    """Spectators that attached before the match had a connection registry.
+
+    A spectator may arrive before both seats do, at which point there is no
+    MatchConnections yet. It parks here and the seat handler folds it in when it
+    builds the registry. Released by create_app's eviction hook.
+    """
+    if not hasattr(app_state, "_ws_pending_spectators"):
+        app_state._ws_pending_spectators = {}
+    return app_state._ws_pending_spectators
+
+
+async def send_spectator_welcome(
+    conn: "SpectatorConnection",
+    match: "Match",
+) -> None:
+    """Send spectator_welcome, carrying the attach-time history.
+
+    Bundling the transcript into the welcome means a spectator joining mid-match
+    can render immediately. There is no separate "history so far" message for a
+    running match, and inventing one would be a wire addition this phase avoids.
+    """
+
+    session = match.session
+    local_match = session.local_match
+    turn_count = len(local_match.turns) if local_match is not None else 0
+
+    transcript: RuntimeTranscriptPayload | None = None
+    if local_match is not None:
+        # Not swallowed: a spectator whose welcome lacks the history would never
+        # get it (the watermark skips those turns). The handler closes it instead.
+        transcript = _build_transcript_payload(session, None)
+    # Every turn up to here is in the welcome's transcript; live frames resume
+    # after it. See SpectatorConnection.next_turn_index.
+    conn.next_turn_index = turn_count
+
+    body = SpectatorWelcomeBody(
+        match_id=match.match_id,
+        game_id=match.game_id,
+        game_schema_version=1,
+        lifecycle=session.lifecycle.value,
+        schema_version=WIRE_SCHEMA_VERSION,
+        negotiated_schema_version=WIRE_SCHEMA_VERSION,
+        players=_build_player_info(match),
+        turn_count=turn_count,
+        transcript=transcript,
+    )
+    env = SpectatorWelcomeEnvelope(
+        schema_version=WIRE_SCHEMA_VERSION,
+        match_id=match.match_id,
+        payload=body,
+    )
+    await _send(conn, env)
 
 
 def _make_resume_token() -> str:
@@ -161,19 +360,170 @@ def _dump_abort_dict(abort: AbortMetadata) -> dict:
     return payload.model_dump(mode="json")
 
 
-def _build_transcript_payload(session: MatchSession) -> RuntimeTranscriptPayload:
-    raw = dump_runtime_transcript(session)
-    return RuntimeTranscriptPayload.model_validate(raw)
+@dataclass
+class _ViewTranscript:
+    """One viewer's match transcript of one match, grown one turn at a time."""
+
+    base: dict[str, Any]
+    turns: list[dict[str, Any]]
 
 
-async def _send(conn: SeatConnection, envelope: Any) -> None:
-    """Send one envelope to a single seat, serialised via the connection lock."""
-    text = dumps(envelope)
+#: Incremental per-(match, viewer) transcripts. Turns are append-only, so each
+#: turn is rendered for a viewer exactly once, however often a spectator
+#: attaches or a seat reconnects. A per-attach rebuild is linear in match length,
+#: about a second at the turn cap, and let one client stall every match on the
+#: server by looping attach/detach. Bounded LRU; dropped on match eviction.
+_VIEW_TRANSCRIPTS: "OrderedDict[tuple[str, Viewer], _ViewTranscript]" = OrderedDict()
+_VIEW_TRANSCRIPTS_MAX = 12
+
+
+def forget_match_transcripts(match_id: str) -> None:
+    """Drop cached transcripts for an evicted match."""
+
+    for key in [k for k in _VIEW_TRANSCRIPTS if k[0] == match_id]:
+        del _VIEW_TRANSCRIPTS[key]
+
+
+def _match_transcript_for(session: MatchSession, viewer: Viewer) -> dict[str, Any]:
+    local_match = session.local_match
+    assert local_match is not None
+    definition = session.definition
+    hidden = definition.has_hidden_information
+    # A perfect-information transcript is the full one for every viewer, and
+    # the public rendering of a turn equals its authoritative one.
+    render_as: Viewer = viewer if hidden else None
+    key = (session.match_id, render_as)
+    cached = _VIEW_TRANSCRIPTS.get(key)
+    if cached is None:
+        view, viewer_seat = transcript_view_for(definition, viewer)
+        serializer = definition.serializer
+        cached = _ViewTranscript(
+            base={
+                "game_id": definition.game_id,
+                "schema_version": MATCH_TRANSCRIPT_SCHEMA_VERSION,
+                "config": dump_config_for_viewer(serializer, local_match.config, render_as),
+                "initial_snapshot": build_snapshot_for_viewer(
+                    definition,
+                    local_match.config,
+                    local_match.rules_engine.initial_state(local_match.config),
+                    render_as,
+                ).model_dump(mode="json"),
+                "view": view,
+                "viewer_seat": viewer_seat,
+            },
+            turns=[],
+        )
+        _VIEW_TRANSCRIPTS[key] = cached
+    for index in range(len(cached.turns), len(local_match.turns)):
+        cached.turns.append(
+            turn_record_for_viewer(local_match, index, render_as).model_dump(mode="json")
+        )
+    _VIEW_TRANSCRIPTS.move_to_end(key)
+    while len(_VIEW_TRANSCRIPTS) > _VIEW_TRANSCRIPTS_MAX:
+        _VIEW_TRANSCRIPTS.popitem(last=False)
+    return {**cached.base, "turns": list(cached.turns)}
+
+
+def _build_transcript_payload(session: MatchSession, viewer: Viewer) -> RuntimeTranscriptPayload:
+    """The transcript ``viewer`` may receive: its seat's, or the public's (``None``).
+
+    Never the full one: for a hidden-information game that exists only here.
+    """
+
+    if session.local_match is None:
+        return RuntimeTranscriptPayload.model_validate(
+            dump_runtime_transcript(session, viewer=viewer)
+        )
+    # Dump and validate only the small envelope (a placeholder stands in for the
+    # match transcript), then attach the cached match transcript, which was
+    # built from validated turn payloads. Dumping or re-validating a long one
+    # would cost the very linear pass the cache exists to avoid.
+    raw = dump_runtime_transcript(session, viewer=viewer, match_transcript={})
+    envelope = RuntimeTranscriptPayload.model_validate(raw)
+    return envelope.model_copy(
+        update={"match_transcript": _match_transcript_for(session, viewer)}
+    )
+
+
+async def _send_now(conn: SeatConnection, text: str) -> bool:
+    """Write one frame straight to the socket. Returns whether it went out."""
+
     async with conn.send_lock:
         try:
             await conn.websocket.send_text(text)
+            return True
         except Exception as exc:
             logger.debug("send_failed", seat=conn.seat, error=str(exc))
+            return False
+
+
+async def _writer_loop(conn: SeatConnection) -> None:
+    """Drain one connection's outbox, one frame at a time, in order.
+
+    Exactly one writer per connection, so FIFO per connection is preserved while
+    the match driver is never blocked by a slow reader.
+    """
+
+    while True:
+        text = await conn.outbox.get()
+        if text is None:  # shutdown sentinel
+            return
+        if not await _send_now(conn, text):
+            return
+
+
+def _start_writer(conn: SeatConnection) -> None:
+    if conn.writer_task is None:
+        conn.writer_task = asyncio.create_task(_writer_loop(conn))
+
+
+async def _stop_writer(conn: SeatConnection, *, drain_timeout: float = 2.0) -> None:
+    """Flush anything still queued, then stop the writer.
+
+    Terminal messages (match_finished / match_aborted) are enqueued like any
+    other frame, so the socket must not be closed until the outbox has drained.
+    """
+
+    task = conn.writer_task
+    if task is None:
+        return
+    conn.writer_task = None
+    try:
+        conn.outbox.put_nowait(None)
+    except asyncio.QueueFull:
+        task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), drain_timeout)
+    except (TimeoutError, asyncio.TimeoutError):
+        task.cancel()
+    except (asyncio.CancelledError, Exception):
+        pass
+
+
+async def _send(conn: SeatConnection, envelope: Any) -> None:
+    """Queue one envelope for a single connection.
+
+    Before the writer is running (the hello/welcome handshake) this writes
+    inline, so handshake ordering is unchanged. Once the match driver starts,
+    sends are queued: a blocked ``send_text`` used to suspend ``run_match``
+    itself while the per-turn deadline kept ticking, which aborted matches and
+    blamed whichever seat happened to be active.
+    """
+
+    text = dumps(envelope)
+    if conn.writer_task is None:
+        await _send_now(conn, text)
+        return
+    try:
+        conn.outbox.put_nowait(text)
+    except asyncio.QueueFull:
+        conn.outbox_overflowed = True
+        logger.warning(
+            "outbox_overflow",
+            seat=conn.seat,
+            schema_version=1,
+            detail="recipient too slow; frame dropped",
+        )
 
 
 async def _send_to_ws(ws: "WebSocket", envelope: Any) -> None:
@@ -185,7 +535,108 @@ async def _send_to_ws(ws: "WebSocket", envelope: Any) -> None:
         logger.debug("send_to_ws_failed", error=str(exc))
 
 
-async def _broadcast(conns: tuple[SeatConnection, SeatConnection], envelope: Any) -> None:
+async def _shed_overflowed_spectators(conns: "MatchConnections") -> None:
+    """Drop spectators that fell behind.
+
+    A spectator is a guest: it never gets to slow a match down. Its writer is
+    cancelled rather than drained, because a drain on a stuck socket is exactly
+    the block being avoided.
+    """
+
+    for spectator in conns.spectators():
+        if not spectator.outbox_overflowed:
+            continue
+        conns.remove_spectator(spectator)
+        task = spectator.writer_task
+        spectator.writer_task = None
+        if task is not None:
+            task.cancel()
+        # Closed in the background: awaiting a close here would yield in the
+        # middle of a broadcast, where a spectator attaching could be sent turns
+        # its welcome already carried.
+        asyncio.get_running_loop().create_task(_close_quietly(spectator.websocket))
+        logger.warning(
+            "spectator_dropped",
+            schema_version=1,
+            detail="outbox overflow; spectator could not keep up",
+        )
+
+
+async def _close_quietly(ws: "WebSocket") -> None:
+    try:
+        await ws.close(code=WS_CLOSE_NORMAL, reason="spectator_too_slow")
+    except Exception:
+        pass
+
+
+def _enqueue_text(conn: Any, text: str) -> None:
+    """Queue pre-serialised text on a connection whose writer is running."""
+
+    try:
+        conn.outbox.put_nowait(text)
+    except asyncio.QueueFull:
+        conn.outbox_overflowed = True
+        logger.warning(
+            "outbox_overflow",
+            seat=conn.seat,
+            schema_version=1,
+            detail="recipient too slow; frame dropped",
+        )
+
+
+async def _broadcast_per_viewer(
+    conns: "MatchConnections",
+    build: Callable[[Viewer], Any],
+    *,
+    turn_index: int | None = None,
+    shared: bool = False,
+) -> None:
+    """Send each recipient the envelope built for its own view (Phase 38).
+
+    A seat's viewer is its seat; a spectator's is ``None``, the public. Each
+    distinct view is built and serialised once: at most one per seat plus one
+    public. With ``shared`` (a perfect-information game, where every view is the
+    same) a single payload serves everyone.
+
+    If building the public view fails, spectators are dropped rather than the
+    match: an error in a view only a spectator needs must not end a match the
+    seats are playing.
+
+    ``turn_index`` marks a turn_committed frame. A spectator whose welcome already
+    carried that turn is skipped.
+
+    No await point until every recipient has been queued: a spectator attaching
+    in the middle would otherwise be sent turns its welcome already carried.
+    """
+
+    rendered: dict[Viewer, str] = {}
+    for conn in conns:
+        viewer: Viewer = None if shared else conn.seat
+        if turn_index is not None and turn_index < getattr(conn, "next_turn_index", 0):
+            continue
+        if viewer not in rendered:
+            if conn.seat is None:
+                try:
+                    rendered[viewer] = dumps(build(viewer))
+                except Exception as exc:
+                    logger.warning(
+                        "public_view_failed", schema_version=1, error=str(exc)
+                    )
+                    for spectator in conns.spectators():
+                        spectator.outbox_overflowed = True
+                    break
+            else:
+                rendered[viewer] = dumps(build(viewer))
+        if conn.writer_task is None:
+            await _send_now(conn, rendered[viewer])
+        else:
+            _enqueue_text(conn, rendered[viewer])
+        if turn_index is not None and conn.seat is None:
+            conn.next_turn_index = turn_index + 1
+    await _shed_overflowed_spectators(conns)
+
+
+async def _broadcast(conns: "MatchConnections", envelope: Any) -> None:
     """Send one envelope to both seats sequentially.
 
     Sends to seat 0 first, then seat 1.  This ordering must be preserved:
@@ -194,17 +645,13 @@ async def _broadcast(conns: tuple[SeatConnection, SeatConnection], envelope: Any
     the next portal scheduling round, which is fine as long as we do not
     close before that happens.
     """
-    text = dumps(envelope)
     for conn in conns:
-        async with conn.send_lock:
-            try:
-                await conn.websocket.send_text(text)
-            except Exception as exc:
-                logger.debug("broadcast_failed", seat=conn.seat, error=str(exc))
+        await _send(conn, envelope)
+    await _shed_overflowed_spectators(conns)
 
 
 async def _broadcast_match_state(
-    conns: tuple[SeatConnection, SeatConnection],
+    conns: "MatchConnections",
     session: MatchSession,
     *,
     override_lifecycle: str | None = None,
@@ -218,77 +665,133 @@ async def _broadcast_match_state(
     await _broadcast(conns, env)
 
 
-async def _broadcast_turn_committed(
-    conns: tuple[SeatConnection, SeatConnection],
+async def _broadcast_turns_committed(
+    conns: "MatchConnections",
     session: MatchSession,
+    *,
+    since: int,
 ) -> None:
+    """Broadcast one ``turn_committed`` per turn from index ``since`` onward.
+
+    Phase 37: one step can commit several turns, such as an action followed by
+    the chance nodes it leads to, or the chance nodes a match opens with. Sending
+    only the last one would drop the action itself.
+
+    Phase 38: each recipient gets its own view of every turn.
+    """
+
     local_match = session.local_match
-    if local_match is None or not local_match.turns:
+    if local_match is None:
         return
-    last_turn = local_match.turns[-1]
-    post_snap = last_turn.post_snapshot
-    post_snapshot_dict = post_snap.model_dump(mode="json")
+    for turn_index in range(since, len(local_match.turns)):
+        await _broadcast_per_viewer(
+            conns,
+            lambda viewer, i=turn_index: _build_turn_committed_env(session, i, viewer),
+            turn_index=turn_index,
+            shared=not session.definition.has_hidden_information,
+        )
+
+
+def _build_turn_committed_env(session: MatchSession, turn_index: int, viewer: Viewer) -> Any:
+    """One turn as ``viewer`` may see it.
+
+    ``post_snapshot`` is the recipient's view and ``public_snapshot`` the public
+    one (wire v3), so a seat's client also knows what spectators see. Events and
+    the chance outcome are filtered to what the viewer may see.
+    """
+
+    local_match = session.local_match
+    assert local_match is not None
+    record = turn_record_for_viewer(local_match, turn_index, viewer)
+    post_snapshot = record.post_snapshot.model_dump(mode="json")
+    public_snapshot = build_snapshot_for_viewer(
+        session.definition,
+        local_match.config,
+        local_match.turns[turn_index].post_state,
+        None,
+    ).model_dump(mode="json")
+    # Phase 37: events are load-bearing. A chance outcome cannot be recomputed by
+    # a client, so it has to be on the wire.
+    event_payloads = [event.model_dump(mode="json") for event in record.events]
     turn_record_dict = {
-        "turn_index": len(local_match.turns) - 1,
-        "seat": last_turn.seat,
-        "action": session.definition.serializer.dump_action(last_turn.action),
-        "events": [e.__class__.__name__ for e in last_turn.events],
-        "post_snapshot": post_snapshot_dict,
+        "turn_index": turn_index,
+        "kind": record.kind,
+        "seat": record.seat,
+        "action": record.action,
+        "outcome": record.outcome,
+        "events": event_payloads,
+        "post_snapshot": post_snapshot,
     }
     body = TurnCommittedBody(
         turn_record=turn_record_dict,
-        post_snapshot=post_snapshot_dict,
-        events=[],
+        post_snapshot=post_snapshot,
+        public_snapshot=public_snapshot,
+        events=event_payloads,
     )
-    env = TurnCommittedEnvelope(
+    return TurnCommittedEnvelope(
         schema_version=WIRE_SCHEMA_VERSION,
         match_id=session.match_id,
         payload=body,
     )
-    await _broadcast(conns, env)
 
 
 async def _broadcast_match_finished(
-    conns: tuple[SeatConnection, SeatConnection],
+    conns: "MatchConnections",
     session: MatchSession,
 ) -> None:
-    transcript = _build_transcript_payload(session)
-    body = MatchFinishedBody(result={}, transcript=transcript)
-    env = MatchFinishedEnvelope(
-        schema_version=WIRE_SCHEMA_VERSION,
-        match_id=session.match_id,
-        payload=body,
+    def build(viewer: Viewer) -> Any:
+        return MatchFinishedEnvelope(
+            schema_version=WIRE_SCHEMA_VERSION,
+            match_id=session.match_id,
+            payload=MatchFinishedBody(
+                result={}, transcript=_build_transcript_payload(session, viewer)
+            ),
+        )
+
+    await _broadcast_per_viewer(
+        conns, build, shared=not session.definition.has_hidden_information
     )
-    await _broadcast(conns, env)
 
 
 async def _broadcast_match_aborted(
-    conns: tuple[SeatConnection, SeatConnection],
+    conns: "MatchConnections",
     session: MatchSession,
 ) -> None:
-    transcript = _build_transcript_payload(session)
     abort_payload = RuntimeAbortPayload(
         reason=session.abort.reason.value,
         message=session.abort.message,
         cause_type=session.abort.cause_type,
         cause_message=session.abort.cause_message,
     )
-    body = MatchAbortedBody(abort=abort_payload, transcript=transcript)
-    env = MatchAbortedEnvelope(
-        schema_version=WIRE_SCHEMA_VERSION,
-        match_id=session.match_id,
-        payload=body,
+
+    def build(viewer: Viewer) -> Any:
+        return MatchAbortedEnvelope(
+            schema_version=WIRE_SCHEMA_VERSION,
+            match_id=session.match_id,
+            payload=MatchAbortedBody(
+                abort=abort_payload, transcript=_build_transcript_payload(session, viewer)
+            ),
+        )
+
+    await _broadcast_per_viewer(
+        conns, build, shared=not session.definition.has_hidden_information
     )
-    await _broadcast(conns, env)
 
 
 async def _close_both(
-    conns: tuple[SeatConnection, SeatConnection],
+    conns: "MatchConnections",
     code: int,
     reason: str,
 ) -> None:
-    """Close both WebSocket connections."""
-    for conn in conns:
+    """Close both seat WebSockets.
+
+    Seats only: a spectator connection is owned by its own handler, which closes
+    it when the match reaches a terminal state.
+    """
+    for conn in conns.seats():
+        # Terminal frames are queued like any other; drain before closing or the
+        # client never sees match_finished / match_aborted.
+        await _stop_writer(conn)
         try:
             await conn.websocket.close(code=code, reason=reason)
         except Exception:
@@ -403,6 +906,7 @@ async def _receive_action(
     rejected_turn_ids: set[str],
     *,
     deadline_event: asyncio.Event | None = None,
+    limiter: Any = None,
 ) -> tuple[str | None, ActionResponsePayload | None, str | None]:
     """Wait for a valid action_response frame from the active seat.
 
@@ -411,6 +915,10 @@ async def _receive_action(
     Returns (None, None, "deadline_expired") when deadline_event fires.
     Duplicate turn_ids are silently dropped — returns (None, None, None) meaning retry.
     Pong frames update the heartbeat state and are consumed silently.
+
+    Protocol §13: a seat exceeding the per-match action rate has its connection
+    closed with 4429.  The next receive then fails naturally and the existing
+    disconnect-grace path takes over, so no new abort reason is needed.
 
     Deadline enforcement uses asyncio.wait on a per-receive task so that
     receive_text() is never cancelled mid-call (which can corrupt ASGI state).
@@ -470,6 +978,24 @@ async def _receive_action(
                 return None, None, f"expected action_response, got {envelope.type!r}"
             continue
 
+        if limiter is not None:
+            # Protocol 13: throttle, don't disconnect. Waiting bounds the work
+            # the loop does per match exactly as closing did, but a fast,
+            # legitimate agent is no longer shed. The frame already arrived, so
+            # the wait is the server's, not the seat's: it is not charged
+            # against the per-turn deadline (the window is shared by both seats,
+            # so charging it would expire a seat for its opponent's speed).
+            delay = limiter.reserve_action(match_id=match_id)
+            if delay > 0:
+                logger.info(
+                    "action_throttled",
+                    match_id=match_id,
+                    seat=active_conn.seat,
+                    schema_version=1,
+                    delay_ms=int(delay * 1000),
+                )
+                await asyncio.sleep(delay)
+
         turn_id = envelope.turn_id or str(uuid.uuid4())
 
         if turn_id in committed_turn_ids or turn_id in rejected_turn_ids:
@@ -520,7 +1046,7 @@ def _get_reconnect_conns(app_state: Any) -> dict[str, dict[int, SeatConnection]]
 
 async def run_match(
     match: "Match",
-    conns: tuple[SeatConnection, SeatConnection],
+    conns: "MatchConnections",
     *,
     done_event: asyncio.Event,
     app_state: Any,
@@ -583,6 +1109,11 @@ async def run_match(
                 pass
             hb_task = None
 
+    # One writer task per seat for the life of the match: the driver enqueues and
+    # never blocks on a socket.
+    for _seat_conn in conns.seats():
+        _start_writer(_seat_conn)
+
     try:
         if session.lifecycle is RuntimeLifecycle.ABORTED:
             await _broadcast_match_state(conns, session)
@@ -590,6 +1121,9 @@ async def run_match(
             await _close_both(conns, WS_CLOSE_NORMAL, "match_aborted")
             return
 
+        # A game that opens at a chance node — a deal, an opening roll — has
+        # committed turns before any seat acts; their outcomes go out first.
+        await _broadcast_turns_committed(conns, session, since=0)
         await _broadcast_match_state(conns, session)
 
         committed_turn_ids: set[str] = set()
@@ -608,6 +1142,9 @@ async def run_match(
 
             active_seat = local_match.rules_engine.current_seat(local_match.state)
             active_conn = conns[active_seat]
+            # One accepted action may commit several turns (Phase 37 chance
+            # nodes); everything from here on is broadcast once it lands.
+            turns_before = len(local_match.turns)
 
             # Start heartbeat only for this turn's active seat.
             await _cancel_hb()
@@ -647,6 +1184,7 @@ async def run_match(
                     committed_turn_ids,
                     rejected_turn_ids,
                     deadline_event=deadline_event,
+                    limiter=getattr(app_state, "rate_limiter", None),
                 )
 
                 # --- Per-turn deadline expired ---
@@ -744,7 +1282,12 @@ async def run_match(
                         await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
-                    reconnect_event.clear()
+                    # The reconnect handler swaps the new connection into
+                    # conns itself. If that already happened, there is nothing
+                    # to wait for; checking first also closes the window where
+                    # clearing the event would discard a reconnect that beat us.
+                    if conns[active_seat] is active_conn:
+                        reconnect_event.clear()
                     logger.debug(
                         "seat_disconnected_awaiting_reconnect",
                         match_id=match.match_id,
@@ -753,7 +1296,8 @@ async def run_match(
                         schema_version=1,
                     )
                     try:
-                        await asyncio.wait_for(reconnect_event.wait(), timeout=grace_s)
+                        if conns[active_seat] is active_conn:
+                            await asyncio.wait_for(reconnect_event.wait(), timeout=grace_s)
                     except asyncio.TimeoutError:
                         session = arena.abort_session(
                             session,
@@ -773,12 +1317,14 @@ async def run_match(
                         await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
-                    # Reconnected: swap in the new SeatConnection.
-                    new_conn = (
-                        _get_reconnect_conns(app_state)
-                        .get(match.match_id, {})
-                        .get(active_seat)
-                    )
+                    # Reconnected: use the connection the handler swapped in.
+                    new_conn = conns[active_seat]
+                    if new_conn is active_conn:
+                        new_conn = (
+                            _get_reconnect_conns(app_state)
+                            .get(match.match_id, {})
+                            .get(active_seat)
+                        )
                     if new_conn is None:
                         session = arena.abort_session(
                             session,
@@ -798,10 +1344,7 @@ async def run_match(
                         await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
-                    if active_seat == 0:
-                        conns = (new_conn, conns[1])
-                    else:
-                        conns = (conns[0], new_conn)
+                    conns.replace_seat(active_seat, new_conn)
                     active_conn = new_conn
 
                     # Replace heartbeat task for the reconnected seat.
@@ -944,7 +1487,7 @@ async def run_match(
                     TurnAccepted(
                         match_id=session.match_id,
                         seat=active_seat,
-                        turn_index=len(next_match.turns),
+                        turn_index=turns_before + 1,
                     ),
                 )
                 new_lifecycle = RuntimeLifecycle.RUNNING
@@ -965,11 +1508,37 @@ async def run_match(
                     match_id=session.match_id,
                     seat=active_seat,
                     schema_version=1,
-                    turn_index=len(next_match.turns) - 1,
+                    turn_index=turns_before,
                     turn_id=turn_id,
                 )
-                await _broadcast_turn_committed(conns, session)
+                await _broadcast_turns_committed(conns, session, since=turns_before)
                 await _broadcast_match_state(conns, session)
+
+                # A game can loop without end (two Pig seats that only ever
+                # roll). Holding both seat URLs is enough to pin server memory
+                # that way, so the server bounds every match.
+                turn_cap = getattr(app_state, "max_turns_per_match", MAX_TURNS_PER_MATCH)
+                if (
+                    session.lifecycle is RuntimeLifecycle.RUNNING
+                    and len(next_match.turns) >= turn_cap
+                ):
+                    logger.warning(
+                        "turn_limit_exceeded",
+                        match_id=session.match_id,
+                        seat=None,
+                        schema_version=1,
+                        turn_cap=turn_cap,
+                    )
+                    session = arena.abort_session(
+                        session,
+                        reason=AbortReason.TURN_LIMIT_EXCEEDED,
+                        message=f"The match exceeded the server's cap of {turn_cap} turns.",
+                    )
+                    match.session = session
+                    await _broadcast_match_state(conns, session)
+                    await _broadcast_match_aborted(conns, session)
+                    await _close_both(conns, WS_CLOSE_NORMAL, "turn_limit_exceeded")
+                    return
 
         # Match reached terminal state.
         if session.lifecycle is RuntimeLifecycle.FINISHED:
@@ -996,6 +1565,10 @@ async def run_match(
         # Cancel heartbeat task on any exit path.
         # (deadline_timer_task is cancelled inline at each return point via _cancel_task.)
         await _cancel_hb()
+        # Flush and stop writers on every exit path, including the ones that
+        # return without calling _close_both.
+        for _seat_conn in conns.seats():
+            await _stop_writer(_seat_conn)
 
 
 def _make_rejected_env(
@@ -1018,14 +1591,26 @@ def _make_rejected_env(
     )
 
 
-async def send_welcome(conn: SeatConnection, match: "Match") -> None:
+async def send_welcome(
+    conn: SeatConnection, match: "Match", *, with_transcript: bool = False
+) -> None:
     """Send a welcome envelope to one seat after a successful hello handshake.
 
     Generates and stores a fresh resume_token in match.resume_tokens[seat].
     The token rotates on every call (initial connect and every reconnect).
+
+    Phase 38: ``match_config`` is the seat's own view of the config, and on a
+    reconnect (``with_transcript``) the welcome carries the seat's transcript so
+    far, which protocol §11 promised but v1 never sent. It is the seat's own
+    view, so reconnecting adds no information the seat did not already have.
     """
     players = _build_player_info(match)
-    match_config_dict = match.definition.serializer.dump_config(match.match_config)
+    match_config_dict = dump_config_for_seat(
+        match.definition.serializer, match.match_config, conn.seat
+    )
+    transcript: RuntimeTranscriptPayload | None = None
+    if with_transcript and match.session.local_match is not None:
+        transcript = _build_transcript_payload(match.session, conn.seat)
 
     token = _make_resume_token()
     match.resume_tokens[conn.seat] = token  # store for reconnect validation
@@ -1044,6 +1629,7 @@ async def send_welcome(conn: SeatConnection, match: "Match") -> None:
         disconnect_grace_ms=match.disconnect_grace_ms,
         players=players,
         match_config=match_config_dict,
+        transcript=transcript,
     )
     env = WelcomeEnvelope(
         schema_version=WIRE_SCHEMA_VERSION,

@@ -34,5 +34,19 @@ class GameDefinition(Generic[ConfigModelT, StateT, ActionT, ObservationT, Result
     serializer: Serializer
     result_type: type[ResultT]
 
+    #: Whether seats see different information (Phase 36 Slice 1).
+    #: ``False`` means the public view is the full state, which is what makes
+    #: the spectator channel safe to serve from ``dump_state``. A game setting
+    #: this to ``True`` must implement the redaction hooks in
+    #: ``arena.core.public_view``; ``GameRegistry.register`` enforces that.
+    has_hidden_information: bool = False
+
+    #: Whether the game has chance nodes — points where no seat acts and the
+    #: rules engine resolves a random outcome (Phase 37). A game setting this
+    #: must implement the hooks in ``arena.core.chance``; ``GameRegistry.register``
+    #: enforces that. The generator is owned by the match, never by config or
+    #: state: both are broadcast, so a seed in either is public.
+    has_chance_nodes: bool = False
+
 
 __all__: Sequence[str] = ["GameDefinition"]

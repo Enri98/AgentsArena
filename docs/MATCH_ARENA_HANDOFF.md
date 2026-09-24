@@ -1,240 +1,237 @@
 # Match / Arena Handoff
 
-Use this note to start the next planning discussion. Last updated for the Phase 27 entry into the remote-play roadmap.
+Cross-session handoff note. **Last updated 2026-09-22** — rewritten from an append-only log into a
+current-state document. Historical phase decisions are preserved in the appendix.
 
-## Current Baseline
+## 1. Current state
 
-Implemented and verified through Phase 26:
-- `arena.core`: pure simulation abstractions, typed domain exceptions, serializers, registry, results, observations, and events
-- `arena.games.connect4` and `arena.games.tictactoe`: complete deterministic perfect-information vertical slices
-- `arena.match`: immutable local match execution, turn records, snapshots, transcript dump/load/validation, and observation-based in-process policies
-- `arena.adapters.in_process`: pure serialized in-process adapter payload contract plus typed convenience adapter
-- `arena.runtime`: pure in-memory arena/session coordination, match ids, player records, lifecycle, runtime events (including `PolicyRetried`), abort metadata, wrapped transcripts, UI-ready status payloads
-- `arena.ui`: pure adapter producing deterministic screen-level payloads
-- `arena.cli`: terminal renderer, replay viewer, interactive driver supporting `human` / `scripted:` / `ollama:<model>` seats
-- `arena.agents.ollama`: stdlib HTTP client, generic `OllamaAgent` with retry-with-feedback, per-game prompt builders, typed exceptions, `probe_models` startup check
+**v1 is complete and green.** Verified 2026-09-22 on `main` (clean tree, `55ada5a`):
 
-No networking, server, SDK, persistence, real auth, web UI, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, Anthropic/OpenAI agents, or TypeScript SDK port have been added.
+- `ruff check .` — all checks passed
+- `pytest -q` — **675 passed**
+- ~12.8k LOC in `src/`, ~13.3k in `tests/` across 86 test files
 
-## Active Phase: 27 - Network Protocol Design Checkpoint
+Eleven layers ship, with import direction enforced by architecture tests:
 
-In flight:
-- `docs/NETWORK_PROTOCOL.md` is the language-agnostic source of truth for the wire protocol; first pass plus an adversarial-review revision are both shipped
-- `IMPLEMENTATION_PLAN.md` extended with Phases 27 - 35 covering protocol doc, `arena.adapters.websocket`, `arena.server` skeleton with `MatchRegistry`, `arena.sdk` reference Python client, Ollama-over-WS port, resilience (timeouts/heartbeats/reconnection), structured logging baseline, public deployment + acceptance demo, and the optional MCP wrapper
-- `CLAUDE.md` and `AGENTS.md` updated to reflect the new layer rules and v2 deferrals
+| Layer | State |
+|-------|-------|
+| `arena.core` | Pure simulation abstractions, typed domain exceptions, serializers, registry, results, observations, events |
+| `arena.games.{connect4,tictactoe,nim}` | Three complete deterministic perfect-information vertical slices |
+| `arena.games.scaffold` | `python -m arena.games.scaffold` generates a new game package skeleton |
+| `arena.match` | Immutable local match execution, turn records, snapshots, transcript dump/load/validate |
+| `arena.adapters.in_process` | Serialized in-process payload contract + typed convenience adapter |
+| `arena.adapters.websocket` | Pure typed wire envelopes, no I/O |
+| `arena.runtime` | In-memory arena/session coordination, lifecycle, runtime events, abort metadata, JSON-safe payloads. Deadline-free |
+| `arena.ui` | Pure adapter producing deterministic screen-level payloads |
+| `arena.cli` | Terminal renderer, replay viewer, interactive driver (`human` / `scripted:` / `ollama:<model>`), `--server-url` remote play |
+| `arena.agents.ollama` | Stdlib HTTP client, `OllamaAgent` with retry-with-feedback, per-game prompt builders, `probe_models` |
+| `arena.server` | FastAPI + WebSocket, `MatchRegistry`, per-turn deadlines, heartbeats, disconnect grace, resume tokens, structured JSON logging |
+| `arena.sdk` | Reference Python client (callback + loop forms), `LocalSession` helper, reconnect helper. Silent by default |
+| `arena.mcp` | MCP wrapper over the SDK. Five tools, stdio + HTTP/SSE transports, per-game action JSON schemas |
 
-Adversarial-review revision (applied to the protocol doc):
-- full HTTP request/response shapes for `POST /matches`, `GET /matches/{id}`, `GET /games` in §4.1
-- new endpoint `GET /schemas/payloads` (§17) serving JSON Schema for every payload type so non-Python SDKs can codegen against a single source of truth
-- new §18 "Message broadcast matrix" disambiguating recipients per message type
-- `resume_token` scoped server-side to `(match_id, seat)` and rotated on every resume; mismatch closes `4401`
-- match creation locks `per_turn_deadline_ms`, `per_action_retry_budget`, `disconnect_grace_ms`; `welcome` echoes them
-- deterministic close ordering on retry-budget exhaustion: `action_rejected(0)` -> `match_state(aborted)` -> `match_aborted` -> WS close `1000`
-- atomicity rule for `running -> finished/aborted` transitions; "action arrives after terminal" rule
-- per-connection FIFO + per-`turn_id` retry-counter decrement semantics
-- per-match concurrent-connection cap (4) added to §13
-- explicit v1 assumption: protocol supports public-move perfect-information games only; private-information games require a v2 extension
-- "byte-identical replay" claim replaced with "logically equivalent state"
+Deployment artifacts exist but have never been used against a real host: `Dockerfile`, `fly.toml`,
+`.dockerignore`, `docs/DEPLOYMENT.md`.
 
-The v1 acceptance demo is two local Ollama agents on the user's laptop both connecting to a publicly reachable `arena.server`, completing one clean Connect 4 match and one deliberate-abort scenario.
+## 2. Known gaps
 
-## Locked Decisions for Phases 27 - 35
+These do not invalidate the v1 claim. They all block a public launch.
 
-- WebSocket only; JSON wire format; not configurable
-- per-turn deadlines live in `arena.server`; `arena.runtime` stays deadline-free
-- match identity uses `secrets.token_urlsafe(16)`; possession of the id is the only capability in v1
-- creator becomes seat 0; joiner becomes seat 1
-- `MatchRegistry` from day one; no single-hardcoded-match intermediate
-- SDK ships both `connect(...)` callback form and `Session` loop form so MCP layering does not require a redesign
-- SDK ships Connect 4 / Tic-Tac-Toe schemas directly; no handshake-time fetching
-- structured JSON logging only in `arena.server`; lower layers stay quiet
-- v2 deferrals: persistence beyond JSON files, real auth, web spectator UI, Prometheus, OpenTelemetry, lobby/matchmaking, TypeScript SDK port, Anthropic agent, third-party game registration
+1. **Protocol §13 rate limits are specified but not implemented.** No per-IP connection cap, no
+   match-creation throttle, no per-match connection cap; close code `4429` appears nowhere in
+   `src/`. With no auth in v1, this is the top pre-deployment item.
+2. **No CI.** No `.github/` workflow exists.
+3. **Never deployed.** `fly.toml` still carries the placeholder `app = "arena-server"`.
+4. **SDK not on PyPI.** Joining a match requires cloning the repo — the largest gap between the
+   shipped code and the goal of an open arena.
 
-## Next Entry Point
+## 3. Locked decisions (still binding)
 
-Phase 28 — `arena.adapters.websocket` payload contract. Sibling to `arena.adapters.in_process`, pure typed envelopes, no I/O. See `IMPLEMENTATION_PLAN.md` Phase 28 for slice breakdown.
+- WebSocket only; JSON wire format; not configurable.
+- Per-turn deadlines live in `arena.server`; `arena.runtime` stays deadline-free.
+- Match identity is `secrets.token_urlsafe(16)`; possession of the id is the only v1 capability.
+- Creator becomes seat 0; joiner becomes seat 1.
+- `MatchRegistry` from day one; no single-hardcoded-match intermediate.
+- SDK ships both `connect(...)` callback form and `Session` loop form.
+- SDK ships game schemas directly; no handshake-time fetching.
+- Structured JSON logging only in `arena.server`; lower layers stay quiet.
+- Runtime payload `schema_version` is pinned at `1`; incompatible changes must bump it explicitly.
+- `docs/NETWORK_PROTOCOL.md` is the language-agnostic source of truth; the Python SDK is a
+  reference implementation, not the spec.
+- **New games register with each layer's adapter registry** (`arena.cli.games`, `arena.mcp.games`,
+  `arena.agents.ollama._adapters`) rather than adding dispatch branches. See
+  `docs/ADDING_A_GAME.md`.
 
-## Working Assumption
+## 4. Open decisions blocking the next phase
 
-The simulation and pure local runtime layers are complete enough for the current deterministic
-perfect-information scope. The next discussion should decide what the UI-facing contract should expose
-before building UI code.
+**Resolved 2026-09-22.** All seven RFC questions (plus an eighth on turn-loop sequencing) were
+answered by the owner, and Phases 36-42 are now specified in `IMPLEMENTATION_PLAN.md` under
+"v2 roadmap". `docs/RFC_IMPERFECT_INFORMATION.md` is superseded as a plan, retained as analysis.
 
-## Key Boundary Decision
+**Phase 36 is complete** (2026-09-23), on the v1 wire with no `schema_version` bump. Shipped:
+CI, all four protocol §13 rate limits, `MatchRegistry` eviction, the public-view contract, the
+`MatchConnections` registry, per-connection bounded outboxes with writer tasks, the live
+`WS /matches/{id}/spectate` channel, and a zero-dependency browser viewer at
+`examples/spectator/`. 714 tests pass.
 
-`arena.runtime` already wraps `LocalMatch` with match identity, players, lifecycle, runtime events,
-abort metadata, and JSON-safe status/transcript envelopes. The next layer should not add rendering logic
-inside `arena.core`, `arena.games`, `arena.match`, or the rule engines.
+One item was deliberately deferred out of Slice 2: the **match-owned driver task**. `run_match` is
+still owned by the seat-1 handler. Both things that motivated the refactor — the test flake and
+spectator attachment — were solved without it, and its only remaining consumer is Phase 41s
+simultaneous-move loop. Build it there rather than speculatively.
 
-Candidate Phase 21 responsibilities:
-- audit and stabilize `dump_session_status(...)` as the primary UI status contract
-- audit and stabilize `dump_runtime_transcript(...)` as the transcript/history contract
-- decide whether UI consumers need a board-oriented derived payload, or should read `latest_snapshot`
-- decide how runtime events should be presented to UI/CLI consumers without duplicating game-domain events
-- decide whether result and abort payloads are sufficient for user-facing display
-- define schema/version expectations for runtime payload compatibility
-- add tests for payload shape stability and UI-facing edge cases
+**Phase 37 is complete** (2026-09-24), carrying the wire bump to `schema_version=2`. Shipped: the
+chance-node contract (`arena.core.chance`), `kind`/`outcome` transcript turns, load-bearing
+`turn_committed.events`, multi-version decode, and **Pig** (`arena.games.pig`) as the exemplar game,
+registered in every adapter registry. 821 tests pass.
 
-## Phase 21 Decision Checkpoint
+**The chance seed is private to the match.** The first draft put `ChanceRng(seed, counter)` in game
+state. But state is broadcast as `post_snapshot`, so anyone could run it forward and predict every
+roll. Chance is now nature's action: `sample_chance(state, rng)` draws an outcome live,
+`apply_chance(state, outcome)` applies and revalidates it, and the generator lives on
+`LocalMatch.rng`, never in state, config, or any payload. Transcripts record outcomes, and replay
+(`start_replay_match`) applies them without the seed.
 
-Decisions for the first runtime/UI contract slice:
-- the first UI status contract should expose `schema_version`, `match_id`, `game_id`, `lifecycle`, `players`, `current_seat`, `turn_count`, `result`, `latest_snapshot`, and `abort`
-- `latest_snapshot` is the authoritative rendering input for the current deterministic perfect-information scope; runtime should not add a game-neutral board/view payload yet
-- session status should not include runtime event lists; status stays lightweight and current-state oriented, while event history stays in runtime transcripts
-- UI distinguishes runtime events from game-domain events by envelope location first: runtime events are top-level `events` in the runtime transcript, while game-domain events remain inside `match_transcript.turns[*].events`
-- runtime event payloads should self-identify with `event_scope="runtime"` for stable downstream consumption
-- runtime status and transcript payload schemas both pin `schema_version` to the fixed supported value `1`; future incompatible changes should bump the version explicitly
-- payload stability should be enforced with explicit full-payload tests for representative session states plus version checks, rather than introducing JSON Schema as the compatibility gate in this slice
+**Phase 38 is complete** (2026-09-24), carrying the bump to `schema_version=3`. Every payload a
+client receives is now built for that recipient. A viewer is a seat, or `None` for the public.
+Snapshots, chance outcomes, domain events (`DomainEvent.visible_to`), transcripts (`view`:
+full/seat/public), and `welcome.match_config` are all redacted per viewer, and a reconnect's
+`welcome.transcript` replays the seat's own history (§11). The server's gate refusing
+hidden-information games is lifted. Proof: over real TCP, two matches that differ only in seat 1's
+secret give byte-identical frames to seat 0 and to a spectator.
 
-Responsibilities still deferred unless explicitly planned:
-- remote agents
-- APIs
-- databases
-- stale-version handling
-- clocks, deadlines, and timeout outcomes
-- auth
-- matchmaking queues
-- tournaments
-- concrete UI rendering or component state
+**Adversarial review is now part of the workflow** (owner rule, 2026-09-24): after each slice,
+reviewer subagents attack it and confirmed findings are fixed before the next slice. The first two
+rounds found real problems:
+- the Slice 1 leak contract let leaky games pass;
+- the transcript validator accepted forged shapes;
+- Pig could run forever (now bounded by a server turn cap);
+- spectators could get duplicate turns;
+- MCP `make_move` confirmed a stale turn;
+- the browser spectator had been refused since Phase 37.
 
-## Questions For The Next Session
+Active phase: **39 — Liar's Dice**. No wire bump. Everything it needs exists: chance nodes for the
+roll, per-seat redaction, private events, and the indistinguishability contract. Its CLI adapter
+must render the live game from the human seat's view; the local `arena.cli.play` still shows full
+state.
 
-Answer these before writing code:
-- What exact fields does the first UI need for the match screen?
-- Is `latest_snapshot` enough for board rendering, or should runtime expose a game-neutral board/status view?
-- Should human-readable transcript formatting live in `arena.runtime`, a new CLI-oriented module, or docs/examples first?
-- How should UI distinguish game-domain events from runtime events?
-- Should payload shape tests assert full dictionaries, JSON Schema, or both?
-- Should Phase 21 update README examples for runtime sessions before adding any UI layer?
-- What is the minimum "replay/history" contract needed for the upcoming UI?
+The Phase 36-38 specs were revised on 2026-09-22 after an adversarial review that checked every
+claim against the code. Three findings are worth carrying forward, because each is easy to
+rediscover the hard way:
 
-## Recommended First Slice
+- **A slow spectator can abort a match.** `_broadcast` (`runtime_bridge.py:188`) awaits `send_text`
+  sequentially inside `run_match`; one blocked send suspends the driver while the per-turn deadline
+  timer keeps running, and the active seat is blamed for `turn_deadline_expired`.
+- **A seed in config is public — and so is a seed in state.** `send_welcome` dumps `match_config` to
+  both seats, `_build_snapshot` embeds config in every `SnapshotEnvelope`, and every
+  `post_snapshot` carries the full state. Phase 37 keeps the generator on `LocalMatch` for this reason.
+  Phase 38's `dump_state_for_seat` covers `state`, not `config`, and a chance turn's `outcome` can
+  itself be private (Liar's Dice's opening roll).
+- ~~**`_handle_reconnect` never replays the transcript**~~ Fixed in Phase 38:
+  `welcome.transcript` carries the seat's own history. Still a known limitation: only the active
+  seat's reconnect is fully supported. An off-turn disconnect is noticed on that seat's turn, so an
+  early reconnect can miss frames. The Phase 41 match-owned driver is the fix.
 
-Start with a runtime/UI contract checkpoint:
-- document the exact UI-facing runtime payload fields
-- add payload stability tests for session status and runtime transcript envelopes
-- keep all payloads JSON-safe, versioned, and rendering-agnostic
-- do not add web APIs, persistence, subprocesses, remote agents, or concrete UI rendering
+Decisions that diverge from the RFC's own recommendations, and are therefore easy to get wrong:
+- a **real chance-node primitive** (Phase 37), not seeded init-time randomness
+- **spectator ships first** (Phase 36), against perfect-information games where the public view
+  equals the full state
+- **transcript persistence is in scope** (Phase 40), no longer a v2 deferral
+- **simultaneous moves are in scope** but deferred to Phase 41, after Liar's Dice ships
 
-If code is added after the checkpoint, keep it pure and local:
-- no network
-- no persistence
-- no subprocesses
-- no timeouts
-- no auth
-- no matchmaking
-- no concrete UI rendering
+## 5. Still deferred
 
-## Phase 23 UI Adapter Boundary
+Real authentication, tokens, or accounts; a designed web spectator UI (Phase 36 ships functional
+viewer glue, not a product surface); lobby, matchmaking, tournaments; Prometheus metrics;
+OpenTelemetry tracing; Anthropic-SDK-backed agent; third-party game registration; N-player games.
 
-The first UI boundary is `arena.ui`. It is a pure adapter over `arena.runtime`
-payloads and does not import simulation, game, match, transport, persistence, or
-rendering code.
+Moved out of deferral by the 2026-09-22 decisions: transcript persistence (Phase 40), the
+spectator endpoint (Phase 36), and the TypeScript SDK (Phase 42).
 
-Current UI-facing helpers:
-- `build_match_status(...)` validates a runtime session status payload and returns
-  a deterministic screen-level status payload.
-- `build_match_transcript(...)` validates a runtime transcript envelope shape and
-  returns screen-level history data with top-level runtime events separated from
-  game-domain turn events.
-- `build_match_screen(...)` combines matching status and transcript payloads for a
-  match screen.
+---
 
-The adapter preserves `latest_snapshot` as the authoritative state envelope and
-also exposes `state_payload` as the snapshot's opaque state mapping for board
-rendering. It does not recompute game rules or introduce a game-neutral board
-model.
+# Appendix — historical decision records
 
-## Phase 24 Status
+Kept because they explain why the current shapes were chosen. Superseded recommendations have been
+removed; what remains is decisions that still hold.
 
-Phase 24 is complete. Delivered:
+## Phase 21 — runtime/UI contract decisions
 
-- `arena.cli` package with a strict import-direction boundary enforced by architecture tests.
-- `arena.cli.rendering` — generic ANSI-colored screen renderer consuming `UIMatchScreenPayload` dicts.
-- `arena.cli.games.connect4` and `arena.cli.games.tictactoe` — per-game board renderers reading `state_payload`.
-- `arena.cli.app` — file-based loader (`render_session_from_files`, `render_all_frames`) that reads status and transcript JSON, validates through `arena.ui`, and renders one or all frames. Frame stepping keeps status at latest state while shifting board and turn-history cursor to the requested turn.
-- `arena.cli.__main__` — `python -m arena.cli` entrypoint with `--status`, `--transcript`, `--turn`, and `--all-frames` flags.
-- `examples/run_and_render_match.py` — end-to-end script that runs a scripted 4x4 Connect 4 session, dumps both payload files, and prints the final rendered frame.
-- Architecture tests confirm no lower layer (`arena.core`, `arena.games`, `arena.match`, `arena.adapters`, `arena.runtime`, `arena.ui`) imports `arena.cli`.
-- README section "Terminal replay viewer" documents the example and entrypoint commands.
+- The UI status contract exposes `schema_version`, `match_id`, `game_id`, `lifecycle`, `players`,
+  `current_seat`, `turn_count`, `result`, `latest_snapshot`, and `abort`.
+- `latest_snapshot` is the authoritative rendering input for the deterministic perfect-information
+  scope; runtime does not add a game-neutral board/view payload.
+- Session status excludes runtime event lists — status stays lightweight and current-state
+  oriented; event history lives in runtime transcripts.
+- UI distinguishes runtime events from game-domain events by envelope location: runtime events are
+  top-level `events` in the runtime transcript; game-domain events stay inside
+  `match_transcript.turns[*].events`.
+- Runtime event payloads self-identify with `event_scope="runtime"`.
+- Payload stability is enforced with explicit full-payload tests plus version checks, not JSON
+  Schema.
 
-## Phase 25 Status
+> Note: the RFC in §4 above proposes making `latest_snapshot` and `state_payload` per-seat. That
+> would revise the second bullet here. Nothing has changed yet.
 
-Phase 25 is complete. Delivered:
+## Phase 23 — UI adapter boundary
 
-- `arena.cli.policies` — `HumanPolicy` (stdin/stdout-injected, parser-delegating) and `HumanQuit` sentinel exception (inherits `BaseException` to bypass the runtime's `except Exception` handler and reach the driver cleanly).
-- `arena.cli.games.connect4.parse_input` and `arena.cli.games.tictactoe.parse_input` — pure per-game input parsers; return the typed action or `None` to reprompt.
-- `arena.cli.play` package — `play_match(...)` interactive driver that creates/starts/steps a session, renders each frame, catches `HumanQuit`/`KeyboardInterrupt`, calls `Arena.abort_session(...)` with `AbortReason.USER_QUIT` or `AbortReason.USER_INTERRUPT`, writes `status.json` and `transcript.json`, and returns 0 on finish or 1 on abort.
-- `arena.cli.play.__main__` — `python -m arena.cli.play` entrypoint with `--game`, `--seat-0`, `--seat-1` (`human` or `scripted:<actions>`), `--out-dir`, and Connect 4 board flags.
-- `AbortReason.USER_QUIT` and `AbortReason.USER_INTERRUPT` added to `arena.runtime.models.AbortReason` (additive, no existing tests affected).
-- Architecture tests extended to exercise `arena.cli.play` and `arena.cli.policies` imports.
-- README "Play locally" section added.
-- 398 tests pass (371 before Phase 25).
+`arena.ui` is a pure adapter over `arena.runtime` payloads and does not import simulation, game,
+match, transport, persistence, or rendering code. It preserves `latest_snapshot` as the
+authoritative state envelope and exposes `state_payload` as the snapshot's opaque state mapping for
+board rendering. It does not recompute game rules.
 
-Abort path: `HumanQuit` (and raw `KeyboardInterrupt`) propagate past `step_session`'s `except Exception` guard because `HumanQuit` inherits `BaseException`. The driver catches both in inner and outer handlers, calls `Arena.abort_session(...)` with the correct reason, and always writes both JSON files before returning.
+Helpers: `build_match_status(...)`, `build_match_transcript(...)`, `build_match_screen(...)`.
 
-## Phase 26 Recommendation
+## Phase 25 — abort path
 
-The next slice should add an Anthropic-SDK-backed `InProcessAgent` so LLM opponents can play against the human through the existing typed adapter chain.
+`HumanQuit` inherits `BaseException` so it propagates past `step_session`'s `except Exception`
+guard and reaches the driver. The driver catches both it and `KeyboardInterrupt` in inner and outer
+handlers, calls `Arena.abort_session(...)` with `AbortReason.USER_QUIT` or
+`AbortReason.USER_INTERRUPT`, and always writes both JSON files before returning.
 
-Key notes for Phase 26:
-- The existing `TypedPayloadPolicyAdapter` already wraps any `InProcessAgent[ObservationT, ActionT]` into the `PayloadPolicy` contract the runtime expects — no schema change needed.
-- Build a concrete `AnthropicAgent` (or `ClaudeAgent`) in a new `arena.agents` package that receives a typed observation, formats it as a user message, calls the Anthropic SDK, and parses the model's response into a typed action.
-- The user will need an Anthropic API key; the Max plan does not cover programmatic API access — the key must be set via `ANTHROPIC_API_KEY` environment variable.
-- Extend `--seat-0`/`--seat-1` in `arena.cli.play.__main__` to accept `llm` (or `claude`) alongside `human` and `scripted:...`.
-- Keep the same abort semantics; if the SDK raises an exception, it surfaces as `AbortReason.ADAPTER_ERROR` through the existing handler in `step_session`.
+## Phase 27 — protocol adversarial-review outcomes
 
-## Phase 26 Status
+Applied to `docs/NETWORK_PROTOCOL.md`:
 
-Implemented and verified (Phase 26 — Local Ollama LLM agent):
-- `arena.agents.ollama`: stdlib HTTP client (`OllamaClient`), generic `OllamaAgent` with retry-with-feedback loop, `Connect4PromptBuilder`, `TicTacToePromptBuilder`, typed exceptions (`OllamaIllegalActionError`, `OllamaUnavailableError`, `OllamaModelMissingError`), and `probe_models` startup check
-- `arena.runtime.models.PolicyRetried`: new additive frozen-dataclass event; included in the `RuntimeEvent` hierarchy and serialized with `event_scope="runtime"` in transcripts; no `schema_version` bump
-- `arena.runtime.session.record_runtime_event`: small public helper to append a runtime event to a session immutably; exported from `arena.runtime`
-- `arena.cli.play.play_match`: extended with optional `retry_sink` parameter; after each `complete_turn`, the driver drains seat-keyed lists of `(attempt, reason)` tuples written by agent callbacks and records them as `PolicyRetried` events — keeping `arena.agents` ignorant of runtime internals
-- `arena.cli.play.__main__`: `ollama:<model>` seat spec parsing; `--ollama-host`, `--ollama-temperature`, `--ollama-seed`, `--ollama-max-retries` flags; `probe_models` startup check with `sys.exit(2)` on failure
-- `examples/run_ollama_vs_ollama.py`: importable `run()` driving `llama3.2:latest` vs `qwen2.5:1.5b` on 4x4 Connect 4
-- Architecture boundary test: `tests/unit/architecture/test_agents_boundaries.py` enforces neither upper layers import `arena.agents` nor `arena.agents` imports `arena.match`, `arena.adapters`, `arena.runtime`, or `arena.ui`
+- Full HTTP request/response shapes for `POST /matches`, `GET /matches/{id}`, `GET /games` (§4.1).
+- `GET /schemas/payloads` (§17) serving JSON Schema for every payload type, so non-Python SDKs can
+  codegen against one source of truth.
+- §18 "Message broadcast matrix" disambiguating recipients per message type.
+- `resume_token` scoped server-side to `(match_id, seat)` and rotated on every resume; mismatch
+  closes `4401`.
+- Match creation locks `per_turn_deadline_ms`, `per_action_retry_budget`, `disconnect_grace_ms`;
+  `welcome` echoes them.
+- Deterministic close ordering on retry-budget exhaustion: `action_rejected(0)` →
+  `match_state(aborted)` → `match_aborted` → WS close `1000`.
+- Atomicity rule for `running → finished/aborted`; "action arrives after terminal" rule.
+- Per-connection FIFO + per-`turn_id` retry-counter decrement semantics.
+- Per-match concurrent-connection cap (4) in §13 — **specified only; see Known Gaps**.
+- Explicit v1 assumption: public-move perfect-information games only.
+- "Byte-identical replay" replaced with "logically equivalent state".
 
-## Phase 27 Recommendation
+## Phase 26 — local Ollama agents
 
-Phase 27: Anthropic-SDK-backed agent reusing the `PromptBuilder` interface. Build `AnthropicAgent` in `arena.agents.anthropic` implementing `InProcessAgent` and accepting any `PromptBuilder` from Slice 2 — the same Connect4PromptBuilder and TicTacToePromptBuilder should work without modification. The user will need `ANTHROPIC_API_KEY`; the Max plan does not cover programmatic API access.
+`arena.cli.play.play_match` takes an optional `retry_sink`; after each `complete_turn` the driver
+drains seat-keyed `(attempt, reason)` tuples written by agent callbacks and records them as
+`PolicyRetried` runtime events. This keeps `arena.agents` ignorant of runtime internals.
 
-## Phase 34 Status — v1 milestone reached
+`PolicyRetried` was added to the `RuntimeEvent` hierarchy additively — no `schema_version` bump.
 
-Implemented and verified:
-- `Dockerfile` (multi-stage `python:3.11-slim`, non-root user, `EXPOSE 8080`, `HEALTHCHECK` hitting `/games`, runs `python -m arena.server --host 0.0.0.0 --port 8080`).
-- `fly.toml` (shared-cpu-1x, 256MB, `auto_stop_machines = "stop"`, `min_machines_running = 0`, `force_https = true`).
-- `.dockerignore` excluding `.venv`, tests, runs, docs, `.gitnexus`, `.claude`, cache dirs.
-- `docs/DEPLOYMENT.md` — beginner-friendly Fly.io walkthrough from zero (account, `flyctl` install on Windows, launch/deploy, logs, teardown). Caddy/VPS appendix for self-hosters.
-- `pyproject.toml` `[server]` extras now include `websockets>=13` (required by uvicorn's WS backend at runtime).
-- `arena.agents.ollama.run_remote_seat(server_url, seat, game_id, model, ...)` async helper bundling Ollama + SDK wiring for a single seat. Connects through `arena.cli.remote` (existing `make_typed_agent_choose` + new `run_remote_seat_async`) so no architecture boundary changes were needed.
-- `examples/run_remote_demo.py` driving two `run_remote_seat` calls concurrently. Supports `--game connect4|tictactoe|nim`, `--abort-after-turns N` (seat-1 raises after N turns to trigger `peer_disconnected`), `--skip-probe`. Dumps both transcripts and validates them.
-- `tests/integration/test_remote_demo.py` — happy path (Connect 4), abort path with `reason="peer_disconnected"`, Nim smoke. All use the existing `running_server` fixture + stub `OllamaClient`.
-- README "Watch two LLMs play remotely" section pointing at `examples/run_remote_demo.py` and `docs/DEPLOYMENT.md`.
+## Phase 34 — deployment artifacts
 
-Side context: Nim (`src/arena/games/nim/`) was added outside the documented roadmap in commit `3da879a`. It is now exercised by the remote demo and integration tests.
+`Dockerfile` (multi-stage `python:3.11-slim`, non-root user, `EXPOSE 8080`, `HEALTHCHECK` on
+`/games`), `fly.toml` (shared-cpu-1x, 256MB, `auto_stop_machines = "stop"`,
+`min_machines_running = 0`, `force_https = true`), `.dockerignore`, and `docs/DEPLOYMENT.md`
+(Fly.io walkthrough plus a Caddy/VPS appendix).
 
-Acceptance:
-- Local Docker build + run produces a working server reachable at `http://127.0.0.1:8080/games`.
-- Fly.io deploy walkthrough documented end-to-end; manual public-server run is reproducible.
-- Abort scenario produces an `aborted` transcript whose abort metadata `reason == "peer_disconnected"` and which passes `validate_runtime_transcript`.
+`arena.agents.ollama.run_remote_seat` reaches `arena.sdk` transitively through
+`arena.cli.remote.run_remote_seat_async` — the `arena.agents` → `arena.sdk` import is still
+forbidden by `test_sdk_boundaries.py`, and no boundary change was needed.
 
-Skipped: TLS terminated by `arena.server` itself (always done by Fly's edge or Caddy); managed deployment to providers beyond the Fly.io example; transcript persistence beyond writing to `--out-dir`.
+TLS is always terminated by a reverse proxy, never by `arena.server` itself.
 
-## Phase 35 Status — MCP layer (optional v1 extension)
+## Phase 35 — MCP layer
 
-Implemented and verified:
-- New top-level layer `src/arena/mcp/` exposing `arena.sdk.Session` through five MCP tools — `join_match`, `get_observation`, `make_move`, `get_history`, `match_status` — backed by a `SessionRegistry` with per-`(match_id, seat)` background `_recv_loop` and asyncio.Queue.
-- `src/arena/mcp/schemas.py` ships JSON Schema dicts for Connect 4, Tic-Tac-Toe, and Nim action inputs.
-- Transports: `python -m arena.mcp` defaults to stdio (Claude Desktop); `--http --host --port` runs the HTTP/SSE transport with a loud stderr warning when bound to a non-localhost host (no auth in v1).
-- `pyproject.toml` `[mcp]` optional dep group adds `mcp>=1.0`.
-- `tests/unit/architecture/test_mcp_boundaries.py` enforces `arena.mcp` may only import `arena.sdk` and `arena.core`; no lower layer imports `arena.mcp`. The module-load-scope logger ban is extended to `arena.mcp`.
-- `tests/integration/test_mcp_integration.py` drives Connect 4 through the five tool handlers directly (no transport subprocess), verifies happy-path completion, registry auto-purge on terminal events, and error response for unknown match.
-- README "Play with Claude Desktop" section with a `claude_desktop_config.json` snippet and the HTTP/SSE no-auth warning.
-- `arena.sdk/` source unchanged — Phase 35 acceptance criterion satisfied.
+`SessionRegistry` holds a per-`(match_id, seat)` background `_recv_loop` feeding an asyncio.Queue.
+Five tools: `join_match`, `get_observation`, `make_move`, `get_history`, `match_status`. HTTP/SSE
+mode prints a loud stderr warning when bound to a non-localhost host, because there is no auth.
 
-Follow-up shipped:
-- True stdio subprocess e2e test (transport-level MCP handshake) landed in commit `7fafbb0` as `tests/integration/test_mcp_stdio_e2e.py`, complementing the direct in-process tool test.
-
-Phase 35 does not block the v1 milestone; v1 = Phase 34 done.
-
+`arena.sdk` source was unchanged by this phase — the acceptance criterion.

@@ -1,6 +1,6 @@
 # AgentsArena — Project Context
 
-Python 3.11 library powering an agent-vs-agent arena for sequential, deterministic, perfect-information games. **v1 milestone reached** (Phases 0-35 complete): simulation core, local runtime, terminal CLI, local Ollama agents, WebSocket server, reference Python SDK, resilience (deadlines/heartbeats/reconnect), structured logging, public-deployment recipe, and an MCP server layer all shipped. Persistence beyond JSON files, real auth, web spectator UI, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, and a TypeScript SDK port are explicitly v2 concerns.
+Python 3.11 library powering an agent-vs-agent arena for sequential two-seat games — deterministic or stochastic (chance nodes, Phase 37), with perfect or hidden information (per-seat views, Phase 38). **v1 milestone reached** (Phases 0-35 complete): simulation core, local runtime, terminal CLI, local Ollama agents, WebSocket server, reference Python SDK, resilience (deadlines/heartbeats/reconnect), structured logging, public-deployment recipe, and an MCP server layer all shipped. Persistence beyond JSON files, real auth, web spectator UI, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, and a TypeScript SDK port are explicitly v2 concerns.
 
 > Source of truth for plan + status: `IMPLEMENTATION_PLAN.md`. Working rules + style: `AGENTS.md`. Wire protocol: `docs/NETWORK_PROTOCOL.md`. Adapter boundaries: `docs/ADAPTER_BOUNDARIES.md`. Cross-session handoff: `docs/MATCH_ARENA_HANDOFF.md`.
 
@@ -11,19 +11,19 @@ Python 3.11 library powering an agent-vs-agent arena for sequential, determinist
 | Layer | Package | Responsibility |
 |-------|---------|---------------|
 | Simulation core | `arena.core` | Types, seats, exceptions, events, actions, observations, results, config, `GameDefinition`, `RulesEngine`, `Serializer`, `Registry`. Pure, immutable, no I/O. |
-| Games | `arena.games.connect4`, `arena.games.tictactoe`, `arena.games.nim` | Concrete game vertical slices (config, state, action, observation, events, rules, serializer, definition). All registered via `build_default_registry()`. |
+| Games | `arena.games.connect4`, `arena.games.tictactoe`, `arena.games.nim`, `arena.games.pig` | Concrete game vertical slices (config, state, action, observation, events, rules, serializer, definition). All registered via `build_default_registry()`. Pig (Phase 37) has chance nodes. |
 | Local match | `arena.match` | `LocalMatch`, `TurnRecord`, `start_match` / `apply_match_action`, transcript dump/load/validate, in-process `Policy` protocol, `run_local_match`. Per-match isolated rules engine copy. |
 | In-process adapter | `arena.adapters.in_process` | Serialized payload contract: `ObservationRequestPayload`, `ActionResponsePayload`, domain-error payloads, `apply_payload_policy_turn`, `TypedPayloadPolicyAdapter` + `InProcessAgent` for typed local agents. |
 | WebSocket adapter | `arena.adapters.websocket` | Pure typed wire-envelope contract for WebSocket transport. Pydantic envelope models, message-type discriminated unions, JSON encode/decode helpers. No I/O. Reuses `arena.adapters.in_process` payload bodies verbatim. |
-| Runtime | `arena.runtime` | Pure in-memory `Arena` coordinator, `MatchSession`, opaque `MatchId`, `PlayerRecord`, lifecycle (`created`/`running`/`finished`/`aborted`), runtime events, abort metadata, runtime exceptions, JSON-safe `dump_session_status` / `dump_runtime_transcript` (both pinned `schema_version=1`), `format_runtime_session_report`. **Stays deadline-free.** |
+| Runtime | `arena.runtime` | Pure in-memory `Arena` coordinator, `MatchSession`, opaque `MatchId`, `PlayerRecord`, lifecycle (`created`/`running`/`finished`/`aborted`), runtime events, abort metadata, runtime exceptions, JSON-safe `dump_session_status` / `dump_runtime_transcript` (both `schema_version=3` since Phase 38, with an optional `viewer=` for seat/public views), `format_runtime_session_report`. **Stays deadline-free.** |
 | UI adapter | `arena.ui` | Pure adapter over runtime payloads. `build_match_status`, `build_match_transcript`, `build_match_screen`. Reshapes envelopes into screen-level payloads, exposes `state_payload` from snapshots without recomputing rules. |
 | CLI | `arena.cli` | Terminal renderer, `python -m arena.cli` replay viewer, `python -m arena.cli.play` interactive driver supporting `human`, `scripted:`, and `ollama:<model>` seats. May depend on `arena.sdk` for `--server-url` remote play. |
 | Local agents | `arena.agents.ollama` | Stdlib HTTP client, generic `OllamaAgent` with retry-with-feedback, per-game prompt builders, typed exceptions, `probe_models`. Surfaces retries via the `PolicyRetried` runtime event. |
-| Server | `arena.server` | Single-process FastAPI + WebSocket server. `MatchRegistry`, `POST /matches`, `GET /games`, `WS /matches/{id}/play`. Owns per-turn deadlines, heartbeats, disconnect grace, structured JSON logging. The **only** layer allowed to instantiate logging at module scope. |
+| Server | `arena.server` | Single-process FastAPI + WebSocket server. `MatchRegistry`, `POST /matches`, `GET /games`, `WS /matches/{id}/play`, `WS /matches/{id}/spectate`. Protocol §13 rate limits, match eviction, per-connection outbound queues. Owns per-turn deadlines, heartbeats, disconnect grace, structured JSON logging. The **only** layer allowed to instantiate logging at module scope. |
 | SDK | `arena.sdk` | Reference Python client for `arena.server`. Both `connect(url, seat, choose=...)` callback form and `Session` loop form. Ships Connect 4 / Tic-Tac-Toe / Nim schemas. Includes `LocalSession` test helper and reconnect helper. Stays silent (no log output) by default. |
 | MCP server | `arena.mcp` | MCP wrapper exposing the SDK via stdio or HTTP/SSE transports. Tools: `join_match`, `get_observation`, `make_move`, `get_history`, `match_status`. Per-game action JSON schemas. May only import `arena.sdk` and `arena.core`. |
 
-Dependency direction is enforced by architecture tests: `core`/`games` import none of the upper layers; `match` cannot import adapters/runtime/ui; `adapters.in_process` cannot import runtime/ui; `adapters.websocket` may import only `arena.core` and `arena.adapters.in_process` payload models; runtime cannot import ui; nothing below `arena.server` may import `arena.server`; nothing below `arena.sdk` may import `arena.sdk`; `arena.sdk` must not import `arena.match`, `arena.adapters.in_process`, `arena.runtime`, `arena.ui`, `arena.cli`, or `arena.server`; `arena.mcp` may only import `arena.sdk` and `arena.core`, and no lower layer may import `arena.mcp`.
+Dependency direction is enforced by architecture tests: `core`/`games` import none of the upper layers; `match` cannot import adapters/runtime/ui; `adapters.in_process` cannot import runtime/ui; `adapters.websocket` may import only `arena.core`, `arena.adapters.in_process` payload models, and `arena.runtime.payloads` (transcripts ride inside `match_finished`/`welcome`); runtime cannot import ui; nothing below `arena.server` may import `arena.server`; nothing below `arena.sdk` may import `arena.sdk`; `arena.sdk` must not import `arena.match`, `arena.adapters.in_process`, `arena.runtime`, `arena.ui`, `arena.cli`, or `arena.server`; `arena.mcp` may only import `arena.sdk`, `arena.core`, and `arena.games` (its per-game adapters need the game ids), and no lower layer may import `arena.mcp`.
 
 ## Implementation status
 
@@ -33,17 +33,28 @@ Dependency direction is enforced by architecture tests: `core`/`games` import no
 
 Outside the numbered roadmap: `arena.games.nim` (commit `3da879a`) is registered in the default registry and exercised by the remote demo.
 
-Open items: none — all v1 follow-ups closed. Future work is the v2 backlog (see "Deferred to v2" below).
+**Post-v1 work already landed** (not part of the numbered roadmap):
+- `68b011a` — per-layer adapter registries. `arena.cli.games`, `arena.mcp.games`, and `arena.agents.ollama._adapters` each expose a registry that per-game modules register into at import time, replacing hand-maintained `if game_id == ...` ladders. **New games must register with each layer's registry rather than adding dispatch branches.**
+- `a408787` — `docs/ADDING_A_GAME.md` plus a scaffold generator: `python -m arena.games.scaffold`.
+- `cce1846` — `docs/RFC_IMPERFECT_INFORMATION.md`, a draft v2 RFC proposing Phases 36-40 (per-seat snapshots, `schema_version` 1→2, spectator endpoint, Liar's Dice exemplar). **Draft only — not approved, no code attached.**
+
+**Known gaps:**
+- ~~§13 rate limits~~ and ~~CI~~ closed by Phase 36 (`arena.server.rate_limits`, `.github/workflows/ci.yml`).
+- Nothing is deployed. `fly.toml` still carries the placeholder `app = "arena-server"`, and the Phase 34 public-server acceptance run has never been executed for real.
+
+Open items: no v1 follow-ups remain. Future work is the v2 backlog (see "Deferred to v2" below) plus the gaps above.
 
 ## Core design rules (do not violate)
 
 - Frozen dataclasses for in-memory domain state/actions; Pydantic v2 for config + boundary payloads + JSON Schema.
 - Integer seat ids inside the simulation core. Player names/labels live in runtime/UI/server layers.
 - Store only minimum authoritative state; derive legality, terminal, winners on demand.
+- Chance is nature's action (`arena.core.chance`): engines implement `is_chance_node` / `sample_chance` / `apply_chance`, serializers `dump_/load_chance_outcome`. `arena.match` drains chance nodes as part of stepping, so a live match never rests at one; `current_seat` keeps its signature.
 - `apply_action(...)` revalidates legality defensively; raises typed domain exceptions (`WrongPlayer`, `IllegalAction`, `GameFinished`, `InvalidConfig`, ...).
 - Serialize only at boundaries via dedicated `Serializer`; every accepted move yields a full post-move snapshot, and snapshots must rehydrate.
 - Runtime aborts wrap non-result failures while preserving the original `ArenaCoreError` as cause.
-- Runtime payload `schema_version` is fixed at `1`; any incompatible change must bump it explicitly.
+- Runtime payload and wire `schema_version` is `3` since Phase 38 (decoders accept `1`-`3`); any incompatible change must bump it explicitly.
+- **Everything sent to a viewer is built per viewer** (Phase 38): a viewer is a seat or `None` (the public). Only the server holds a full transcript of a hidden-information game; seats get `view: "seat"` payloads, spectators `"public"`. Use the `*_for_viewer` helpers in `arena.core.public_view` / `arena.match` / `arena.runtime`; never send `_build_snapshot` / `dump_match_transcript` output to a client directly.
 - **Per-turn deadlines and wall-clock timeouts live exclusively in `arena.server`. `arena.runtime` stays deadline-free.** Server-enforced expiry produces an existing-style runtime abort with reason `turn_deadline_expired`.
 - **Match identity is an unguessable opaque token** (`secrets.token_urlsafe(16)`, >=128 bits of entropy). In v1 there is no auth: possession of the `match_id` is the capability.
 - **Structured logging at module-load scope is allowed only in `arena.server`.** Lower layers may use `logging` lazily inside functions when explicitly opted in. The SDK stays silent by default.
@@ -51,17 +62,72 @@ Open items: none — all v1 follow-ups closed. Future work is the v2 backlog (se
 - The wire format is JSON over WebSocket; this is not configurable.
 - Architecture/import-boundary tests are load-bearing — do not introduce upward imports.
 
-## Deferred to v2
+## v2 roadmap (approved 2026-09-22)
 
-- Transcript persistence beyond JSON files written by `examples/`
+Phases 36-42 are specified in `IMPLEMENTATION_PLAN.md` under "v2 roadmap". Order:
+36 spectator endpoint + transport refactor + §13 rate limits + CI (v1 wire, no bump) →
+37 chance-node primitive (**bump to `schema_version=2`**) →
+38 imperfect-information contract (**bump to 3**) → 39 Liar's Dice →
+40 transcript persistence + `GET /matches/{id}/public-transcript` → 41 generalized turn loop
+(**bump to 4**) → 42 docs + packaged TypeScript SDK.
+
+Phase 36 ✅ (2026-09-23, v1 wire). Phase 37 ✅ (2026-09-24, wire `schema_version=2`): chance
+nodes, `kind`/`outcome` transcript turns, multi-version decode, and Pig.
+
+Phase 38 ✅ (2026-09-24, wire `schema_version=3`): per-seat views, event visibility,
+per-recipient broadcast, seat-scoped transcripts, reconnect replay, server turn cap.
+
+**Active phase: 39** — Liar's Dice (no wire bump).
+
+**Owner rule (2026-09-24): dispatch adversarial reviewer subagents between one feature and the
+next**, and fix confirmed findings before moving on.
+
+Three hard constraints discovered by adversarial review, verified against the code:
+- **A slow spectator must not be able to stall a match.** `_broadcast` (`runtime_bridge.py:188`)
+  awaits `send_text` sequentially inside `run_match`; a blocked send suspends the driver while the
+  per-turn deadline keeps running, aborting the match and blaming an innocent seat. Spectators need
+  bounded per-connection outbound queues with their own writer tasks.
+- **Never put a game's RNG seed in config or state.** `send_welcome` dumps `match_config` to both
+  seats, `_build_snapshot` embeds config in every `SnapshotEnvelope`, and every `post_snapshot`
+  carries the full state. Either would let a seat predict every roll. The generator lives on
+  `LocalMatch.rng` only (Phase 37); transcripts record chance *outcomes*, and replay applies them.
+- **§13 rate limits are a prerequisite of the spectator endpoint, not a follow-on.** An
+  unauthenticated unlimited fan-out endpoint is exactly what §13 exists to bound.
+
+Two items moved OUT of the v2 deferral list by owner decision: **transcript persistence**
+(Phase 40, prerequisite for the HTTP transcript endpoint) and the **spectator endpoint**
+(Phase 36 — the URL no longer closes with `4404`).
+
+## Still deferred
+
 - Real authentication, tokens, or accounts
-- Web spectator UI (URL shape `WS /matches/{id}/spectate` reserved; closes with `4404` until v2)
+- A designed web spectator **UI** (Phase 36 shipped functional viewer glue at `examples/spectator/`, not a product surface)
 - Lobby, matchmaking, tournaments
 - Prometheus metrics endpoint
 - OpenTelemetry tracing
 - TypeScript SDK port
 - Anthropic-SDK-backed agent
 - Third-party game registration
+
+## Testing rules (hard-won — do not relearn these)
+
+- **One WebSocket per Starlette `TestClient` test.** A test driving two live WS sessions through a
+  single TestClient shares one anyio portal and deadlocks nondeterministically on the receive side.
+  This made the whole suite hang in ~75% of full runs. Anything needing two live sockets belongs in
+  `tests/integration/`, which runs a real uvicorn server over real TCP via the `running_server`
+  fixture.
+- **Always context-manage `TestClient`** (`with TestClient(app) as client:`). Unclosed clients leak
+  portal threads across the session.
+- **Pass short `per_turn_deadline_ms` / `disconnect_grace_ms` in tests.** At the 30 s production
+  default, a test that abandons a match leaves `run_match` parked for 30 s.
+- **Integration tests cannot catch entry-point bugs: run the real stack after server changes.** Every
+  test server uses uvicorn `ws="websockets-sansio"`; `python -m arena.server` (and the Dockerfile) used
+  the default implementation, which corrupts receives on cancellation, and aborted *every* real match
+  until Phase 38. The entry point now pins `UVICORN_WS_IMPL`. Check with `python -m arena.server` plus
+  `examples/run_remote_demo.py --game pig` against local Ollama.
+- `pytest-timeout` is configured in `pyproject.toml` (`--timeout=120 --timeout-method=thread`) so a
+  hang fails instead of blocking CI forever. The thread method is required: signal-based timeouts
+  do not exist on Windows.
 
 ## Working workflow
 

@@ -4,19 +4,37 @@ Paste this into a fresh Claude or Codex session:
 
 > Continue work in `C:\Users\Enrico\Desktop\AgentsArena`. Follow `AGENTS.md`, `IMPLEMENTATION_PLAN.md`, and `docs/NETWORK_PROTOCOL.md` strictly. Use the same workflow as prior sessions: inspect the current baseline, expand only the current slice, delegate bounded coding slices to cheaper subagents where available, review their diffs, then run verification yourself before moving on.
 >
-> Current status: **Phases 0 - 35 are complete. The v1 milestone is reached.** The simulation core, local match runner, runtime coordinator, UI adapter, terminal CLI, local Ollama agents, WebSocket adapter, server with `MatchRegistry`, reference Python SDK, Ollama-over-WS, resilience (per-turn deadlines, heartbeats, reconnect with resume tokens), structured logging, public deployment story (Dockerfile, `fly.toml`, `docs/DEPLOYMENT.md`), the remote acceptance demo (`examples/run_remote_demo.py`), and the optional MCP server layer (`arena.mcp`, stdio + HTTP/SSE) all ship and pass `ruff` + `pytest`.
+> **Current status (verified 2026-09-24): Phases 0-38 complete.** Phase 38 moved the wire to `schema_version=3`. Every payload is now built per recipient: a viewer is a seat, or `None` for the public. Snapshots, chance outcomes, events (`DomainEvent.visible_to`), transcripts (`view`: full/seat/public), and welcome config are all redacted per viewer, and a reconnect replays the seat's own history. The shared contract proves redaction by indistinguishability (`PrivateVariant`). 918 tests pass. **Next up: Phase 39, Liar's Dice (no wire bump).**
 >
-> Side note: a Nim game (`src/arena/games/nim/`) was added in commit `3da879a` outside the documented roadmap. It is registered in `build_default_registry()`, has a `NimPromptBuilder`, ships with action schemas in `arena.mcp.schemas`, and is exercised by the remote demo and integration tests.
+> **Also run the real stack after server changes** (`python -m arena.server`, then `examples/run_remote_demo.py --game pig` with local Ollama): every integration test uses a sansio test server, so it cannot catch entry-point regressions. That is how Phase 38 found `python -m arena.server` had been aborting every match.
 >
-> What's next is open. Defensible directions:
-> - **Public-server smoke test**: walk through `docs/DEPLOYMENT.md` for real — `flyctl launch` / `flyctl deploy` — and run `examples/run_remote_demo.py --server-url wss://<your-app>.fly.dev --game connect4 --abort-after-turns 3`. Verify both happy and abort transcripts in the wild.
-> - **v2 candidates** (NOT yet in scope): TypeScript SDK port, web spectator UI, transcript persistence beyond JSON files, real auth, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, Anthropic-SDK-backed agent.
-> - **Nim cleanup**: backfill `arena.cli.play.__main__` to accept `--game nim` (currently only `connect4`/`tictactoe`). The new `run_remote_seat` helper already supports Nim end-to-end; only the local CLI driver lags.
+> **Owner rule: after each slice, dispatch adversarial reviewer subagents over it and fix confirmed findings before starting the next.** The first rounds caught real leaks and bugs; see the "Adversarial review" notes under Phase 38 in the plan.
+>
+> Phase 37 (2026-09-24) shipped chance nodes on wire v2. Chance is nature's action (`sample_chance` / `apply_chance`), the seed lives only on `LocalMatch.rng`, replay applies recorded outcomes, and **Pig** (`arena.games.pig`) is the exemplar game.
+>
+> Phase 36 (2026-09-23) shipped CI, protocol §13 rate limits, match eviction, the public-view contract, the connection registry with per-connection outboxes, the live spectator channel, and a browser viewer.
+>
+> **Previous milestone: Phases 0-35, v1.** `main` is clean, `ruff` passes, `pytest -q` reports **675 passed**. The simulation core, local match runner, runtime coordinator, UI adapter, terminal CLI, local Ollama agents, WebSocket adapter, server with `MatchRegistry`, reference Python SDK, Ollama-over-WS, resilience (per-turn deadlines, heartbeats, reconnect with resume tokens), structured logging, deployment artifacts (`Dockerfile`, `fly.toml`, `docs/DEPLOYMENT.md`), the remote acceptance demo (`examples/run_remote_demo.py`), and the MCP server layer (`arena.mcp`, stdio + HTTP/SSE) all ship.
+>
+> **Post-v1 work already landed** (see the "Post-v1 work" section of `IMPLEMENTATION_PLAN.md`): a third game (`arena.games.nim`), per-layer adapter registries replacing per-game dispatch ladders, `docs/ADDING_A_GAME.md` plus the `python -m arena.games.scaffold` generator, and a draft RFC at `docs/RFC_IMPERFECT_INFORMATION.md`.
+>
+> **Known gaps — read before proposing work:**
+> - ~~§13 rate limits unimplemented~~ and ~~no CI~~ — both closed by Phase 36 (`arena.server.rate_limits`, `.github/workflows/ci.yml`).
+> - Nothing is deployed; `fly.toml` still says `app = "arena-server"`.
+> - `agents-arena` is not on PyPI, so no third party can join a match without cloning the repo.
+>
+> **Next direction — v2 roadmap, Phases 36-42, approved 2026-09-22.** Specified in `IMPLEMENTATION_PLAN.md` under "v2 roadmap". Order: ~~36 spectator endpoint + transport refactor + §13 rate limits + CI~~ **COMPLETE 2026-09-23** → ~~37 chance-node primitive (bump to `schema_version=2`)~~ **COMPLETE 2026-09-24** → ~~38 imperfect-information contract (bump to 3)~~ **COMPLETE 2026-09-24** → 39 Liar's Dice → 40 transcript persistence + `GET /matches/{id}/public-transcript` → 41 generalized turn loop (**bump to 4**) → 42 docs + packaged TypeScript SDK. Expand only the current phase, one slice at a time.
+>
+> **The phase specs were revised on 2026-09-22 after an adversarial review that verified every claim against the code.** Each of Phases 36-38 opens with a note explaining what the first draft got wrong and why. Read those notes — they encode constraints that are easy to rediscover the hard way: a slow spectator can stall `run_match` and abort a match; a game seed placed in config **or state** is broadcast to both seats and embedded in every snapshot (Phase 37 keeps it on `LocalMatch.rng`); and §13 rate limits must land before the spectator endpoint opens.
+>
+> `docs/RFC_IMPERFECT_INFORMATION.md` is **superseded as a plan** and retained as analysis — §1-5 are still accurate, §6-8 are historical. Four owner decisions diverge from what that RFC recommends, so read the decision table in the plan rather than the RFC: a real chance-node primitive (not seeded init-time randomness), spectator first, transcript persistence in scope, and simultaneous moves in scope but deferred to Phase 41.
+>
+> **Adding a game:** follow `docs/ADDING_A_GAME.md`. A new game registers with each layer's adapter registry (`arena.cli.games`, `arena.mcp.games`, `arena.agents.ollama._adapters`) — do not add `if game_id == ...` dispatch branches.
 >
 > Verify with:
 > `.\.venv\Scripts\ruff.exe check .`
 > `.\.venv\Scripts\pytest.exe -q`
 >
-> Boundaries (full list in `CLAUDE.md` and `AGENTS.md`): `arena.core`, `arena.games`, `arena.match`, `arena.adapters.*`, `arena.runtime`, `arena.ui`, `arena.cli`, `arena.sdk`, `arena.agents.*`, and `arena.mcp` must not enforce wall-clock deadlines or instantiate loggers at module-load scope. Per-turn deadlines and structured logging are exclusive to `arena.server`. Architecture boundary tests enforce import direction: `arena.mcp` may only import `arena.sdk` and `arena.core`. The `arena.agents` → `arena.sdk` boundary is still forbidden by `test_sdk_boundaries.py`; the Ollama remote helper reaches the SDK transitively through `arena.cli.remote` (which is permitted to import `arena.sdk`).
+> **Boundaries** (full list in `CLAUDE.md` and `AGENTS.md`): `arena.core`, `arena.games`, `arena.match`, `arena.adapters.*`, `arena.runtime`, `arena.ui`, `arena.cli`, `arena.sdk`, `arena.agents.*`, and `arena.mcp` must not enforce wall-clock deadlines or instantiate loggers at module-load scope. Per-turn deadlines and structured logging are exclusive to `arena.server`. Architecture tests enforce import direction: `arena.mcp` may only import `arena.sdk`, `arena.core`, and `arena.games` (game ids for its per-game adapters). The `arena.agents` → `arena.sdk` boundary is still forbidden by `test_sdk_boundaries.py`; the Ollama remote helper reaches the SDK transitively through `arena.cli.remote` (which is permitted to import `arena.sdk`).
 >
-> v1 acceptance demo (Phase 34): two local Ollama agents on the user's laptop both connect to a publicly reachable `arena.server`, complete one clean Connect 4 match, and complete one deliberate-abort scenario. This is reproducible per `docs/DEPLOYMENT.md`. v2 deferrals: persistence beyond JSON files, real auth, web spectator UI, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, TypeScript SDK port, Anthropic-SDK-backed agent.
+> **v2 deferrals:** persistence beyond JSON files, real auth, web spectator UI, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, TypeScript SDK port, Anthropic-SDK-backed agent, third-party game registration.

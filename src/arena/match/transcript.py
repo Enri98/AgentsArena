@@ -4,19 +4,35 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, fields, is_dataclass
-from typing import Generic, TypeVar, cast
+from typing import Any, Generic, Literal, TypeVar, cast
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
 from arena.core.actions import Action
+from arena.core.chance import dump_chance_outcome, is_chance_node, load_chance_outcome
 from arena.core.config import BaseGameConfig
-from arena.core.events import DomainEvent
+from arena.core.events import DomainEvent, event_payload_visible_to
+from arena.core.exceptions import ArenaCoreError
 from arena.core.game_definition import GameDefinition
 from arena.core.observations import Observation
+from arena.core.public_view import (
+    Viewer,
+    check_viewer,
+    dump_chance_outcome_for_viewer,
+    dump_config_for_viewer,
+)
 from arena.core.results import Draw, RuleResult, Win
 from arena.core.serializer import JSONMapping, SnapshotEnvelope
 from arena.core.types import Seat
-from arena.match.local_match import LocalMatch, apply_match_action, start_match
+from arena.match.local_match import (
+    TURN_KIND_ACTION,
+    TURN_KIND_CHANCE,
+    LocalMatch,
+    apply_match_action,
+    apply_match_chance,
+    build_snapshot_for_viewer,
+    start_replay_match,
+)
 
 ConfigT = TypeVar("ConfigT", bound=BaseGameConfig)
 StateT = TypeVar("StateT")
@@ -24,7 +40,28 @@ ActionT = TypeVar("ActionT", bound=Action)
 ObservationT = TypeVar("ObservationT", bound=Observation)
 ResultT = TypeVar("ResultT", bound=RuleResult)
 
-MATCH_TRANSCRIPT_SCHEMA_VERSION = 1
+#: Bumped to 2 in Phase 37: turns gained a ``kind``, and a chance turn carries
+#: no seat and no action. That is a shape change an older reader cannot handle,
+#: so it is a version bump rather than an additive field.
+#:
+#: Bumped to 3 in Phase 38: a transcript declares its ``view`` (full, one seat's,
+#: or the public's) and events record their audience. A seat-view transcript of
+#: a hidden-information game omits what that seat may not see, so a reader must
+#: be able to tell which kind it holds.
+MATCH_TRANSCRIPT_SCHEMA_VERSION = 3
+
+#: Transcript versions this loader accepts. A v1 transcript predates chance
+#: nodes; v1 and v2 predate views, and are always full transcripts.
+SUPPORTED_MATCH_TRANSCRIPT_SCHEMA_VERSIONS = (1, 2, 3)
+
+#: The unredacted transcript: everything, including every seat's private state.
+VIEW_FULL = "full"
+#: One seat's transcript: only what that seat was entitled to see.
+VIEW_SEAT = "seat"
+#: The public transcript: what a spectator may see.
+VIEW_PUBLIC = "public"
+
+TranscriptView = Literal["full", "seat", "public"]
 
 
 class MatchEventPayload(BaseModel):
@@ -34,6 +71,20 @@ class MatchEventPayload(BaseModel):
 
     event_type: str = Field(min_length=1)
     payload: JSONMapping = Field(default_factory=dict)
+    #: Phase 38. A non-public event is delivered only to ``audience``. Defaults
+    #: keep an older transcript, whose events were all public, valid, and a public
+    #: event is serialized without either key, so payloads of games with no
+    #: private events are exactly what they were before.
+    is_public: bool = True
+    audience: list[int] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_public_marker(self, handler: Any) -> Any:
+        data = handler(self)
+        if self.is_public:
+            data.pop("is_public", None)
+            data.pop("audience", None)
+        return data
 
 
 class MatchResultPayload(BaseModel):
@@ -46,15 +97,23 @@ class MatchResultPayload(BaseModel):
 
 
 class MatchTurnPayload(BaseModel):
-    """JSON-safe payload for one accepted match turn."""
+    """JSON-safe payload for one match turn.
+
+    ``seat`` and ``action`` are null on a chance turn: no seat chose it. It
+    carries ``outcome`` instead — the recorded result replay applies, so a
+    transcript validates without the seed. Every new field defaults so a v1
+    transcript, which predates chance nodes, still validates.
+    """
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    seat: int
-    action: JSONMapping
+    seat: int | None = None
+    action: JSONMapping | None = None
     events: list[MatchEventPayload]
     result: MatchResultPayload | None
     post_snapshot: SnapshotEnvelope
+    kind: str = TURN_KIND_ACTION
+    outcome: JSONMapping | None = None
 
 
 class MatchTranscriptPayload(BaseModel):
@@ -67,19 +126,26 @@ class MatchTranscriptPayload(BaseModel):
     config: JSONMapping
     initial_snapshot: SnapshotEnvelope
     turns: list[MatchTurnPayload]
+    #: Phase 38: which view this is. Only a ``"full"`` transcript can be
+    #: replayed; a redacted one lacks the hidden state replay needs.
+    view: TranscriptView = VIEW_FULL
+    #: The seat a ``"seat"`` view belongs to; null otherwise.
+    viewer_seat: int | None = None
 
 
 @dataclass(frozen=True)
 class LoadedMatchTurn(Generic[StateT, ActionT]):
     """Typed turn data rehydrated from a match transcript."""
 
-    seat: Seat
-    action: ActionT
+    seat: Seat | None
+    action: ActionT | None
     event_payloads: tuple[JSONMapping, ...]
     result: RuleResult | None
     result_payload: JSONMapping | None
     post_state: StateT
     post_snapshot: SnapshotEnvelope
+    kind: str = TURN_KIND_ACTION
+    outcome: object = None
 
 
 @dataclass(frozen=True)
@@ -109,7 +175,17 @@ def dump_match_transcript(
         turns=[
             MatchTurnPayload(
                 seat=turn.seat,
-                action=match.definition.serializer.dump_action(turn.action),
+                action=(
+                    match.definition.serializer.dump_action(turn.action)
+                    if turn.action is not None
+                    else None
+                ),
+                kind=turn.kind,
+                outcome=(
+                    dump_chance_outcome(match.definition.serializer, turn.outcome)
+                    if turn.kind == TURN_KIND_CHANCE
+                    else None
+                ),
                 events=[
                     _dump_domain_event(event)
                     for event in turn.events
@@ -131,6 +207,12 @@ def load_match_transcript(
 
     transcript_payload = MatchTranscriptPayload.model_validate(payload)
     _ensure_definition_matches_payload(definition.game_id, transcript_payload)
+    _ensure_turn_shapes(transcript_payload)
+    if transcript_payload.view != VIEW_FULL:
+        raise ValueError(
+            f"A {transcript_payload.view!r}-view transcript cannot be loaded or replayed: "
+            f"it omits hidden information. Only a full transcript can."
+        )
 
     config = cast(
         ConfigT,
@@ -144,9 +226,16 @@ def load_match_transcript(
     loaded_turns = tuple(
         LoadedMatchTurn[StateT, ActionT](
             seat=turn_payload.seat,
-            action=cast(
-                ActionT,
-                definition.serializer.load_action(turn_payload.action),
+            kind=turn_payload.kind,
+            outcome=(
+                load_chance_outcome(definition.serializer, turn_payload.outcome)
+                if turn_payload.outcome is not None
+                else None
+            ),
+            action=(
+                cast(ActionT, definition.serializer.load_action(turn_payload.action))
+                if turn_payload.action is not None
+                else None
             ),
             event_payloads=tuple(
                 event_payload.model_dump(mode="json") for event_payload in turn_payload.events
@@ -180,14 +269,77 @@ def load_match_transcript(
     )
 
 
+def _ensure_turn_shapes(payload: MatchTranscriptPayload) -> None:
+    """Reject a transcript whose shape no build of this code could have written.
+
+    Checked before replay so a forged field cannot ride along unexamined: replay
+    only ever reads the fields that belong to a turn's kind.
+    """
+
+    if payload.schema_version not in SUPPORTED_MATCH_TRANSCRIPT_SCHEMA_VERSIONS:
+        raise ValueError(
+            f"Transcript schema_version {payload.schema_version!r} is not one of "
+            f"{SUPPORTED_MATCH_TRANSCRIPT_SCHEMA_VERSIONS}."
+        )
+    if payload.schema_version < 3 and payload.view != VIEW_FULL:
+        raise ValueError("Transcripts before schema_version 3 have no views.")
+    if payload.view == VIEW_SEAT and payload.viewer_seat is None:
+        raise ValueError("A seat-view transcript must name its viewer_seat.")
+    if payload.view != VIEW_SEAT and payload.viewer_seat is not None:
+        raise ValueError("Only a seat-view transcript has a viewer_seat.")
+
+    for index, turn in enumerate(payload.turns, start=1):
+        for event in turn.events:
+            marked = {"is_public", "audience"} & event.model_fields_set
+            if marked and payload.schema_version < 3:
+                raise ValueError(f"Turn {index}: event audiences predate schema_version 3.")
+            if event.is_public and event.audience is not None:
+                raise ValueError(f"Turn {index}: a public event has no audience.")
+            if not event.is_public and not event.audience:
+                raise ValueError(f"Turn {index}: a private event must name its audience.")
+        if turn.kind == TURN_KIND_CHANCE:
+            if payload.schema_version < 2:
+                raise ValueError(
+                    f"Turn {index}: a schema_version 1 transcript predates chance turns."
+                )
+            if turn.seat is not None or turn.action is not None:
+                raise ValueError(f"Turn {index}: a chance turn has no seat and no action.")
+            if turn.outcome is None:
+                raise ValueError(f"Turn {index}: a chance turn must carry its outcome.")
+        elif turn.kind == TURN_KIND_ACTION:
+            if turn.seat is None or turn.action is None:
+                raise ValueError(f"Turn {index}: an action turn needs a seat and an action.")
+            if turn.outcome is not None:
+                raise ValueError(f"Turn {index}: an action turn has no chance outcome.")
+        else:
+            raise ValueError(f"Turn {index}: unknown turn kind {turn.kind!r}.")
+
+
 def validate_match_transcript(
     definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT],
     payload: JSONMapping,
 ) -> LoadedMatchTranscript[ConfigT, StateT, ActionT, ObservationT, ResultT]:
-    """Validate a transcript by replaying it against a fresh local match."""
+    """Validate a transcript by replaying it against a fresh local match.
 
+    Every failure is a ``ValueError``; a rules-engine rejection during replay (an
+    illegal recorded action, an impossible recorded outcome) is chained as its
+    cause.
+    """
+
+    try:
+        return _validate_match_transcript(definition, payload)
+    except ArenaCoreError as exc:
+        raise ValueError(f"Transcript validation failed: {exc.message}") from exc
+
+
+def _validate_match_transcript(
+    definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    payload: JSONMapping,
+) -> LoadedMatchTranscript[ConfigT, StateT, ActionT, ObservationT, ResultT]:
     loaded_transcript = load_match_transcript(definition, payload)
-    replay_match = start_match(definition, loaded_transcript.config)
+    # A replay match never samples: it waits at each chance node for the
+    # recorded outcome. Validation therefore needs no seed.
+    replay_match = start_replay_match(definition, loaded_transcript.config)
 
     _ensure_snapshot_matches(
         expected=loaded_transcript.initial_snapshot,
@@ -200,9 +352,49 @@ def validate_match_transcript(
         context="Initial",
     )
 
-    for turn_index, loaded_turn in enumerate(loaded_transcript.turns, start=1):
+    # Replay never re-rolls: a chance turn applies its recorded outcome, which
+    # the engine revalidates just as it revalidates a recorded action. The full
+    # comparison below then proves every post-state, snapshot, and event matches.
+    for loaded_turn in loaded_transcript.turns:
+        if loaded_turn.kind == TURN_KIND_CHANCE:
+            if loaded_turn.outcome is None:
+                raise ValueError(
+                    "Transcript validation failed: a chance turn must carry its outcome."
+                )
+            replay_match = apply_match_chance(replay_match, loaded_turn.outcome)
+            continue
+        if loaded_turn.kind != TURN_KIND_ACTION:
+            raise ValueError(
+                f"Transcript validation failed: unknown turn kind {loaded_turn.kind!r}."
+            )
+        if loaded_turn.seat is None or loaded_turn.action is None:
+            raise ValueError(
+                "Transcript validation failed: an action turn must carry both a seat "
+                f"and an action (turn kind {loaded_turn.kind!r})."
+            )
         replay_match = apply_match_action(replay_match, loaded_turn.seat, loaded_turn.action)
-        generated_turn = replay_match.turns[-1]
+
+    if is_chance_node(replay_match.rules_engine, replay_match.state):
+        raise ValueError(
+            "Transcript validation failed: it ends at a pending chance node, which a "
+            "live match never does; a chance turn is missing."
+        )
+
+    if len(replay_match.turns) != len(loaded_transcript.turns):
+        raise ValueError(
+            "Transcript validation failed: replay produced "
+            f"{len(replay_match.turns)} turn(s) but the transcript records "
+            f"{len(loaded_transcript.turns)}."
+        )
+
+    for turn_index, (loaded_turn, generated_turn) in enumerate(
+        zip(loaded_transcript.turns, replay_match.turns), start=1
+    ):
+        if loaded_turn.kind != generated_turn.kind:
+            raise ValueError(
+                f"Transcript validation failed: turn {turn_index} is recorded as "
+                f"{loaded_turn.kind!r} but replayed as {generated_turn.kind!r}."
+            )
 
         _ensure_state_matches(
             expected=loaded_turn.post_state,
@@ -229,9 +421,213 @@ def validate_match_transcript(
     return loaded_transcript
 
 
-def _dump_domain_event(event: DomainEvent) -> MatchEventPayload:
+def dump_domain_event(event: DomainEvent) -> MatchEventPayload:
+    """Serialize one domain event to its JSON-safe payload.
+
+    Public because the server puts events on the wire: since Phase 37 a chance
+    outcome is carried by its events and cannot be recomputed by a client.
+    """
+
     payload = _dump_dataclass_fields(event)
-    return MatchEventPayload(event_type=event.event_type, payload=payload)
+    return MatchEventPayload(
+        event_type=event.event_type,
+        payload=payload,
+        is_public=event.is_public,
+        audience=event.audience(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-viewer transcripts (Phase 38)
+# ---------------------------------------------------------------------------
+
+
+def transcript_view_for(
+    definition: GameDefinition[Any, Any, Any, Any, Any], viewer: Viewer
+) -> tuple[TranscriptView, int | None]:
+    """The ``(view, viewer_seat)`` a viewer's transcript carries.
+
+    A perfect-information game has nothing to redact, so every viewer gets the
+    full transcript, labelled as such: it stays replayable, and its payloads are
+    exactly what they were before views existed.
+    """
+
+    check_viewer(viewer)
+    if not definition.has_hidden_information:
+        return VIEW_FULL, None
+    if viewer is None:
+        return VIEW_PUBLIC, None
+    return VIEW_SEAT, viewer
+
+
+def filter_event_payloads(
+    event_payloads: Sequence[JSONMapping], viewer: Viewer
+) -> list[JSONMapping]:
+    """Drop serialized events ``viewer`` may not see."""
+
+    return [p for p in event_payloads if event_payload_visible_to(p, viewer)]
+
+
+def turn_payload_for_viewer(
+    definition: GameDefinition[Any, Any, Any, Any, Any],
+    config: Any,
+    *,
+    kind: str,
+    seat: int | None,
+    action: JSONMapping | None,
+    outcome: Any,
+    event_payloads: Sequence[JSONMapping],
+    result: JSONMapping | None,
+    post_state: Any,
+    viewer: Viewer,
+) -> MatchTurnPayload:
+    """One turn as ``viewer`` may see it.
+
+    Actions and results are public: a move is announced to the table.
+    Snapshots, chance outcomes, and events are redacted per viewer.
+    """
+
+    serializer = definition.serializer
+    return MatchTurnPayload(
+        seat=seat,
+        action=action,
+        kind=kind,
+        outcome=(
+            dump_chance_outcome_for_viewer(serializer, outcome, viewer)
+            if kind == TURN_KIND_CHANCE
+            else None
+        ),
+        events=[
+            MatchEventPayload.model_validate(p)
+            for p in filter_event_payloads(event_payloads, viewer)
+        ],
+        result=MatchResultPayload.model_validate(result) if result is not None else None,
+        post_snapshot=build_snapshot_for_viewer(definition, config, post_state, viewer),
+    )
+
+
+def _turn_record_for_viewer(
+    definition: GameDefinition[Any, Any, Any, Any, Any],
+    config: Any,
+    turn: Any,
+    viewer: Viewer,
+) -> MatchTurnPayload:
+    return turn_payload_for_viewer(
+        definition,
+        config,
+        kind=turn.kind,
+        seat=turn.seat,
+        action=(
+            definition.serializer.dump_action(turn.action) if turn.action is not None else None
+        ),
+        outcome=turn.outcome,
+        event_payloads=[dump_domain_event(event).model_dump(mode="json") for event in turn.events],
+        result=(
+            _dump_rule_result(turn.result).model_dump(mode="json")
+            if turn.result is not None
+            else None
+        ),
+        post_state=turn.post_state,
+        viewer=viewer,
+    )
+
+
+def turn_record_for_viewer(
+    match: LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    turn_index: int,
+    viewer: Viewer,
+) -> MatchTurnPayload:
+    """Turn ``turn_index`` of a live match as ``viewer`` may see it.
+
+    What the server puts in ``turn_committed`` for each recipient.
+    """
+
+    return _turn_record_for_viewer(
+        match.definition, match.config, match.turns[turn_index], viewer
+    )
+
+
+def dump_match_transcript_for_viewer(
+    match: LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    viewer: Viewer,
+) -> JSONMapping:
+    """The transcript ``viewer`` may receive: a seat's, or the public's (``None``).
+
+    The full transcript for a perfect-information game.
+    """
+
+    definition = match.definition
+    view, viewer_seat = transcript_view_for(definition, viewer)
+    if view == VIEW_FULL:
+        return dump_match_transcript(match)
+
+    serializer = definition.serializer
+    payload = MatchTranscriptPayload(
+        game_id=definition.game_id,
+        schema_version=MATCH_TRANSCRIPT_SCHEMA_VERSION,
+        config=dump_config_for_viewer(serializer, match.config, viewer),
+        initial_snapshot=build_snapshot_for_viewer(
+            definition, match.config, match.rules_engine.initial_state(match.config), viewer
+        ),
+        turns=[
+            _turn_record_for_viewer(definition, match.config, turn, viewer)
+            for turn in match.turns
+        ],
+        view=view,
+        viewer_seat=viewer_seat,
+    )
+    return payload.model_dump(mode="json")
+
+
+def redact_match_transcript(
+    definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    payload: JSONMapping,
+    viewer: Viewer,
+) -> JSONMapping:
+    """Produce ``viewer``'s transcript from a saved **full** transcript.
+
+    What a replay viewer uses to show one seat's perspective of an archived
+    match. For a perfect-information game the payload comes back unredacted.
+    """
+
+    loaded = load_match_transcript(definition, payload)
+    view, viewer_seat = transcript_view_for(definition, viewer)
+    if view == VIEW_FULL:
+        return MatchTranscriptPayload.model_validate(payload).model_dump(mode="json")
+
+    serializer = definition.serializer
+    redacted = MatchTranscriptPayload(
+        game_id=definition.game_id,
+        schema_version=MATCH_TRANSCRIPT_SCHEMA_VERSION,
+        config=dump_config_for_viewer(serializer, loaded.config, viewer),
+        initial_snapshot=build_snapshot_for_viewer(
+            definition, loaded.config, loaded.initial_state, viewer
+        ),
+        turns=[
+            turn_payload_for_viewer(
+                definition,
+                loaded.config,
+                kind=turn.kind,
+                seat=turn.seat,
+                action=(
+                    serializer.dump_action(turn.action) if turn.action is not None else None
+                ),
+                outcome=turn.outcome,
+                event_payloads=turn.event_payloads,
+                result=turn.result_payload,
+                post_state=turn.post_state,
+                viewer=viewer,
+            )
+            for turn in loaded.turns
+        ],
+        view=view,
+        viewer_seat=viewer_seat,
+    )
+    return redacted.model_dump(mode="json")
+
+
+#: Retained for internal callers predating the public name.
+_dump_domain_event = dump_domain_event
 
 
 def _dump_rule_result(result: RuleResult | None) -> MatchResultPayload | None:
@@ -369,11 +765,23 @@ __all__: Sequence[str] = [
     "LoadedMatchTranscript",
     "LoadedMatchTurn",
     "MATCH_TRANSCRIPT_SCHEMA_VERSION",
+    "dump_domain_event",
     "MatchEventPayload",
     "MatchResultPayload",
     "MatchTranscriptPayload",
     "MatchTurnPayload",
+    "SUPPORTED_MATCH_TRANSCRIPT_SCHEMA_VERSIONS",
+    "TranscriptView",
+    "VIEW_FULL",
+    "VIEW_PUBLIC",
+    "VIEW_SEAT",
     "dump_match_transcript",
+    "dump_match_transcript_for_viewer",
+    "filter_event_payloads",
     "load_match_transcript",
+    "redact_match_transcript",
+    "transcript_view_for",
+    "turn_payload_for_viewer",
+    "turn_record_for_viewer",
     "validate_match_transcript",
 ]

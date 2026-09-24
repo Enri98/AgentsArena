@@ -1,12 +1,20 @@
 # AgentsArena
 
-AgentsArena is a Python 3.11 library for pure, turn-based game simulation.
+AgentsArena is a Python 3.11 library and server for agent-vs-agent competition on
+sequential, deterministic, perfect-information games.
 
-Current scope:
-- simulation package only
-- sequential, deterministic, perfect-information games
-- typed domain objects, registry, rules, serializers, and tests
-- built-in games: Connect 4 and Tic-Tac-Toe
+What ships today (v1, Phases 0-35):
+- a pure simulation core: typed domain objects, registry, rules, serializers
+- built-in games: Connect 4, Tic-Tac-Toe, Nim (add your own via `docs/ADDING_A_GAME.md`)
+- a local match runner, ANSI terminal renderer, replay viewer, and interactive CLI
+- a WebSocket server with per-turn deadlines, heartbeats, reconnect, and JSON logs
+- a read-only spectator channel plus a zero-dependency browser viewer
+- a reference Python SDK, and an MCP server so any MCP client can take a seat
+- local Ollama agents plus a Docker / Fly.io deployment recipe
+
+Not yet: authentication, persistence beyond JSON files, matchmaking, or
+imperfect-information games. See `IMPLEMENTATION_PLAN.md` for
+the roadmap and `docs/RFC_IMPERFECT_INFORMATION.md` for the proposed v2 direction.
 
 ## Quickstart
 
@@ -131,7 +139,7 @@ assert final_match.rules_engine.is_terminal(final_match.state)
 For pure local runtime sessions, use `arena.runtime` to add match ids, player metadata, lifecycle, and UI-safe payload envelopes around the existing local match flow:
 
 The runtime envelopes are versioned with a fixed `schema_version` in the payload schema itself.
-For the current contract, both status and transcript payloads require `schema_version == 1`.
+Both status and transcript payloads are at `schema_version == 3` (Phase 38); readers accept 1-3.
 Any incompatible runtime payload change should bump that value intentionally rather than widening validation.
 
 ```python
@@ -205,14 +213,14 @@ session = arena.run_session(
 
 status = dump_session_status(session)
 validated_status = validate_session_status(status)
-assert status["schema_version"] == 1
+assert status["schema_version"] == 3
 assert validated_status.lifecycle == "finished"
 assert status["current_seat"] is None
 assert status["latest_snapshot"]["game_id"] == "connect4"
 
 runtime_transcript = dump_runtime_transcript(session)
 loaded = validate_runtime_transcript(Connect4GameDefinition, runtime_transcript)
-assert runtime_transcript["schema_version"] == 1
+assert runtime_transcript["schema_version"] == 3
 assert all(event["event_scope"] == "runtime" for event in runtime_transcript["events"])
 assert loaded is not None
 assert loaded.latest_state == session.local_match.state
@@ -355,6 +363,27 @@ an `aborted` transcript with `reason="peer_disconnected"`.
 Ollama still runs on your laptop. Only match state lives on the remote server.
 First-connect cold start is ~5s if the Fly machine was idle (see
 `docs/DEPLOYMENT.md` for cost-vs-latency knobs).
+
+## Watch a match in your browser
+
+`examples/spectator/index.html` is a single static page that attaches to a live
+match over `WS /matches/{id}/spectate` and renders it as it happens. Plain
+browser WebSocket — no build step, no dependencies.
+
+Start a server, create a match, then open the page and paste the `match_id`:
+
+```
+.\.venv\Scripts\python.exe -m arena.server --host 127.0.0.1 --port 8080
+```
+
+You can attach before the seats do, or join midway — the history arrives with the
+welcome and live turns follow. Spectators hold no seat: they never receive
+`observation_request`, and an action from one is refused. See
+`examples/spectator/README.md`.
+
+Supported games render natively (Connect 4 and Tic-Tac-Toe as a grid, Nim as
+piles); any other game falls back to raw JSON, so a new game is watchable before
+it has a renderer.
 
 ## Operating the server
 

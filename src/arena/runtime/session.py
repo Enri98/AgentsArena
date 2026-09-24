@@ -90,8 +90,15 @@ class Arena:
     def start_session(
         self,
         session: MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT],
+        *,
+        seed: int | None = None,
     ) -> MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT]:
-        """Start the local match owned by a created runtime session."""
+        """Start the local match owned by a created runtime session.
+
+        ``seed`` fixes the rolls of a game with chance nodes; when omitted the
+        match mints a secret one. It is held by the local match and never
+        appears in any runtime payload.
+        """
 
         if session.lifecycle is not RuntimeLifecycle.CREATED:
             raise RuntimeStateError(
@@ -100,7 +107,7 @@ class Arena:
             )
 
         try:
-            local_match = start_match(session.definition, session.config)
+            local_match = start_match(session.definition, session.config, seed=seed)
         except ArenaCoreError as error:
             return _abort_session(
                 session,
@@ -205,7 +212,9 @@ class Arena:
                 TurnAccepted(
                     match_id=requested_session.match_id,
                     seat=seat,
-                    turn_index=len(next_match.turns),
+                    # The accepted action's own turn, 1-based. Not the new turn
+                    # count: chance turns may follow it in the same step.
+                    turn_index=len(local_match.turns) + 1,
                 ),
             ),
         )
