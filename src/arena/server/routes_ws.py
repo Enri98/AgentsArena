@@ -23,7 +23,12 @@ from arena.adapters.websocket.errors import SchemaVersionMismatch, WireProtocolE
 from arena.adapters.websocket.messages import ErrorBody
 from arena.server.config import HEARTBEAT_MAX_MISSES
 from arena.server.errors import MatchNotFound
-from arena.server.rate_limits import CLOSE_RATE_LIMITED, RateLimiter, RateLimitExceeded
+from arena.server.rate_limits import (
+    CLOSE_RATE_LIMITED,
+    RateLimiter,
+    RateLimitExceeded,
+    client_address,
+)
 from arena.server.registry import Match, MatchRegistry
 from arena.server.runtime_bridge import (
     WS_CLOSE_NORMAL,
@@ -102,10 +107,14 @@ async def _close(ws: WebSocket, code: int, reason: str) -> None:
 
 
 def _client_ip(ws: WebSocket) -> str:
-    """Best-effort source address for rate-limit bucketing (protocol §13)."""
+    """Source address for rate-limit bucketing (protocol §13); see ``client_address``."""
 
     client = ws.client
-    return client.host if client is not None else "unknown"
+    return client_address(
+        ws.headers,
+        client.host if client is not None else None,
+        getattr(ws.app.state, "client_ip_header", None),
+    )
 
 
 @router.websocket("/matches/{match_id}/play")

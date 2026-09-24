@@ -1,21 +1,131 @@
-"""Entry point: python -m arena.server [--host HOST] [--port PORT]."""
+"""Entry point: python -m arena.server [--host HOST] [--port PORT] [...].
+
+Every setting also reads an ``ARENA_*`` environment variable, which is how a
+container deployment configures it (see docs/DEPLOYMENT.md). A flag wins over
+its variable.
+"""
 
 from __future__ import annotations
 
 import argparse
+import os
+from collections.abc import Sequence
 
 
-def main() -> None:
+def _env(name: str) -> str | None:
+    value = os.environ.get(name)
+    return value if value else None
+
+
+def _positive_float(text: str) -> float:
+    value = float(text)
+    if not value > 0:
+        raise argparse.ArgumentTypeError(f"must be positive, got {text}")
+    return value
+
+
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {text}")
+    return value
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the AgentsArena server.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--log-level", default="INFO", help="Logging level (default: INFO).")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--transcript-store",
+        default=_env("ARENA_TRANSCRIPT_STORE") or "memory",
+        help=(
+            "Where ended matches' public transcripts are kept: 'memory' (default; lost "
+            "on restart), 'file:DIR', or 'sqlite:PATH'. Env: ARENA_TRANSCRIPT_STORE."
+        ),
+    )
+    parser.add_argument(
+        "--transcript-ttl-s",
+        type=_positive_float,
+        default=_env("ARENA_TRANSCRIPT_TTL_S"),
+        help="Seconds a transcript is kept after its match ends (default: 7 days). "
+        "Env: ARENA_TRANSCRIPT_TTL_S.",
+    )
+    parser.add_argument(
+        "--transcript-max-entries",
+        type=_positive_int,
+        default=_env("ARENA_TRANSCRIPT_MAX_ENTRIES"),
+        help="Most transcripts kept; the oldest go first (default: 10000). "
+        "Env: ARENA_TRANSCRIPT_MAX_ENTRIES.",
+    )
+    parser.add_argument(
+        "--transcript-max-bytes",
+        type=_positive_int,
+        default=_env("ARENA_TRANSCRIPT_MAX_BYTES"),
+        help="Most bytes of transcripts kept (default: 1 GiB on disk, 64 MiB in memory). "
+        "Env: ARENA_TRANSCRIPT_MAX_BYTES.",
+    )
+    parser.add_argument(
+        "--client-ip-header",
+        default=_env("ARENA_CLIENT_IP_HEADER"),
+        help=(
+            "Request header carrying the client's address, set by a trusted reverse "
+            "proxy (Fly.io: Fly-Client-IP). Rate limits are per client address; behind a "
+            "proxy every client otherwise shares the proxy's. Only set this when the "
+            "server is reachable solely through that proxy: the header is trusted as is. "
+            "Env: ARENA_CLIENT_IP_HEADER."
+        ),
+    )
+    return parser
+
+
+def build_transcript_store(args: argparse.Namespace):  # type: ignore[no-untyped-def]
+    """The store the flags describe. Raises ``ValueError`` for a bad spec."""
+
+    from arena.server.transcript_store import (
+        DEFAULT_MAX_BYTES,
+        DEFAULT_MAX_ENTRIES,
+        DEFAULT_MEMORY_MAX_BYTES,
+        DEFAULT_TTL_S,
+        RetentionPolicy,
+        open_transcript_store,
+    )
+
+    in_memory = args.transcript_store == "memory"
+    policy = RetentionPolicy(
+        ttl_s=float(args.transcript_ttl_s or DEFAULT_TTL_S),
+        max_entries=int(args.transcript_max_entries or DEFAULT_MAX_ENTRIES),
+        max_bytes=int(
+            args.transcript_max_bytes
+            or (DEFAULT_MEMORY_MAX_BYTES if in_memory else DEFAULT_MAX_BYTES)
+        ),
+    )
+    return open_transcript_store(args.transcript_store, policy)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    # Values read from the environment arrive as strings: validate them the
+    # same way the flags are.
+    try:
+        for name, convert in (
+            ("transcript_ttl_s", _positive_float),
+            ("transcript_max_entries", _positive_int),
+            ("transcript_max_bytes", _positive_int),
+        ):
+            value = getattr(args, name)
+            if isinstance(value, str):
+                setattr(args, name, convert(value))
+        store = build_transcript_store(args)
+    except (ValueError, argparse.ArgumentTypeError) as exc:
+        parser.error(str(exc))
 
     from arena.server.logging_setup import configure_logging
 
     configure_logging(level=args.log_level)
 
+    import structlog
     import uvicorn
 
     from arena.server.app import create_app
@@ -26,13 +136,22 @@ def main() -> None:
         UVICORN_WS_PING_TIMEOUT_S,
     )
 
+    structlog.get_logger("arena.server").info(
+        "server_config",
+        transcript_store=args.transcript_store,
+        transcript_ttl_s=store.policy.ttl_s,
+        transcript_max_entries=store.policy.max_entries,
+        transcript_max_bytes=store.policy.max_bytes,
+        client_ip_header=args.client_ip_header,
+    )
+
     # The legacy websockets implementation corrupts its receive state when a
     # pending receive_text() is cancelled, which the first-arriving seat's handler
     # does while waiting for its opponent. The seat is then marked disconnected
     # the moment the match starts, and every match aborts peer_disconnected. The
     # test servers always ran sansio, which is why only real deployments broke.
     uvicorn.run(
-        create_app(),
+        create_app(transcript_store=store, client_ip_header=args.client_ip_header),
         host=args.host,
         port=args.port,
         ws=UVICORN_WS_IMPL,

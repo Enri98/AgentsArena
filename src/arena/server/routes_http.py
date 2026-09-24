@@ -30,7 +30,7 @@ from arena.server.errors import (
     UnknownGame,
 )
 from arena.server.payload_schemas import get_payload_schemas
-from arena.server.rate_limits import RateLimiter, RateLimitExceeded
+from arena.server.rate_limits import RateLimiter, RateLimitExceeded, client_address
 from arena.server.registry import MatchRegistry
 from arena.server.transcript_store import TranscriptStore, is_valid_match_id
 
@@ -86,15 +86,18 @@ def _error_response(status: int, code: str, message: str, details: Any = None) -
 
 
 def _client_ip(request: Request) -> str:
-    """Best-effort source address for rate-limit bucketing.
+    """Source address for rate-limit bucketing; see ``client_address``.
 
-    Behind a reverse proxy (the documented deployment shape) this is the proxy
-    unless it is configured to forward the peer address; v1 does not trust
-    ``X-Forwarded-For`` because nothing authenticates it.
+    ``X-Forwarded-For`` is never trusted on its own: only the one header the
+    operator names (``--client-ip-header``), set by their own proxy.
     """
 
     client = request.client
-    return client.host if client is not None else "unknown"
+    return client_address(
+        request.headers,
+        client.host if client is not None else None,
+        getattr(request.app.state, "client_ip_header", None),
+    )
 
 
 def _validate_range(value: int, lo: int, hi: int, field_name: str) -> None:

@@ -62,6 +62,7 @@ def create_app(
     rate_limiter: RateLimiter | None = None,
     max_turns_per_match: int | None = None,
     transcript_store: TranscriptStore | None = None,
+    client_ip_header: str | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -83,6 +84,10 @@ def create_app(
         Where ended matches' public transcripts are kept (Phase 40). Defaults to
         a bounded in-memory store; ``python -m arena.server`` can pass a file or
         SQLite store for durability. The app closes it on shutdown.
+    client_ip_header:
+        A request header carrying the client address, set by a trusted reverse
+        proxy (``Fly-Client-IP``). Rate limits bucket by it instead of the TCP
+        peer. Leave unset unless the proxy is the only way in.
     """
 
     if game_registry is None:
@@ -103,6 +108,7 @@ def create_app(
 
     app = FastAPI(title="AgentsArena", version="0.1.0", lifespan=lifespan)
     app.state.transcript_store = store
+    app.state.client_ip_header = client_ip_header or None
 
     limiter = rate_limiter if rate_limiter is not None else RateLimiter()
 

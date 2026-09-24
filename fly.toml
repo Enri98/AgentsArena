@@ -12,6 +12,18 @@ primary_region = "fra"
 
 [build]
 
+[env]
+  # Fly's proxy sets this to the real client address. Without it every client
+  # shares the proxy's address, and the per-IP rate limits become server-wide.
+  ARENA_CLIENT_IP_HEADER = "Fly-Client-IP"
+  # Durable public transcripts: create the volume first (docs/DEPLOYMENT.md,
+  # "Persistent public transcripts"), then uncomment this and [mounts].
+  # ARENA_TRANSCRIPT_STORE = "sqlite:/data/transcripts.sqlite3"
+
+# [mounts]
+#   source = "arena_data"
+#   destination = "/data"
+
 [http_service]
   internal_port = 8080
   force_https = true

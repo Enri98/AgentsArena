@@ -16,6 +16,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
+from typing import Any
 
 # ── Protocol §13 caps (v1, hardcoded) ──────────────────────────────────────
 
@@ -61,6 +62,25 @@ class RateLimitExceeded(Exception):
         super().__init__(message)
         self.scope = scope
         self.message = message
+
+
+def client_address(headers: Any, peer_host: str | None, trusted_header: str | None) -> str:
+    """The address rate limits bucket a request under.
+
+    The TCP peer, unless the server is configured to trust a header its reverse
+    proxy sets (Fly.io's ``Fly-Client-IP``). Behind a proxy the peer is the
+    proxy, so every client would share one bucket: eight WebSocket connections
+    and five match creations a minute for the whole server. The header is
+    trusted as is, so it is only configured when the proxy is the sole way in.
+    """
+
+    if trusted_header:
+        value = headers.get(trusted_header)
+        if value:
+            first = value.split(",")[0].strip()
+            if first:
+                return first[:64]
+    return peer_host or "unknown"
 
 
 def _prune(window: deque[float], now: float, span: float) -> None:
@@ -323,4 +343,5 @@ __all__: Sequence[str] = [
     "MAX_WS_OPENS_PER_IP_PER_MIN",
     "RateLimitExceeded",
     "RateLimiter",
+    "client_address",
 ]

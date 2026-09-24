@@ -234,6 +234,71 @@ flyctl apps list
 
 ---
 
+## Persistent public transcripts (optional)
+
+Every ended match's public transcript is served at
+`GET /matches/{match_id}/public-transcript`: exactly what a spectator saw, with no hidden
+information (see `docs/NETWORK_PROTOCOL.md` §4.1). By default the server keeps them in memory
+(at most 64 MiB), so they last until the machine restarts or stops. With
+`auto_stop_machines = "stop"`, that happens whenever the app is idle.
+
+To keep them across restarts, give the server a volume and a durable store.
+
+1. Create a 1 GB volume in the app's region:
+
+   ```powershell
+   flyctl volumes create arena_data --size 1 --region fra
+   ```
+
+2. Uncomment the `[mounts]` block and the `ARENA_TRANSCRIPT_STORE` line in `fly.toml`:
+
+   ```toml
+   [env]
+     ARENA_CLIENT_IP_HEADER = "Fly-Client-IP"
+     ARENA_TRANSCRIPT_STORE = "sqlite:/data/transcripts.sqlite3"
+
+   [mounts]
+     source = "arena_data"
+     destination = "/data"
+   ```
+
+3. Deploy (`flyctl deploy`). The server logs a `server_config` line at startup naming the store.
+   It runs as UID 1000. If it logs `transcript_store_failed` with a permission error, the
+   volume's root is owned by root. Fix that once:
+
+   ```powershell
+   flyctl ssh console -C "chown 1000:1000 /data"
+   ```
+
+`file:/data/transcripts` (one JSON file per match) works as well. SQLite is one file and is the
+better fit for a volume. Either way, the store belongs to **one** server process. Do not
+point two machines at the same volume or database.
+
+### Server settings
+
+Every setting is a flag of `python -m arena.server` and an environment variable; the flag wins.
+
+| Variable | Flag | Default | Meaning |
+|----------|------|---------|---------|
+| `ARENA_TRANSCRIPT_STORE` | `--transcript-store` | `memory` | `memory`, `file:DIR`, or `sqlite:PATH` |
+| `ARENA_TRANSCRIPT_TTL_S` | `--transcript-ttl-s` | `604800` (7 days) | Seconds a transcript is kept after its match ends |
+| `ARENA_TRANSCRIPT_MAX_ENTRIES` | `--transcript-max-entries` | `10000` | Most transcripts kept; the oldest go first |
+| `ARENA_TRANSCRIPT_MAX_BYTES` | `--transcript-max-bytes` | 1 GiB (64 MiB for `memory`) | Most bytes of transcripts kept; the oldest go first |
+| `ARENA_CLIENT_IP_HEADER` | `--client-ip-header` | unset | Header with the client address, set by your proxy |
+
+Retention is enforced on every read, so an expired transcript returns `404` at once. The byte cap
+is what stops a client that plays many long matches from filling the volume. One transcript
+at the server's 5000-turn cap is about 2 MB.
+
+**`ARENA_CLIENT_IP_HEADER` matters behind any proxy.** Rate limits (§13 of the protocol) are
+per client address, and behind Fly's proxy every connection comes from the proxy. Without the
+header, the per-IP caps become caps for the whole server: 8 WebSocket connections (four
+matches) and 5 match creations a minute. `fly.toml` sets it to `Fly-Client-IP`, which Fly's
+proxy always sets. Set it only when the proxy is the sole way to reach the server: the
+server trusts the header as is.
+
+---
+
 ## Cost notes
 
 Fly.io's free allowance and pricing change over time. Always check current terms before deploying: <https://fly.io/docs/about/pricing/>
@@ -316,8 +381,15 @@ arena.example.com {
 docker run -d --restart unless-stopped \
     --name arena-server \
     -p 127.0.0.1:8080:8080 \
+    -v arena-data:/data \
+    -e ARENA_TRANSCRIPT_STORE=sqlite:/data/transcripts.sqlite3 \
+    -e ARENA_CLIENT_IP_HEADER=X-Forwarded-For \
     arena-server
 ```
+
+The port is published on `127.0.0.1` only, so Caddy is the sole way in. That is what makes
+trusting `X-Forwarded-For` safe: Caddy replaces the header with the real client address and
+ignores whatever the client sent.
 
 Restart Caddy to pick up the new config:
 
@@ -341,4 +413,4 @@ When you run `flyctl deploy` (or `docker build`), the following is included in t
 | `src/arena/` | All arena packages (core, games, match, runtime, server, sdk, etc.) |
 | `pyproject.toml` | Package metadata and dependency declaration |
 
-**The server is stateless.** Matches live in memory inside the running process. Restarting the server (e.g. via `flyctl deploy` or a machine restart) drops all in-flight matches. Clients will receive a disconnect and need to create a new match. Transcript persistence by the server is not in scope for v1.
+**Matches are not persisted.** Matches live in memory inside the running process. Restarting the server (e.g. via `flyctl deploy` or a machine restart) drops all in-flight matches, and clients need to create a new match. Only the public transcripts of *ended* matches outlive a restart, and only with a durable store (see [Persistent public transcripts](#persistent-public-transcripts-optional)).
