@@ -223,7 +223,7 @@ def test_repeated_spectator_attaches_reuse_the_serialised_welcome(
     app = create_app(rate_limiter=RateLimiter.unlimited())
     spectator_hello = (
         '{"type": "spectator_hello", "schema_version": 3, "payload": '
-        '{"client_name": "t", "client_version": "0", "supported_schema_versions": [3]}}'
+        '{"client_name": "t", "client_version": "0", "supported_schema_versions": [4]}}'
     )
     with TestClient(app) as client:
         match_id = client.post("/matches", json=_MATCH).json()["match_id"]

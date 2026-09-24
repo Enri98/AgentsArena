@@ -45,7 +45,7 @@ def _create_match(http_base: str, dice: int, faces: int, deadline_ms: int) -> di
         # take turns on one Ollama and each move reloads one.
         "per_turn_deadline_ms": deadline_ms,
         # Fail at creation, not at hello, if this server cannot serve hidden info.
-        "supported_schema_versions": [3],
+        "supported_schema_versions": [4],
     }
     resp = httpx.post(f"{http_base}/matches", json=body, timeout=30.0)
     resp.raise_for_status()
@@ -65,7 +65,7 @@ async def _spectate(url: str) -> list[dict[str, Any]]:
                     "payload": {
                         "client_name": "liarsdice-demo",
                         "client_version": "0.1.0",
-                        "supported_schema_versions": [3],
+                        "supported_schema_versions": [4],
                     },
                 }
             )

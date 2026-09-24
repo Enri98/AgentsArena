@@ -14,6 +14,7 @@ def register_builtin_games(registry: GameRegistry) -> None:
     from arena.games.liarsdice.definition import register_liarsdice
     from arena.games.nim.definition import register_nim
     from arena.games.pig.definition import register_pig
+    from arena.games.rps.definition import register_rps
     from arena.games.tictactoe.definition import register_tictactoe
 
     register_connect4(registry)
@@ -21,6 +22,7 @@ def register_builtin_games(registry: GameRegistry) -> None:
     register_nim(registry)
     register_pig(registry)
     register_liarsdice(registry)
+    register_rps(registry)
 
 
 def build_default_registry() -> GameRegistry:
@@ -37,6 +39,7 @@ __all__: Sequence[str] = [
     "liarsdice",
     "nim",
     "pig",
+    "rps",
     "tictactoe",
     "register_builtin_games",
 ]

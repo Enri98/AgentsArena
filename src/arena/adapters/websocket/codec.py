@@ -35,11 +35,16 @@ from arena.adapters.websocket.errors import SchemaVersionMismatch, WireDecodeErr
 # turn_committed carries each recipient's own view plus public_snapshot, events
 # and chance outcomes are filtered per viewer, transcripts declare their view,
 # and welcome carries the seat's config view and, on reconnect, its transcript.
-WIRE_SCHEMA_VERSION = 3
+#
+# Bumped to 4 in Phase 41: simultaneous moves. observation_request can be
+# outstanding to several seats at once, and a committed turn can be a joint
+# turn (an `actions` map, no single seat or action) in turn_committed and in
+# every transcript.
+WIRE_SCHEMA_VERSION = 4
 
 #: Versions this build can decode. Older clients' messages are still valid, so
 #: there is no reason to refuse to read them.
-SUPPORTED_WIRE_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3)
+SUPPORTED_WIRE_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3, 4)
 
 
 def dumps(envelope: WireEnvelope) -> str:  # type: ignore[valid-type]

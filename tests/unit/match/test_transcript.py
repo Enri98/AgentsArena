@@ -215,10 +215,10 @@ def test_load_match_transcript_rejects_invalid_and_foreign_game_ids() -> None:
 def test_transcript_schema_bumped_for_views() -> None:
     """v2 (Phase 37): chance turns. v3 (Phase 38): a transcript declares its view,
     and a redacted one cannot be read as if it were full — a bump, not an
-    additive field.
+    additive field. v4 (Phase 41): joint turns carry an ``actions`` map.
     """
 
-    assert MATCH_TRANSCRIPT_SCHEMA_VERSION == 3
+    assert MATCH_TRANSCRIPT_SCHEMA_VERSION == 4
 
 
 def test_action_turns_are_labelled_and_complete() -> None:

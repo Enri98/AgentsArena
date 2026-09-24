@@ -42,7 +42,7 @@ def _hello(seat: int, token: str | None = None) -> str:
             "payload": {
                 "client_name": "test",
                 "client_version": "0",
-                "supported_schema_versions": [3],
+                "supported_schema_versions": [4],
                 "auth": None,
                 "requested_seat": seat,
                 "resume_token": token,

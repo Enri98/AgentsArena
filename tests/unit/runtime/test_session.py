@@ -377,8 +377,8 @@ def test_runtime_payload_models_encode_fixed_schema_versions() -> None:
     status_schema = RuntimeSessionStatusPayload.model_json_schema()
     transcript_schema = RuntimeTranscriptPayload.model_json_schema()
 
-    assert status_schema["properties"]["schema_version"]["enum"] == [1, 2, 3]
-    assert transcript_schema["properties"]["schema_version"]["enum"] == [1, 2, 3]
+    assert status_schema["properties"]["schema_version"]["enum"] == [1, 2, 3, 4]
+    assert transcript_schema["properties"]["schema_version"]["enum"] == [1, 2, 3, 4]
 
 
 def test_runtime_transcript_validation_rejects_missing_runtime_event_scope() -> None:

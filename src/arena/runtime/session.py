@@ -7,13 +7,18 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Generic, TypeVar
 
-from arena.adapters.in_process import PayloadPolicy, apply_payload_policy_turn
+from arena.adapters.in_process import (
+    PayloadPolicy,
+    apply_payload_policy_joint_turn,
+    apply_payload_policy_turn,
+)
 from arena.core.actions import Action
 from arena.core.config import BaseGameConfig
 from arena.core.exceptions import ArenaCoreError
 from arena.core.game_definition import GameDefinition
 from arena.core.observations import Observation
 from arena.core.results import RuleResult
+from arena.core.simultaneous import acting_seats, is_joint_node
 from arena.core.types import Seat
 from arena.match.local_match import LocalMatch, start_match
 from arena.runtime.exceptions import RuntimeStateError
@@ -159,7 +164,8 @@ class Arena:
             raise RuntimeStateError("Running session has no local match.")
 
         local_match = session.local_match
-        seat = local_match.rules_engine.current_seat(local_match.state)
+        seats = acting_seats(local_match.rules_engine, local_match.state)
+        seat = seats[0] if seats else local_match.rules_engine.current_seat(local_match.state)
         requested_session = replace(
             session,
             events=session.events + (TurnRequested(match_id=session.match_id, seat=seat),),
@@ -240,8 +246,69 @@ class Arena:
         if local_match.rules_engine.is_terminal(local_match.state):
             return _finish_session(session)
 
+        if is_joint_node(local_match.rules_engine, local_match.state):
+            return self._step_joint(session)
         requested_session, seat = self.request_turn(session)
         return self.complete_turn(requested_session, seat)
+
+    def _step_joint(
+        self,
+        session: MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    ) -> MatchSession[ConfigT, StateT, ActionT, ObservationT, ResultT]:
+        """Resolve a joint node (Phase 41): every acting seat's policy decides.
+
+        One ``TurnRequested`` and, once the round is applied, one
+        ``TurnAccepted`` per acting seat, all naming the round's turn.
+        """
+
+        local_match = session.local_match
+        assert local_match is not None
+        seats = acting_seats(local_match.rules_engine, local_match.state)
+        requested = replace(
+            session,
+            events=session.events
+            + tuple(TurnRequested(match_id=session.match_id, seat=seat) for seat in seats),
+        )
+        missing = [seat for seat in seats if seat not in requested.policy_bindings]
+        if missing:
+            return _abort_session(
+                requested,
+                reason=AbortReason.MISSING_POLICY,
+                message=f"No policy is bound for acting seat {missing[0]}.",
+                cause=None,
+            )
+        try:
+            next_match = apply_payload_policy_joint_turn(
+                local_match,
+                {seat: requested.policy_bindings[seat] for seat in seats},
+            )
+        except ArenaCoreError as error:
+            return _abort_session(
+                requested,
+                reason=AbortReason.CORE_ERROR,
+                message="An acting policy returned an action rejected by the rules engine.",
+                cause=error,
+            )
+        except Exception as error:
+            return _abort_session(
+                requested,
+                reason=AbortReason.ADAPTER_ERROR,
+                message="An acting policy failed to produce a valid action response.",
+                cause=error,
+            )
+        turn_index = len(local_match.turns) + 1
+        accepted = replace(
+            requested,
+            local_match=next_match,
+            events=requested.events
+            + tuple(
+                TurnAccepted(match_id=session.match_id, seat=seat, turn_index=turn_index)
+                for seat in seats
+            ),
+        )
+        if next_match.rules_engine.is_terminal(next_match.state):
+            return _finish_session(accepted)
+        return accepted
 
     def run_session(
         self,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Protocol
 
+from arena.core.simultaneous import acting_seats
 from arena.core.types import Seat
 from arena.match.local_match import (
     ActionT,
@@ -14,6 +15,7 @@ from arena.match.local_match import (
     ResultT,
     StateT,
     apply_match_action,
+    apply_match_joint_action,
 )
 
 
@@ -28,9 +30,22 @@ def apply_policy_turn(
     match: LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT],
     policies: Mapping[Seat, Policy[ObservationT, ActionT]],
 ) -> LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT]:
-    """Ask the active seat's policy for an action and apply one turn."""
+    """Ask the acting seat's policy for an action and apply one turn.
 
-    seat = match.rules_engine.current_seat(match.state)
+    At a joint node (Phase 41) every acting seat is asked, each from its own
+    observation of the same state, and the round is applied at once.
+    """
+
+    seats = acting_seats(match.rules_engine, match.state)
+    if len(seats) > 1:
+        actions = {
+            seat: policies[seat].select_action(
+                match.rules_engine.observation(match.state, seat)
+            )
+            for seat in seats
+        }
+        return apply_match_joint_action(match, actions)
+    seat = seats[0] if seats else match.rules_engine.current_seat(match.state)
     policy = policies[seat]
     observation = match.rules_engine.observation(match.state, seat)
     action = policy.select_action(observation)

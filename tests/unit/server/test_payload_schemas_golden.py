@@ -1,6 +1,7 @@
 """GET /schemas/payloads is byte-stable within a wire version (protocol section 17).
 
-The golden file is the v3 output as first published (main at e28259e). Any
+The golden file for each version is its output as first published (v3: main at
+e28259e; v4: Phase 41). Any
 difference is either a bug or a change that needs a schema_version bump. It
 caught one: typing ``lifecycle`` as a Literal added an ``enum`` to five schemas.
 """

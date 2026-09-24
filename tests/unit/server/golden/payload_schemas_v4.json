@@ -1,0 +1,2636 @@
+{
+ "schema_version": 4,
+ "schemas": {
+  "AbortMetadataPayload": {
+   "additionalProperties": false,
+   "description": "JSON-safe runtime abort metadata.",
+   "properties": {
+    "cause_message": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Cause Message"
+    },
+    "cause_type": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Cause Type"
+    },
+    "message": {
+     "minLength": 1,
+     "title": "Message",
+     "type": "string"
+    },
+    "reason": {
+     "minLength": 1,
+     "title": "Reason",
+     "type": "string"
+    }
+   },
+   "required": [
+    "reason",
+    "message"
+   ],
+   "title": "RuntimeAbortPayload",
+   "type": "object"
+  },
+  "ActionResponsePayload": {
+   "$defs": {
+    "JsonValue": {}
+   },
+   "additionalProperties": false,
+   "description": "JSON-safe action response returned by an adapter-facing policy.",
+   "properties": {
+    "action": {
+     "additionalProperties": {
+      "$ref": "#/$defs/JsonValue"
+     },
+     "title": "Action",
+     "type": "object"
+    },
+    "game_id": {
+     "minLength": 1,
+     "title": "Game Id",
+     "type": "string"
+    },
+    "schema_version": {
+     "minimum": 1,
+     "title": "Schema Version",
+     "type": "integer"
+    },
+    "seat": {
+     "minimum": 0,
+     "title": "Seat",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "game_id",
+    "schema_version",
+    "seat",
+    "action"
+   ],
+   "title": "ActionResponsePayload",
+   "type": "object"
+  },
+  "DomainErrorPayload": {
+   "$defs": {
+    "JsonValue": {}
+   },
+   "additionalProperties": false,
+   "description": "JSON-safe representation of a simulation-domain error.",
+   "properties": {
+    "code": {
+     "minLength": 1,
+     "title": "Code",
+     "type": "string"
+    },
+    "details": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Details"
+    },
+    "message": {
+     "minLength": 1,
+     "title": "Message",
+     "type": "string"
+    }
+   },
+   "required": [
+    "code",
+    "message"
+   ],
+   "title": "DomainErrorPayload",
+   "type": "object"
+  },
+  "Envelope": {
+   "description": "Discriminated union of all WebSocket envelope message types.",
+   "oneOf": [
+    {
+     "$defs": {
+      "HelloBody": {
+       "properties": {
+        "auth": {
+         "default": null,
+         "title": "Auth"
+        },
+        "client_name": {
+         "minLength": 1,
+         "title": "Client Name",
+         "type": "string"
+        },
+        "client_version": {
+         "minLength": 1,
+         "title": "Client Version",
+         "type": "string"
+        },
+        "requested_seat": {
+         "minimum": 0,
+         "title": "Requested Seat",
+         "type": "integer"
+        },
+        "resume_token": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Resume Token"
+        },
+        "supported_schema_versions": {
+         "items": {
+          "type": "integer"
+         },
+         "minItems": 1,
+         "title": "Supported Schema Versions",
+         "type": "array"
+        }
+       },
+       "required": [
+        "client_name",
+        "client_version",
+        "supported_schema_versions",
+        "requested_seat"
+       ],
+       "title": "HelloBody",
+       "type": "object"
+      }
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/HelloBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "hello",
+       "default": "hello",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "HelloEnvelope",
+     "type": "object"
+    },
+    {
+     "$defs": {
+      "JsonValue": {},
+      "PlayerInfoBody": {
+       "description": "Minimal player identity used inside welcome and match_state bodies.",
+       "properties": {
+        "label": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Label"
+        },
+        "player_id": {
+         "minLength": 1,
+         "title": "Player Id",
+         "type": "string"
+        },
+        "seat": {
+         "minimum": 0,
+         "title": "Seat",
+         "type": "integer"
+        }
+       },
+       "required": [
+        "player_id",
+        "seat"
+       ],
+       "title": "PlayerInfoBody",
+       "type": "object"
+      },
+      "RuntimeAbortPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime abort metadata.",
+       "properties": {
+        "cause_message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Cause Message"
+        },
+        "cause_type": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Cause Type"
+        },
+        "message": {
+         "minLength": 1,
+         "title": "Message",
+         "type": "string"
+        },
+        "reason": {
+         "minLength": 1,
+         "title": "Reason",
+         "type": "string"
+        }
+       },
+       "required": [
+        "reason",
+        "message"
+       ],
+       "title": "RuntimeAbortPayload",
+       "type": "object"
+      },
+      "RuntimeEventPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime event record.",
+       "properties": {
+        "event_scope": {
+         "const": "runtime",
+         "title": "Event Scope",
+         "type": "string"
+        },
+        "event_type": {
+         "minLength": 1,
+         "title": "Event Type",
+         "type": "string"
+        },
+        "payload": {
+         "additionalProperties": {
+          "$ref": "#/$defs/JsonValue"
+         },
+         "title": "Payload",
+         "type": "object"
+        }
+       },
+       "required": [
+        "event_scope",
+        "event_type"
+       ],
+       "title": "RuntimeEventPayload",
+       "type": "object"
+      },
+      "RuntimePlayerPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime player and seat assignment.",
+       "properties": {
+        "label": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Label"
+        },
+        "player_id": {
+         "minLength": 1,
+         "title": "Player Id",
+         "type": "string"
+        },
+        "seat": {
+         "minimum": 0,
+         "title": "Seat",
+         "type": "integer"
+        }
+       },
+       "required": [
+        "player_id",
+        "seat"
+       ],
+       "title": "RuntimePlayerPayload",
+       "type": "object"
+      },
+      "RuntimeTranscriptPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime transcript envelope around a local match transcript.",
+       "properties": {
+        "abort": {
+         "anyOf": [
+          {
+           "$ref": "#/$defs/RuntimeAbortPayload"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "events": {
+         "items": {
+          "$ref": "#/$defs/RuntimeEventPayload"
+         },
+         "title": "Events",
+         "type": "array"
+        },
+        "game_id": {
+         "minLength": 1,
+         "title": "Game Id",
+         "type": "string"
+        },
+        "lifecycle": {
+         "minLength": 1,
+         "title": "Lifecycle",
+         "type": "string"
+        },
+        "match_id": {
+         "minLength": 1,
+         "title": "Match Id",
+         "type": "string"
+        },
+        "match_transcript": {
+         "anyOf": [
+          {
+           "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+           },
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "title": "Match Transcript"
+        },
+        "players": {
+         "items": {
+          "$ref": "#/$defs/RuntimePlayerPayload"
+         },
+         "title": "Players",
+         "type": "array"
+        },
+        "schema_version": {
+         "enum": [
+          1,
+          2,
+          3,
+          4
+         ],
+         "title": "Schema Version",
+         "type": "integer"
+        },
+        "view": {
+         "default": "full",
+         "enum": [
+          "full",
+          "seat",
+          "public"
+         ],
+         "title": "View",
+         "type": "string"
+        },
+        "viewer_seat": {
+         "anyOf": [
+          {
+           "type": "integer"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Viewer Seat"
+        }
+       },
+       "required": [
+        "match_id",
+        "game_id",
+        "schema_version",
+        "lifecycle",
+        "players",
+        "events",
+        "abort",
+        "match_transcript"
+       ],
+       "title": "RuntimeTranscriptPayload",
+       "type": "object"
+      },
+      "WelcomeBody": {
+       "properties": {
+        "disconnect_grace_ms": {
+         "minimum": 0,
+         "title": "Disconnect Grace Ms",
+         "type": "integer"
+        },
+        "game_id": {
+         "minLength": 1,
+         "title": "Game Id",
+         "type": "string"
+        },
+        "game_schema_version": {
+         "minimum": 1,
+         "title": "Game Schema Version",
+         "type": "integer"
+        },
+        "lifecycle": {
+         "minLength": 1,
+         "title": "Lifecycle",
+         "type": "string"
+        },
+        "match_config": {
+         "additionalProperties": true,
+         "title": "Match Config",
+         "type": "object"
+        },
+        "match_id": {
+         "minLength": 1,
+         "title": "Match Id",
+         "type": "string"
+        },
+        "negotiated_schema_version": {
+         "minimum": 1,
+         "title": "Negotiated Schema Version",
+         "type": "integer"
+        },
+        "per_action_retry_budget": {
+         "minimum": 0,
+         "title": "Per Action Retry Budget",
+         "type": "integer"
+        },
+        "per_turn_deadline_ms": {
+         "minimum": 0,
+         "title": "Per Turn Deadline Ms",
+         "type": "integer"
+        },
+        "players": {
+         "items": {
+          "$ref": "#/$defs/PlayerInfoBody"
+         },
+         "title": "Players",
+         "type": "array"
+        },
+        "resume_token": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Resume Token"
+        },
+        "schema_version": {
+         "minimum": 1,
+         "title": "Schema Version",
+         "type": "integer"
+        },
+        "seat": {
+         "minimum": 0,
+         "title": "Seat",
+         "type": "integer"
+        },
+        "transcript": {
+         "anyOf": [
+          {
+           "$ref": "#/$defs/RuntimeTranscriptPayload"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null
+        }
+       },
+       "required": [
+        "match_id",
+        "game_id",
+        "game_schema_version",
+        "seat",
+        "lifecycle",
+        "schema_version",
+        "negotiated_schema_version",
+        "per_turn_deadline_ms",
+        "per_action_retry_budget",
+        "disconnect_grace_ms",
+        "players"
+       ],
+       "title": "WelcomeBody",
+       "type": "object"
+      }
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/WelcomeBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "welcome",
+       "default": "welcome",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "WelcomeEnvelope",
+     "type": "object"
+    },
+    {
+     "$defs": {
+      "MatchStateBody": {
+       "properties": {
+        "abort": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Abort"
+        },
+        "current_seat": {
+         "anyOf": [
+          {
+           "type": "integer"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Current Seat"
+        },
+        "lifecycle": {
+         "minLength": 1,
+         "title": "Lifecycle",
+         "type": "string"
+        },
+        "result": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Result"
+        },
+        "turn_count": {
+         "minimum": 0,
+         "title": "Turn Count",
+         "type": "integer"
+        }
+       },
+       "required": [
+        "lifecycle",
+        "turn_count"
+       ],
+       "title": "MatchStateBody",
+       "type": "object"
+      }
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/MatchStateBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "match_state",
+       "default": "match_state",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "MatchStateEnvelope",
+     "type": "object"
+    },
+    {
+     "$defs": {
+      "JsonValue": {},
+      "ObservationRequestBody": {
+       "properties": {
+        "deadline_ms": {
+         "minimum": 0,
+         "title": "Deadline Ms",
+         "type": "integer"
+        },
+        "observation_request": {
+         "$ref": "#/$defs/ObservationRequestPayload"
+        }
+       },
+       "required": [
+        "observation_request",
+        "deadline_ms"
+       ],
+       "title": "ObservationRequestBody",
+       "type": "object"
+      },
+      "ObservationRequestPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe observation request for an adapter-facing policy.",
+       "properties": {
+        "game_id": {
+         "minLength": 1,
+         "title": "Game Id",
+         "type": "string"
+        },
+        "observation": {
+         "additionalProperties": {
+          "$ref": "#/$defs/JsonValue"
+         },
+         "title": "Observation",
+         "type": "object"
+        },
+        "schema_version": {
+         "minimum": 1,
+         "title": "Schema Version",
+         "type": "integer"
+        },
+        "seat": {
+         "minimum": 0,
+         "title": "Seat",
+         "type": "integer"
+        }
+       },
+       "required": [
+        "game_id",
+        "schema_version",
+        "seat",
+        "observation"
+       ],
+       "title": "ObservationRequestPayload",
+       "type": "object"
+      }
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/ObservationRequestBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "observation_request",
+       "default": "observation_request",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "ObservationRequestEnvelope",
+     "type": "object"
+    },
+    {
+     "$defs": {
+      "ActionResponseBody": {
+       "properties": {
+        "action_response": {
+         "$ref": "#/$defs/ActionResponsePayload"
+        }
+       },
+       "required": [
+        "action_response"
+       ],
+       "title": "ActionResponseBody",
+       "type": "object"
+      },
+      "ActionResponsePayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe action response returned by an adapter-facing policy.",
+       "properties": {
+        "action": {
+         "additionalProperties": {
+          "$ref": "#/$defs/JsonValue"
+         },
+         "title": "Action",
+         "type": "object"
+        },
+        "game_id": {
+         "minLength": 1,
+         "title": "Game Id",
+         "type": "string"
+        },
+        "schema_version": {
+         "minimum": 1,
+         "title": "Schema Version",
+         "type": "integer"
+        },
+        "seat": {
+         "minimum": 0,
+         "title": "Seat",
+         "type": "integer"
+        }
+       },
+       "required": [
+        "game_id",
+        "schema_version",
+        "seat",
+        "action"
+       ],
+       "title": "ActionResponsePayload",
+       "type": "object"
+      },
+      "JsonValue": {}
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/ActionResponseBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "action_response",
+       "default": "action_response",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "ActionResponseEnvelope",
+     "type": "object"
+    },
+    {
+     "$defs": {
+      "ActionRejectedBody": {
+       "properties": {
+        "error": {
+         "$ref": "#/$defs/DomainErrorPayload"
+        },
+        "retries_remaining": {
+         "minimum": 0,
+         "title": "Retries Remaining",
+         "type": "integer"
+        },
+        "turn_id": {
+         "minLength": 1,
+         "title": "Turn Id",
+         "type": "string"
+        }
+       },
+       "required": [
+        "turn_id",
+        "error",
+        "retries_remaining"
+       ],
+       "title": "ActionRejectedBody",
+       "type": "object"
+      },
+      "DomainErrorPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe representation of a simulation-domain error.",
+       "properties": {
+        "code": {
+         "minLength": 1,
+         "title": "Code",
+         "type": "string"
+        },
+        "details": {
+         "anyOf": [
+          {
+           "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+           },
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Details"
+        },
+        "message": {
+         "minLength": 1,
+         "title": "Message",
+         "type": "string"
+        }
+       },
+       "required": [
+        "code",
+        "message"
+       ],
+       "title": "DomainErrorPayload",
+       "type": "object"
+      },
+      "JsonValue": {}
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/ActionRejectedBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "action_rejected",
+       "default": "action_rejected",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "ActionRejectedEnvelope",
+     "type": "object"
+    },
+    {
+     "$defs": {
+      "TurnCommittedBody": {
+       "description": "Body for turn_committed; turn_record, post_snapshot, events are game-specific JSON.",
+       "properties": {
+        "events": {
+         "items": {
+          "additionalProperties": true,
+          "type": "object"
+         },
+         "title": "Events",
+         "type": "array"
+        },
+        "post_snapshot": {
+         "additionalProperties": true,
+         "title": "Post Snapshot",
+         "type": "object"
+        },
+        "public_snapshot": {
+         "anyOf": [
+          {
+           "additionalProperties": true,
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Public Snapshot"
+        },
+        "turn_record": {
+         "additionalProperties": true,
+         "title": "Turn Record",
+         "type": "object"
+        }
+       },
+       "required": [
+        "turn_record",
+        "post_snapshot"
+       ],
+       "title": "TurnCommittedBody",
+       "type": "object"
+      }
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/TurnCommittedBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "turn_committed",
+       "default": "turn_committed",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "TurnCommittedEnvelope",
+     "type": "object"
+    },
+    {
+     "$defs": {
+      "JsonValue": {},
+      "MatchFinishedBody": {
+       "properties": {
+        "result": {
+         "additionalProperties": true,
+         "title": "Result",
+         "type": "object"
+        },
+        "transcript": {
+         "$ref": "#/$defs/RuntimeTranscriptPayload"
+        }
+       },
+       "required": [
+        "result",
+        "transcript"
+       ],
+       "title": "MatchFinishedBody",
+       "type": "object"
+      },
+      "RuntimeAbortPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime abort metadata.",
+       "properties": {
+        "cause_message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Cause Message"
+        },
+        "cause_type": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Cause Type"
+        },
+        "message": {
+         "minLength": 1,
+         "title": "Message",
+         "type": "string"
+        },
+        "reason": {
+         "minLength": 1,
+         "title": "Reason",
+         "type": "string"
+        }
+       },
+       "required": [
+        "reason",
+        "message"
+       ],
+       "title": "RuntimeAbortPayload",
+       "type": "object"
+      },
+      "RuntimeEventPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime event record.",
+       "properties": {
+        "event_scope": {
+         "const": "runtime",
+         "title": "Event Scope",
+         "type": "string"
+        },
+        "event_type": {
+         "minLength": 1,
+         "title": "Event Type",
+         "type": "string"
+        },
+        "payload": {
+         "additionalProperties": {
+          "$ref": "#/$defs/JsonValue"
+         },
+         "title": "Payload",
+         "type": "object"
+        }
+       },
+       "required": [
+        "event_scope",
+        "event_type"
+       ],
+       "title": "RuntimeEventPayload",
+       "type": "object"
+      },
+      "RuntimePlayerPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime player and seat assignment.",
+       "properties": {
+        "label": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Label"
+        },
+        "player_id": {
+         "minLength": 1,
+         "title": "Player Id",
+         "type": "string"
+        },
+        "seat": {
+         "minimum": 0,
+         "title": "Seat",
+         "type": "integer"
+        }
+       },
+       "required": [
+        "player_id",
+        "seat"
+       ],
+       "title": "RuntimePlayerPayload",
+       "type": "object"
+      },
+      "RuntimeTranscriptPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime transcript envelope around a local match transcript.",
+       "properties": {
+        "abort": {
+         "anyOf": [
+          {
+           "$ref": "#/$defs/RuntimeAbortPayload"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "events": {
+         "items": {
+          "$ref": "#/$defs/RuntimeEventPayload"
+         },
+         "title": "Events",
+         "type": "array"
+        },
+        "game_id": {
+         "minLength": 1,
+         "title": "Game Id",
+         "type": "string"
+        },
+        "lifecycle": {
+         "minLength": 1,
+         "title": "Lifecycle",
+         "type": "string"
+        },
+        "match_id": {
+         "minLength": 1,
+         "title": "Match Id",
+         "type": "string"
+        },
+        "match_transcript": {
+         "anyOf": [
+          {
+           "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+           },
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "title": "Match Transcript"
+        },
+        "players": {
+         "items": {
+          "$ref": "#/$defs/RuntimePlayerPayload"
+         },
+         "title": "Players",
+         "type": "array"
+        },
+        "schema_version": {
+         "enum": [
+          1,
+          2,
+          3,
+          4
+         ],
+         "title": "Schema Version",
+         "type": "integer"
+        },
+        "view": {
+         "default": "full",
+         "enum": [
+          "full",
+          "seat",
+          "public"
+         ],
+         "title": "View",
+         "type": "string"
+        },
+        "viewer_seat": {
+         "anyOf": [
+          {
+           "type": "integer"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Viewer Seat"
+        }
+       },
+       "required": [
+        "match_id",
+        "game_id",
+        "schema_version",
+        "lifecycle",
+        "players",
+        "events",
+        "abort",
+        "match_transcript"
+       ],
+       "title": "RuntimeTranscriptPayload",
+       "type": "object"
+      }
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/MatchFinishedBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "match_finished",
+       "default": "match_finished",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "MatchFinishedEnvelope",
+     "type": "object"
+    },
+    {
+     "$defs": {
+      "JsonValue": {},
+      "MatchAbortedBody": {
+       "properties": {
+        "abort": {
+         "$ref": "#/$defs/RuntimeAbortPayload"
+        },
+        "transcript": {
+         "$ref": "#/$defs/RuntimeTranscriptPayload"
+        }
+       },
+       "required": [
+        "abort",
+        "transcript"
+       ],
+       "title": "MatchAbortedBody",
+       "type": "object"
+      },
+      "RuntimeAbortPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime abort metadata.",
+       "properties": {
+        "cause_message": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Cause Message"
+        },
+        "cause_type": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Cause Type"
+        },
+        "message": {
+         "minLength": 1,
+         "title": "Message",
+         "type": "string"
+        },
+        "reason": {
+         "minLength": 1,
+         "title": "Reason",
+         "type": "string"
+        }
+       },
+       "required": [
+        "reason",
+        "message"
+       ],
+       "title": "RuntimeAbortPayload",
+       "type": "object"
+      },
+      "RuntimeEventPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime event record.",
+       "properties": {
+        "event_scope": {
+         "const": "runtime",
+         "title": "Event Scope",
+         "type": "string"
+        },
+        "event_type": {
+         "minLength": 1,
+         "title": "Event Type",
+         "type": "string"
+        },
+        "payload": {
+         "additionalProperties": {
+          "$ref": "#/$defs/JsonValue"
+         },
+         "title": "Payload",
+         "type": "object"
+        }
+       },
+       "required": [
+        "event_scope",
+        "event_type"
+       ],
+       "title": "RuntimeEventPayload",
+       "type": "object"
+      },
+      "RuntimePlayerPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime player and seat assignment.",
+       "properties": {
+        "label": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Label"
+        },
+        "player_id": {
+         "minLength": 1,
+         "title": "Player Id",
+         "type": "string"
+        },
+        "seat": {
+         "minimum": 0,
+         "title": "Seat",
+         "type": "integer"
+        }
+       },
+       "required": [
+        "player_id",
+        "seat"
+       ],
+       "title": "RuntimePlayerPayload",
+       "type": "object"
+      },
+      "RuntimeTranscriptPayload": {
+       "additionalProperties": false,
+       "description": "JSON-safe runtime transcript envelope around a local match transcript.",
+       "properties": {
+        "abort": {
+         "anyOf": [
+          {
+           "$ref": "#/$defs/RuntimeAbortPayload"
+          },
+          {
+           "type": "null"
+          }
+         ]
+        },
+        "events": {
+         "items": {
+          "$ref": "#/$defs/RuntimeEventPayload"
+         },
+         "title": "Events",
+         "type": "array"
+        },
+        "game_id": {
+         "minLength": 1,
+         "title": "Game Id",
+         "type": "string"
+        },
+        "lifecycle": {
+         "minLength": 1,
+         "title": "Lifecycle",
+         "type": "string"
+        },
+        "match_id": {
+         "minLength": 1,
+         "title": "Match Id",
+         "type": "string"
+        },
+        "match_transcript": {
+         "anyOf": [
+          {
+           "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+           },
+           "type": "object"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "title": "Match Transcript"
+        },
+        "players": {
+         "items": {
+          "$ref": "#/$defs/RuntimePlayerPayload"
+         },
+         "title": "Players",
+         "type": "array"
+        },
+        "schema_version": {
+         "enum": [
+          1,
+          2,
+          3,
+          4
+         ],
+         "title": "Schema Version",
+         "type": "integer"
+        },
+        "view": {
+         "default": "full",
+         "enum": [
+          "full",
+          "seat",
+          "public"
+         ],
+         "title": "View",
+         "type": "string"
+        },
+        "viewer_seat": {
+         "anyOf": [
+          {
+           "type": "integer"
+          },
+          {
+           "type": "null"
+          }
+         ],
+         "default": null,
+         "title": "Viewer Seat"
+        }
+       },
+       "required": [
+        "match_id",
+        "game_id",
+        "schema_version",
+        "lifecycle",
+        "players",
+        "events",
+        "abort",
+        "match_transcript"
+       ],
+       "title": "RuntimeTranscriptPayload",
+       "type": "object"
+      }
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/MatchAbortedBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "match_aborted",
+       "default": "match_aborted",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "MatchAbortedEnvelope",
+     "type": "object"
+    },
+    {
+     "$defs": {
+      "PingBody": {
+       "properties": {
+        "nonce": {
+         "minLength": 1,
+         "title": "Nonce",
+         "type": "string"
+        }
+       },
+       "required": [
+        "nonce"
+       ],
+       "title": "PingBody",
+       "type": "object"
+      }
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/PingBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "ping",
+       "default": "ping",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "PingEnvelope",
+     "type": "object"
+    },
+    {
+     "$defs": {
+      "PongBody": {
+       "properties": {
+        "nonce": {
+         "minLength": 1,
+         "title": "Nonce",
+         "type": "string"
+        }
+       },
+       "required": [
+        "nonce"
+       ],
+       "title": "PongBody",
+       "type": "object"
+      }
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/PongBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "pong",
+       "default": "pong",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "PongEnvelope",
+     "type": "object"
+    },
+    {
+     "$defs": {
+      "ErrorBody": {
+       "properties": {
+        "code": {
+         "minLength": 1,
+         "title": "Code",
+         "type": "string"
+        },
+        "message": {
+         "minLength": 1,
+         "title": "Message",
+         "type": "string"
+        }
+       },
+       "required": [
+        "code",
+        "message"
+       ],
+       "title": "ErrorBody",
+       "type": "object"
+      }
+     },
+     "properties": {
+      "match_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Match Id"
+      },
+      "payload": {
+       "$ref": "#/$defs/ErrorBody"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "seat": {
+       "anyOf": [
+        {
+         "type": "integer"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Seat"
+      },
+      "turn_id": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Turn Id"
+      },
+      "type": {
+       "const": "error",
+       "default": "error",
+       "title": "Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "schema_version",
+      "payload"
+     ],
+     "title": "ErrorEnvelope",
+     "type": "object"
+    }
+   ]
+  },
+  "ObservationRequestPayload": {
+   "$defs": {
+    "JsonValue": {}
+   },
+   "additionalProperties": false,
+   "description": "JSON-safe observation request for an adapter-facing policy.",
+   "properties": {
+    "game_id": {
+     "minLength": 1,
+     "title": "Game Id",
+     "type": "string"
+    },
+    "observation": {
+     "additionalProperties": {
+      "$ref": "#/$defs/JsonValue"
+     },
+     "title": "Observation",
+     "type": "object"
+    },
+    "schema_version": {
+     "minimum": 1,
+     "title": "Schema Version",
+     "type": "integer"
+    },
+    "seat": {
+     "minimum": 0,
+     "title": "Seat",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "game_id",
+    "schema_version",
+    "seat",
+    "observation"
+   ],
+   "title": "ObservationRequestPayload",
+   "type": "object"
+  },
+  "PlayerRecordPayload": {
+   "additionalProperties": false,
+   "description": "JSON-safe runtime player and seat assignment.",
+   "properties": {
+    "label": {
+     "anyOf": [
+      {
+       "type": "string"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Label"
+    },
+    "player_id": {
+     "minLength": 1,
+     "title": "Player Id",
+     "type": "string"
+    },
+    "seat": {
+     "minimum": 0,
+     "title": "Seat",
+     "type": "integer"
+    }
+   },
+   "required": [
+    "player_id",
+    "seat"
+   ],
+   "title": "RuntimePlayerPayload",
+   "type": "object"
+  },
+  "RuntimeEventPayload": {
+   "$defs": {
+    "JsonValue": {}
+   },
+   "additionalProperties": false,
+   "description": "JSON-safe runtime event record.",
+   "properties": {
+    "event_scope": {
+     "const": "runtime",
+     "title": "Event Scope",
+     "type": "string"
+    },
+    "event_type": {
+     "minLength": 1,
+     "title": "Event Type",
+     "type": "string"
+    },
+    "payload": {
+     "additionalProperties": {
+      "$ref": "#/$defs/JsonValue"
+     },
+     "title": "Payload",
+     "type": "object"
+    }
+   },
+   "required": [
+    "event_scope",
+    "event_type"
+   ],
+   "title": "RuntimeEventPayload",
+   "type": "object"
+  },
+  "RuntimeTranscriptPayload": {
+   "$defs": {
+    "JsonValue": {},
+    "RuntimeAbortPayload": {
+     "additionalProperties": false,
+     "description": "JSON-safe runtime abort metadata.",
+     "properties": {
+      "cause_message": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Cause Message"
+      },
+      "cause_type": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Cause Type"
+      },
+      "message": {
+       "minLength": 1,
+       "title": "Message",
+       "type": "string"
+      },
+      "reason": {
+       "minLength": 1,
+       "title": "Reason",
+       "type": "string"
+      }
+     },
+     "required": [
+      "reason",
+      "message"
+     ],
+     "title": "RuntimeAbortPayload",
+     "type": "object"
+    },
+    "RuntimeEventPayload": {
+     "additionalProperties": false,
+     "description": "JSON-safe runtime event record.",
+     "properties": {
+      "event_scope": {
+       "const": "runtime",
+       "title": "Event Scope",
+       "type": "string"
+      },
+      "event_type": {
+       "minLength": 1,
+       "title": "Event Type",
+       "type": "string"
+      },
+      "payload": {
+       "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+       },
+       "title": "Payload",
+       "type": "object"
+      }
+     },
+     "required": [
+      "event_scope",
+      "event_type"
+     ],
+     "title": "RuntimeEventPayload",
+     "type": "object"
+    },
+    "RuntimePlayerPayload": {
+     "additionalProperties": false,
+     "description": "JSON-safe runtime player and seat assignment.",
+     "properties": {
+      "label": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Label"
+      },
+      "player_id": {
+       "minLength": 1,
+       "title": "Player Id",
+       "type": "string"
+      },
+      "seat": {
+       "minimum": 0,
+       "title": "Seat",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "player_id",
+      "seat"
+     ],
+     "title": "RuntimePlayerPayload",
+     "type": "object"
+    }
+   },
+   "additionalProperties": false,
+   "description": "JSON-safe runtime transcript envelope around a local match transcript.",
+   "properties": {
+    "abort": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/RuntimeAbortPayload"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "events": {
+     "items": {
+      "$ref": "#/$defs/RuntimeEventPayload"
+     },
+     "title": "Events",
+     "type": "array"
+    },
+    "game_id": {
+     "minLength": 1,
+     "title": "Game Id",
+     "type": "string"
+    },
+    "lifecycle": {
+     "minLength": 1,
+     "title": "Lifecycle",
+     "type": "string"
+    },
+    "match_id": {
+     "minLength": 1,
+     "title": "Match Id",
+     "type": "string"
+    },
+    "match_transcript": {
+     "anyOf": [
+      {
+       "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+       },
+       "type": "object"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Match Transcript"
+    },
+    "players": {
+     "items": {
+      "$ref": "#/$defs/RuntimePlayerPayload"
+     },
+     "title": "Players",
+     "type": "array"
+    },
+    "schema_version": {
+     "enum": [
+      1,
+      2,
+      3,
+      4
+     ],
+     "title": "Schema Version",
+     "type": "integer"
+    },
+    "view": {
+     "default": "full",
+     "enum": [
+      "full",
+      "seat",
+      "public"
+     ],
+     "title": "View",
+     "type": "string"
+    },
+    "viewer_seat": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Viewer Seat"
+    }
+   },
+   "required": [
+    "match_id",
+    "game_id",
+    "schema_version",
+    "lifecycle",
+    "players",
+    "events",
+    "abort",
+    "match_transcript"
+   ],
+   "title": "RuntimeTranscriptPayload",
+   "type": "object"
+  },
+  "SessionStatusPayload": {
+   "$defs": {
+    "JsonValue": {},
+    "RuntimeAbortPayload": {
+     "additionalProperties": false,
+     "description": "JSON-safe runtime abort metadata.",
+     "properties": {
+      "cause_message": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Cause Message"
+      },
+      "cause_type": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Cause Type"
+      },
+      "message": {
+       "minLength": 1,
+       "title": "Message",
+       "type": "string"
+      },
+      "reason": {
+       "minLength": 1,
+       "title": "Reason",
+       "type": "string"
+      }
+     },
+     "required": [
+      "reason",
+      "message"
+     ],
+     "title": "RuntimeAbortPayload",
+     "type": "object"
+    },
+    "RuntimePlayerPayload": {
+     "additionalProperties": false,
+     "description": "JSON-safe runtime player and seat assignment.",
+     "properties": {
+      "label": {
+       "anyOf": [
+        {
+         "type": "string"
+        },
+        {
+         "type": "null"
+        }
+       ],
+       "default": null,
+       "title": "Label"
+      },
+      "player_id": {
+       "minLength": 1,
+       "title": "Player Id",
+       "type": "string"
+      },
+      "seat": {
+       "minimum": 0,
+       "title": "Seat",
+       "type": "integer"
+      }
+     },
+     "required": [
+      "player_id",
+      "seat"
+     ],
+     "title": "RuntimePlayerPayload",
+     "type": "object"
+    },
+    "RuntimeResultPayload": {
+     "additionalProperties": false,
+     "description": "JSON-safe current game result summary for status payloads.",
+     "properties": {
+      "payload": {
+       "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+       },
+       "title": "Payload",
+       "type": "object"
+      },
+      "result_type": {
+       "minLength": 1,
+       "title": "Result Type",
+       "type": "string"
+      }
+     },
+     "required": [
+      "result_type"
+     ],
+     "title": "RuntimeResultPayload",
+     "type": "object"
+    },
+    "SnapshotEnvelope": {
+     "additionalProperties": false,
+     "description": "Stable JSON-friendly envelope for serialized state snapshots.",
+     "properties": {
+      "config": {
+       "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+       },
+       "title": "Config",
+       "type": "object"
+      },
+      "game_id": {
+       "title": "Game Id",
+       "type": "string"
+      },
+      "schema_version": {
+       "minimum": 1,
+       "title": "Schema Version",
+       "type": "integer"
+      },
+      "state": {
+       "additionalProperties": {
+        "$ref": "#/$defs/JsonValue"
+       },
+       "title": "State",
+       "type": "object"
+      }
+     },
+     "required": [
+      "game_id",
+      "schema_version",
+      "config",
+      "state"
+     ],
+     "title": "SnapshotEnvelope",
+     "type": "object"
+    }
+   },
+   "additionalProperties": false,
+   "description": "JSON-safe session status envelope for CLI and UI consumers.",
+   "properties": {
+    "abort": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/RuntimeAbortPayload"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "current_seat": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "title": "Current Seat"
+    },
+    "game_id": {
+     "minLength": 1,
+     "title": "Game Id",
+     "type": "string"
+    },
+    "latest_snapshot": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/SnapshotEnvelope"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "lifecycle": {
+     "minLength": 1,
+     "title": "Lifecycle",
+     "type": "string"
+    },
+    "match_id": {
+     "minLength": 1,
+     "title": "Match Id",
+     "type": "string"
+    },
+    "players": {
+     "items": {
+      "$ref": "#/$defs/RuntimePlayerPayload"
+     },
+     "title": "Players",
+     "type": "array"
+    },
+    "result": {
+     "anyOf": [
+      {
+       "$ref": "#/$defs/RuntimeResultPayload"
+      },
+      {
+       "type": "null"
+      }
+     ]
+    },
+    "schema_version": {
+     "enum": [
+      1,
+      2,
+      3,
+      4
+     ],
+     "title": "Schema Version",
+     "type": "integer"
+    },
+    "turn_count": {
+     "title": "Turn Count",
+     "type": "integer"
+    },
+    "view": {
+     "default": "full",
+     "enum": [
+      "full",
+      "seat",
+      "public"
+     ],
+     "title": "View",
+     "type": "string"
+    },
+    "viewer_seat": {
+     "anyOf": [
+      {
+       "type": "integer"
+      },
+      {
+       "type": "null"
+      }
+     ],
+     "default": null,
+     "title": "Viewer Seat"
+    }
+   },
+   "required": [
+    "schema_version",
+    "match_id",
+    "game_id",
+    "lifecycle",
+    "players",
+    "current_seat",
+    "turn_count",
+    "result",
+    "latest_snapshot",
+    "abort"
+   ],
+   "title": "RuntimeSessionStatusPayload",
+   "type": "object"
+  }
+ }
+}

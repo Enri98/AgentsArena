@@ -82,7 +82,7 @@ async def play_scripted(
         payload=HelloBody(
             client_name="integration-test",
             client_version="0.1.0",
-            supported_schema_versions=[1, 2, 3],
+            supported_schema_versions=[1, 2, 3, 4],
             auth=None,
             requested_seat=seat,
             resume_token=None,
