@@ -15,6 +15,7 @@ from arena.core.events import DomainEvent
 from arena.core.exceptions import ChanceResolutionError
 from arena.core.game_definition import GameDefinition
 from arena.core.observations import Observation
+from arena.core.public_view import Viewer, dump_config_for_viewer, dump_state_for_viewer
 from arena.core.results import RuleResult
 from arena.core.rules_engine import RulesEngine
 from arena.core.serializer import SnapshotEnvelope
@@ -277,11 +278,38 @@ def _build_snapshot(
     config: ConfigT,
     state: StateT,
 ) -> SnapshotEnvelope:
+    """The authoritative snapshot: full config and full state.
+
+    Stored in ``TurnRecord.post_snapshot`` and compared on replay. For a
+    hidden-information game it must never be sent to a viewer as-is; use
+    :func:`build_snapshot_for_viewer`.
+    """
+
     return SnapshotEnvelope(
         game_id=definition.game_id,
         schema_version=SNAPSHOT_SCHEMA_VERSION,
         config=definition.serializer.dump_config(config),
         state=definition.serializer.dump_state(state),
+    )
+
+
+def build_snapshot_for_viewer(
+    definition: GameDefinition[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    config: ConfigT,
+    state: StateT,
+    viewer: Viewer,
+) -> SnapshotEnvelope:
+    """The snapshot ``viewer`` may receive: a seat's view, or the public's (``None``).
+
+    Identical to the authoritative snapshot for a perfect-information game.
+    """
+
+    serializer = definition.serializer
+    return SnapshotEnvelope(
+        game_id=definition.game_id,
+        schema_version=SNAPSHOT_SCHEMA_VERSION,
+        config=dump_config_for_viewer(serializer, config, viewer),
+        state=dump_state_for_viewer(serializer, state, viewer),
     )
 
 
@@ -291,6 +319,7 @@ __all__: Sequence[str] = [
     "TurnRecord",
     "apply_match_action",
     "apply_match_chance",
+    "build_snapshot_for_viewer",
     "start_match",
     "start_replay_match",
 ]

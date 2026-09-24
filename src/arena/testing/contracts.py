@@ -5,8 +5,15 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
+from arena.core.chance import is_chance_node
 from arena.core.exceptions import ArenaCoreError
-from arena.core.public_view import dump_public_state, load_public_state
+from arena.core.public_view import (
+    dump_config_for_seat,
+    dump_public_config,
+    dump_public_state,
+    dump_state_for_seat,
+    load_public_state,
+)
 from arena.core.seats import is_seat
 from arena.core.serializer import Serializer
 
@@ -14,6 +21,11 @@ from arena.core.serializer import Serializer
 @runtime_checkable
 class GameContractBundle(Protocol):
     """Fixture bundle contract used by the shared game-contract assertions.
+
+    A hidden-information game's bundle must also define
+    ``private_variant_state`` and ``private_variant_blind_seat``: a state equal to
+    ``near_terminal_state`` except for information the blind seat may not see.
+    See :func:`assert_seat_view_contract`.
 
     A bundle may also define ``terminal_action``: the action that takes
     ``near_terminal_state`` to ``terminal_state``, when that is not
@@ -37,6 +49,15 @@ def assert_valid_initial_state(bundle: GameContractBundle) -> None:
     rules_engine = bundle.definition.rules_engine
     initial_state = rules_engine.initial_state(bundle.config)
 
+    if is_chance_node(rules_engine, initial_state):
+        # A game that opens at a chance node (a deal, an opening roll) has no seat
+        # to move until the match resolves it, so the bundle supplies a settled
+        # post-opening state instead; the rest of this contract checks that one.
+        initial_state = bundle.initial_state
+        assert not is_chance_node(rules_engine, initial_state), (
+            "initial state contract failed: for a game that opens at a chance node, "
+            "bundle.initial_state must be a settled state after the opening resolves"
+        )
     assert initial_state == bundle.initial_state, (
         "initial state contract failed: rules engine did not reproduce the bundle's "
         "initial_state from the provided config"
@@ -243,6 +264,65 @@ def assert_public_view_contract(bundle: GameContractBundle) -> None:
     )
 
 
+def assert_seat_view_contract(bundle: GameContractBundle) -> None:
+    """Assert that what each seat receives contains nothing it may not see.
+
+    A perfect-information game's per-seat views must equal the full state and
+    config. A hidden-information game is checked by **indistinguishability**: the
+    bundle's ``private_variant_state`` differs from ``near_terminal_state`` only in
+    information ``private_variant_blind_seat`` is not entitled to, so everything
+    that seat receives — its state view, its observation, and the public view —
+    must be byte-identical between the two. Any field that let the seat tell them
+    apart would be a leak.
+    """
+
+    definition = bundle.definition
+    serializer = definition.serializer
+    engine = definition.rules_engine
+    state = bundle.near_terminal_state
+
+    if not getattr(definition, "has_hidden_information", False):
+        for seat in (0, 1):
+            assert dump_state_for_seat(serializer, state, seat) == serializer.dump_state(state), (
+                "seat view contract failed: a perfect-information game's per-seat state "
+                "must equal its full state"
+            )
+            assert dump_config_for_seat(serializer, bundle.config, seat) == (
+                serializer.dump_config(bundle.config)
+            ), "seat view contract failed: per-seat config must equal the full config"
+        assert dump_public_config(serializer, bundle.config) == (
+            serializer.dump_config(bundle.config)
+        ), "seat view contract failed: public config must equal the full config"
+        return
+
+    variant = getattr(bundle, "private_variant_state", None)
+    blind = getattr(bundle, "private_variant_blind_seat", None)
+    assert variant is not None and blind is not None, (
+        "seat view contract failed: a hidden-information game's bundle must supply "
+        "private_variant_state and private_variant_blind_seat"
+    )
+    assert serializer.dump_state(variant) != serializer.dump_state(state), (
+        "seat view contract failed: private_variant_state must differ from "
+        "near_terminal_state in its private information"
+    )
+
+    views = {
+        "dump_state_for_seat": lambda s: dump_state_for_seat(serializer, s, blind),
+        "dump_observation": lambda s: serializer.dump_observation(engine.observation(s, blind)),
+        "dump_public_state": lambda s: dump_public_state(serializer, s),
+    }
+    for name, view in views.items():
+        assert view(state) == view(variant), (
+            f"seat view contract failed: {name} lets seat {blind} distinguish states "
+            f"that differ only in information it may not see"
+        )
+
+    assert dump_state_for_seat(serializer, state, blind) != serializer.dump_state(state), (
+        "seat view contract failed: a hidden-information game's per-seat state must "
+        "redact the full state"
+    )
+
+
 #: Steps a chance-contract playout takes before stopping; enough to reach
 #: several chance nodes in any small game without making the suite slow.
 _CHANCE_PLAYOUT_STEPS = 60
@@ -310,6 +390,7 @@ def assert_game_contract(bundle: GameContractBundle) -> None:
     assert_terminal_result_consistency(bundle)
     assert_serialization_round_trip(bundle)
     assert_public_view_contract(bundle)
+    assert_seat_view_contract(bundle)
     assert_chance_contract(bundle)
 
 
@@ -357,6 +438,7 @@ __all__: Sequence[str] = [
     "assert_illegal_action_rejection",
     "assert_legal_action_generation",
     "assert_public_view_contract",
+    "assert_seat_view_contract",
     "assert_serialization_round_trip",
     "assert_state_transition_behavior",
     "assert_terminal_result_consistency",

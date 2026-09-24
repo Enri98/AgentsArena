@@ -250,6 +250,9 @@ def test_hidden_information_game_is_refused_until_phase_38() -> None:
         def load_public_state(self, payload: dict[str, object]) -> str:
             return "public"
 
+        def dump_state_for_seat(self, state: object, seat: int) -> dict[str, object]:
+            return {"public": 2}
+
     source = build_default_registry().get("connect4")
     hidden = dataclasses.replace(
         source,

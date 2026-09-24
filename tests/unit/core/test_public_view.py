@@ -82,6 +82,9 @@ class _RedactingSerializer:
     def load_public_state(self, payload: dict[str, object]) -> str:
         return "public"
 
+    def dump_state_for_seat(self, state: object, seat: int) -> dict[str, object]:
+        return {"public": 1, "mine": seat}
+
 
 def test_declared_hooks_are_preferred_over_the_fallback() -> None:
     engine = _RedactingEngine()
@@ -127,6 +130,7 @@ def test_declaring_hidden_information_without_hooks_is_rejected() -> None:
     assert "rules_engine.public_state" in missing
     assert "serializer.dump_public_state" in missing
     assert "serializer.load_public_state" in missing
+    assert "serializer.dump_state_for_seat" in missing
 
 
 def test_partial_implementation_names_only_what_is_missing() -> None:

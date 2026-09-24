@@ -3823,7 +3823,33 @@ Acceptance criteria:
 - architecture tests still pass
 - ruff + pytest green
 
-#### Slice 1 - Contract tightening, per-seat and per-config serializers
+#### Slice 1 - Contract tightening, per-seat and per-config serializers — ✅ COMPLETE (2026-09-24)
+
+Core and contract only: no wire change, and the server still refuses hidden-information games
+(`hidden_information_unsupported`) until Slice 2 can serve per-seat snapshots.
+
+- `arena.core.public_view` gains per-viewer dumps. A *viewer* is a seat, or `None` for the public:
+  `dump_state_for_seat`, `dump_config_for_seat` / `dump_public_config`, and
+  `dump_chance_outcome_for_viewer` (hooks `dump_chance_outcome_for_seat` /
+  `dump_public_chance_outcome`), plus `*_for_viewer` dispatchers. They are detected hooks, like the
+  Phase 36 ones, so the `@runtime_checkable` Protocols stay untouched.
+- **Registration gate tightened.** A hidden-information game must implement `dump_state_for_seat`,
+  and, if it also has chance nodes, both outcome hooks. A deal is private (Liar's Dice's opening roll
+  holds both hands), so its outcome can't go to every viewer whole. Config hooks stay optional: with
+  seeds designed out of config in Phase 37, config holds only parameters.
+- `arena.match.build_snapshot_for_viewer(definition, config, state, viewer)`, ready for Slice 2's
+  per-recipient broadcast. The authoritative `post_snapshot` is unchanged; it is what replay compares.
+- **`assert_seat_view_contract`**, part of `assert_game_contract`. Perfect-information games: every
+  per-seat view equals the full value. Hidden-information games are tested by
+  **indistinguishability**. The bundle supplies `private_variant_state`, differing from
+  `near_terminal_state` only in what `private_variant_blind_seat` may not see. That seat's state view,
+  observation, and the public view must be identical across the two. This is the generic enforcement
+  of "`dump_observation` contains nothing the seat is not entitled to see".
+- The initial-state contract accepts a game that opens at a chance node, checking the bundle's
+  settled post-opening state instead.
+- `arena.testing.hidden_factory`: a secrets game that deals each seat a private digit at an opening
+  chance node — the smallest game with a private share of state and a private chance outcome.
+  Tests prove the contract catches a leak through each of the three views.
 #### Slice 2 - Multi-version codec, wire bump to 3, per-recipient broadcast, event filtering
 #### Slice 3 - Per-seat transcripts, reconnect replay, SDK/MCP/UI/CLI updates
 
