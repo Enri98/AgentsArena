@@ -20,7 +20,8 @@ server = [
     "structlog>=24",
 ]
 mcp = [
-    "mcp>=1.0",
+    # mcp 2 removed Server.list_tools and friends; arena.mcp targets the 1.x API.
+    "mcp>=1.0,<2",
 ]
 dev = [
     "pytest>=8",
