@@ -214,6 +214,15 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_over")
         return
 
+    # 4c. Once the match is running, a seat is reachable only by its resume
+    # token. A seat slot can be empty mid-match (its socket dropped and the
+    # grace period is running), and a fresh hello used to claim it there: the
+    # claimant was welcomed with a new token, resumed, and read the seat's
+    # private transcript while the real player was locked out.
+    if _get_match_conns(app_state).get(match_id) is not None:
+        await _close(ws, _CLOSE_SEAT_TAKEN, "seat_taken")
+        return
+
     # 5. Validate requested_seat matches the URL ?seat= param.
     if hello.requested_seat != seat:
         await _close(ws, _CLOSE_MALFORMED, "seat_mismatch")
@@ -270,8 +279,9 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
     done_event = done_events[match_id]
 
     # Phase 32: pre-create reconnect event for this seat so run_match can find it.
+    # setdefault: never replace an Event the driver may already be waiting on.
     reconnect_events = _get_reconnect_events(app_state)
-    reconnect_events.setdefault(match_id, {})[seat] = asyncio.Event()
+    reconnect_events.setdefault(match_id, {}).setdefault(seat, asyncio.Event())
 
     other_seat = 1 - seat
     if seat_slots[match_id].get(other_seat) is not None:
@@ -448,6 +458,11 @@ async def _handle_reconnect(
 
     old_conn = live[seat]
     live.replace_seat(seat, new_conn)
+    # The slot follows the seat's live connection. Left pointing at the old one,
+    # the old handler's exit cleared it, and the seat looked free mid-match.
+    seat_slots = _get_seat_slots(app_state).get(match_id)
+    if seat_slots is not None:
+        seat_slots[seat] = new_conn
     # The old socket may still be open (a half-open TCP session is exactly what
     # resume tokens are for). Close it: if this seat is the active one, the
     # driver is waiting on that socket, and closing it hands the turn to the
