@@ -232,3 +232,78 @@ def test_hidden_information_games_are_served_since_phase_38() -> None:
         disconnect_grace_ms=30000,
     )
     assert match.game_id == "secrets-game"
+
+
+# ---------------------------------------------------------------------------
+# Pre-Phase 40 review: a full registry never sheds a running match
+# ---------------------------------------------------------------------------
+
+
+def _make_running(registry: MatchRegistry, match_id: str) -> None:
+    match = registry.get(match_id)
+    match.session = match.arena.start_session(match.session)
+
+
+def test_overflow_sheds_terminal_then_unstarted_never_running() -> None:
+    clock = _Clock()
+    registry = _registry(clock, max_matches=4, retention_s=1e9, max_age_s=1e9)
+    running = _create(registry)
+    _make_running(registry, running)
+    clock.advance(1)
+    unstarted = _create(registry)
+    clock.advance(1)
+    finished = _create(registry)
+    _make_terminal(registry, finished)
+    clock.advance(1)
+    _create(registry)
+
+    _create(registry)  # full: the terminal match goes first, though newer
+    remaining = set(registry.list_match_ids())
+    assert finished not in remaining
+    assert {running, unstarted} <= remaining
+
+    _create(registry)  # then the oldest never-started one
+    remaining = set(registry.list_match_ids())
+    assert unstarted not in remaining
+    assert running in remaining
+
+
+def test_a_registry_full_of_running_matches_refuses_new_ones() -> None:
+    import pytest
+
+    from arena.server.errors import ServerBusy
+
+    clock = _Clock()
+    registry = _registry(clock, max_matches=2, retention_s=1e9, max_age_s=1e9)
+    kept = [_create(registry), _create(registry)]
+    for match_id in kept:
+        _make_running(registry, match_id)
+    with pytest.raises(ServerBusy):
+        _create(registry)
+    assert set(registry.list_match_ids()) == set(kept)
+
+
+def test_an_unstarted_match_expires_sooner_than_a_running_one() -> None:
+    clock = _Clock()
+    registry = _registry(
+        clock, max_age_s=1000.0, unstarted_max_age_s=100.0, retention_s=1e9
+    )
+    running = _create(registry)
+    _make_running(registry, running)
+    unstarted = _create(registry)
+    clock.advance(101)
+    assert registry.evict_expired() == (unstarted,)
+    assert registry.list_match_ids() == (running,)
+
+
+def test_post_matches_answers_503_when_full() -> None:
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+    registry: MatchRegistry = app.state.match_registry
+    registry._max_matches = 1
+    with TestClient(app) as client:
+        first = client.post("/matches", json=_SHORT_MATCH)
+        assert first.status_code == 201
+        _make_running(registry, first.json()["match_id"])
+        second = client.post("/matches", json=_SHORT_MATCH)
+    assert second.status_code == 503
+    assert second.json()["error"]["code"] == "server_busy"

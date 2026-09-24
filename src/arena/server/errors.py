@@ -33,3 +33,10 @@ class InvalidRequest(ServerError):
 class MatchNotFound(ServerError):
     http_status = 404
     error_code = "match_not_found"
+
+
+class ServerBusy(ServerError):
+    """The registry is full of running matches; nothing can be shed."""
+
+    http_status = 503
+    error_code = "server_busy"

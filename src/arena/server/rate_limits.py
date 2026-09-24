@@ -27,9 +27,24 @@ MAX_MATCH_CREATIONS_PER_IP_PER_MIN: int = 5
 #: aborted the match as peer_disconnected, blaming a seat that did nothing wrong.
 MAX_ACTIONS_PER_MATCH_PER_SEC: int = 10
 MAX_CONNECTIONS_PER_MATCH: int = 4
+#: Spectators have their own per-match gauge. Counting them against the seats'
+#: four slots let two spectators lock a dropped seat out of its own reconnect.
+MAX_SPECTATORS_PER_MATCH: int = 16
+#: WebSocket opens per source IP per minute, seats and spectators alike. The
+#: concurrent cap alone let one client attach and detach in a loop; each attach
+#: to a long match costs a welcome of up to megabytes, built on the event loop.
+MAX_WS_OPENS_PER_IP_PER_MIN: int = 60
+#: GET /matches/{id}/public-transcript per source IP per minute (Phase 40).
+MAX_TRANSCRIPT_READS_PER_IP_PER_MIN: int = 30
 
 MATCH_CREATION_WINDOW_S: float = 60.0
+OPEN_WINDOW_S: float = 60.0
+READ_WINDOW_S: float = 60.0
 ACTION_WINDOW_S: float = 1.0
+
+#: Per-IP windows are pruned once this many keys are tracked, so the dicts keyed
+#: by client address cannot grow without bound.
+_PRUNE_THRESHOLD: int = 4096
 
 #: WebSocket close code for any exceeded cap (protocol §9).
 CLOSE_RATE_LIMITED: int = 4429
@@ -70,18 +85,27 @@ class RateLimiter:
         max_match_creations_per_ip_per_min: int = MAX_MATCH_CREATIONS_PER_IP_PER_MIN,
         max_actions_per_match_per_sec: int = MAX_ACTIONS_PER_MATCH_PER_SEC,
         max_connections_per_match: int = MAX_CONNECTIONS_PER_MATCH,
+        max_spectators_per_match: int = MAX_SPECTATORS_PER_MATCH,
+        max_ws_opens_per_ip_per_min: int = MAX_WS_OPENS_PER_IP_PER_MIN,
+        max_transcript_reads_per_ip_per_min: int = MAX_TRANSCRIPT_READS_PER_IP_PER_MIN,
         time_fn: Callable[[], float] = time.monotonic,
     ) -> None:
         self._max_ws_per_ip = max_ws_connections_per_ip
         self._max_creations_per_ip = max_match_creations_per_ip_per_min
         self._max_actions_per_match = max_actions_per_match_per_sec
         self._max_conns_per_match = max_connections_per_match
+        self._max_spectators_per_match = max_spectators_per_match
+        self._max_opens_per_ip = max_ws_opens_per_ip_per_min
+        self._max_reads_per_ip = max_transcript_reads_per_ip_per_min
         self._now = time_fn
 
         self._lock = threading.Lock()
         self._conns_per_ip: dict[str, int] = {}
         self._conns_per_match: dict[str, int] = {}
+        self._spectators_per_match: dict[str, int] = {}
         self._creations: dict[str, deque[float]] = {}
+        self._opens: dict[str, deque[float]] = {}
+        self._reads: dict[str, deque[float]] = {}
         self._actions: dict[str, deque[float]] = {}
 
     @classmethod
@@ -99,18 +123,39 @@ class RateLimiter:
             max_match_creations_per_ip_per_min=big,
             max_actions_per_match_per_sec=big,
             max_connections_per_match=big,
+            max_spectators_per_match=big,
+            max_ws_opens_per_ip_per_min=big,
+            max_transcript_reads_per_ip_per_min=big,
         )
 
     # ── WebSocket connection caps ──────────────────────────────────────────
 
-    def acquire_connection(self, *, ip: str, match_id: str) -> None:
+    def acquire_connection(
+        self, *, ip: str, match_id: str, spectator: bool = False
+    ) -> None:
         """Reserve one connection slot for ``ip`` on ``match_id``.
 
-        Raises ``RateLimitExceeded`` without reserving anything if either the
-        per-IP or the per-match cap would be exceeded.
+        Seats (and their reconnects) share the per-match connection cap;
+        spectators have their own per-match cap. Every open, of either kind,
+        counts against the per-IP concurrent cap and the per-IP open rate.
+
+        Raises ``RateLimitExceeded`` without reserving a slot if a cap would be
+        exceeded. A refused open still counts toward the open rate.
         """
 
+        per_match = self._spectators_per_match if spectator else self._conns_per_match
+        cap = self._max_spectators_per_match if spectator else self._max_conns_per_match
+        now = self._now()
         with self._lock:
+            opens = self._window(self._opens, ip, now, OPEN_WINDOW_S)
+            if len(opens) >= self._max_opens_per_ip:
+                raise RateLimitExceeded(
+                    "connection_opens_per_ip",
+                    f"Too many connections opened from {ip} "
+                    f"(cap {self._max_opens_per_ip} per minute).",
+                )
+            opens.append(now)
+
             ip_count = self._conns_per_ip.get(ip, 0)
             if ip_count >= self._max_ws_per_ip:
                 raise RateLimitExceeded(
@@ -119,23 +164,31 @@ class RateLimiter:
                     f"(cap {self._max_ws_per_ip}).",
                 )
 
-            match_count = self._conns_per_match.get(match_id, 0)
-            if match_count >= self._max_conns_per_match:
+            match_count = per_match.get(match_id, 0)
+            if match_count >= cap:
+                if spectator:
+                    raise RateLimitExceeded(
+                        "spectators_per_match",
+                        f"Too many spectators of match {match_id} (cap {cap}).",
+                    )
                 raise RateLimitExceeded(
                     "connections_per_match",
                     f"Too many concurrent connections to match {match_id} "
-                    f"(cap {self._max_conns_per_match}).",
+                    f"(cap {cap}).",
                 )
 
             self._conns_per_ip[ip] = ip_count + 1
-            self._conns_per_match[match_id] = match_count + 1
+            per_match[match_id] = match_count + 1
 
-    def release_connection(self, *, ip: str, match_id: str) -> None:
+    def release_connection(
+        self, *, ip: str, match_id: str, spectator: bool = False
+    ) -> None:
         """Release a slot previously taken by :meth:`acquire_connection`.
 
         Safe to call more times than acquire; counts never go negative.
         """
 
+        per_match = self._spectators_per_match if spectator else self._conns_per_match
         with self._lock:
             ip_count = self._conns_per_ip.get(ip, 0) - 1
             if ip_count > 0:
@@ -143,36 +196,68 @@ class RateLimiter:
             else:
                 self._conns_per_ip.pop(ip, None)
 
-            match_count = self._conns_per_match.get(match_id, 0) - 1
+            match_count = per_match.get(match_id, 0) - 1
             if match_count > 0:
-                self._conns_per_match[match_id] = match_count
+                per_match[match_id] = match_count
             else:
-                self._conns_per_match.pop(match_id, None)
+                per_match.pop(match_id, None)
 
-    def connection_count(self, *, ip: str | None = None, match_id: str | None = None) -> int:
+    def connection_count(
+        self,
+        *,
+        ip: str | None = None,
+        match_id: str | None = None,
+        spectator: bool = False,
+    ) -> int:
         """Current gauge value, for tests and diagnostics."""
 
+        per_match = self._spectators_per_match if spectator else self._conns_per_match
         with self._lock:
             if ip is not None:
                 return self._conns_per_ip.get(ip, 0)
             if match_id is not None:
-                return self._conns_per_match.get(match_id, 0)
-            return sum(self._conns_per_match.values())
+                return per_match.get(match_id, 0)
+            return sum(per_match.values())
 
     # ── Sliding-window caps ────────────────────────────────────────────────
+
+    def _window(
+        self, windows: dict[str, deque[float]], key: str, now: float, span: float
+    ) -> deque[float]:
+        """``key``'s pruned sliding window. Call with the lock held."""
+
+        if len(windows) >= _PRUNE_THRESHOLD and key not in windows:
+            for stale in [k for k, w in windows.items() if not w or w[-1] <= now - span]:
+                del windows[stale]
+        window = windows.setdefault(key, deque())
+        _prune(window, now, span)
+        return window
 
     def check_match_creation(self, *, ip: str) -> None:
         """Record and bound one match creation from ``ip``."""
 
         now = self._now()
         with self._lock:
-            window = self._creations.setdefault(ip, deque())
-            _prune(window, now, MATCH_CREATION_WINDOW_S)
+            window = self._window(self._creations, ip, now, MATCH_CREATION_WINDOW_S)
             if len(window) >= self._max_creations_per_ip:
                 raise RateLimitExceeded(
                     "match_creations_per_ip",
                     f"Too many matches created from {ip} "
                     f"(cap {self._max_creations_per_ip} per minute).",
+                )
+            window.append(now)
+
+    def check_transcript_read(self, *, ip: str) -> None:
+        """Record and bound one public-transcript read from ``ip`` (Phase 40)."""
+
+        now = self._now()
+        with self._lock:
+            window = self._window(self._reads, ip, now, READ_WINDOW_S)
+            if len(window) >= self._max_reads_per_ip:
+                raise RateLimitExceeded(
+                    "transcript_reads_per_ip",
+                    f"Too many transcript reads from {ip} "
+                    f"(cap {self._max_reads_per_ip} per minute).",
                 )
             window.append(now)
 
@@ -221,6 +306,7 @@ class RateLimiter:
 
         with self._lock:
             self._conns_per_match.pop(match_id, None)
+            self._spectators_per_match.pop(match_id, None)
             self._actions.pop(match_id, None)
 
 
@@ -231,7 +317,10 @@ __all__: Sequence[str] = [
     "MAX_ACTIONS_PER_MATCH_PER_SEC",
     "MAX_CONNECTIONS_PER_MATCH",
     "MAX_MATCH_CREATIONS_PER_IP_PER_MIN",
+    "MAX_SPECTATORS_PER_MATCH",
+    "MAX_TRANSCRIPT_READS_PER_IP_PER_MIN",
     "MAX_WS_CONNECTIONS_PER_IP",
+    "MAX_WS_OPENS_PER_IP_PER_MIN",
     "RateLimitExceeded",
     "RateLimiter",
 ]

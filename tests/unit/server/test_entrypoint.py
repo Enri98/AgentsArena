@@ -23,4 +23,7 @@ def test_python_m_arena_server_runs_sansio(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert UVICORN_WS_IMPL == "websockets-sansio"
     assert captured["ws"] == UVICORN_WS_IMPL
+    # A dead reader (a spectator that stopped reading) is found and dropped.
+    assert captured["ws_ping_interval"] > 0 and captured["ws_ping_timeout"] > 0
+    assert captured["ws_max_size"] <= 1 << 20
     assert captured["port"] == 9999

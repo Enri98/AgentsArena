@@ -117,6 +117,8 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 WS_CLOSE_NORMAL = 1000
+#: Protocol section 9: internal server failure.
+WS_CLOSE_SERVER_ERROR = 4500
 #: Frames a single connection may have in flight before it is considered
 #: too slow. Well above any legitimate burst: one turn produces ~3 frames.
 OUTBOX_MAXSIZE = 64
@@ -281,15 +283,26 @@ async def send_spectator_welcome(
     session = match.session
     local_match = session.local_match
     turn_count = len(local_match.turns) if local_match is not None else 0
+    # Every turn up to here is in the welcome's transcript; live frames resume
+    # after it. See SpectatorConnection.next_turn_index.
+    conn.next_turn_index = turn_count
+
+    # Every spectator attaching at the same point gets the same bytes, so they
+    # are built once. Serialising a long match's welcome is linear in its
+    # length (about 200 ms at the turn cap), and a client looping attach and
+    # detach made every match on the server pay that on the event loop.
+    key = (turn_count, session.lifecycle.value)
+    cached = _SPECTATOR_WELCOMES.get(match.match_id)
+    if cached is not None and cached[0] == key:
+        _SPECTATOR_WELCOMES.move_to_end(match.match_id)
+        await _send_text(conn, cached[1])
+        return
 
     transcript: RuntimeTranscriptPayload | None = None
     if local_match is not None:
         # Not swallowed: a spectator whose welcome lacks the history would never
         # get it (the watermark skips those turns). The handler closes it instead.
         transcript = _build_transcript_payload(session, None)
-    # Every turn up to here is in the welcome's transcript; live frames resume
-    # after it. See SpectatorConnection.next_turn_index.
-    conn.next_turn_index = turn_count
 
     body = SpectatorWelcomeBody(
         match_id=match.match_id,
@@ -307,7 +320,12 @@ async def send_spectator_welcome(
         match_id=match.match_id,
         payload=body,
     )
-    await _send(conn, env)
+    text = dumps(env)
+    _SPECTATOR_WELCOMES[match.match_id] = (key, text)
+    _SPECTATOR_WELCOMES.move_to_end(match.match_id)
+    while len(_SPECTATOR_WELCOMES) > _SPECTATOR_WELCOMES_MAX:
+        _SPECTATOR_WELCOMES.popitem(last=False)
+    await _send_text(conn, text)
 
 
 def _make_resume_token() -> str:
@@ -377,11 +395,18 @@ _VIEW_TRANSCRIPTS: "OrderedDict[tuple[str, Viewer], _ViewTranscript]" = OrderedD
 _VIEW_TRANSCRIPTS_MAX = 12
 
 
+#: The latest serialised spectator welcome per match, keyed by the point it was
+#: built at: ``match_id -> ((turn_count, lifecycle), text)``. Bounded LRU.
+_SPECTATOR_WELCOMES: "OrderedDict[str, tuple[tuple[int, str], str]]" = OrderedDict()
+_SPECTATOR_WELCOMES_MAX = 16
+
+
 def forget_match_transcripts(match_id: str) -> None:
     """Drop cached transcripts for an evicted match."""
 
     for key in [k for k in _VIEW_TRANSCRIPTS if k[0] == match_id]:
         del _VIEW_TRANSCRIPTS[key]
+    _SPECTATOR_WELCOMES.pop(match_id, None)
 
 
 def _match_transcript_for(session: MatchSession, viewer: Viewer) -> dict[str, Any]:
@@ -510,7 +535,12 @@ async def _send(conn: SeatConnection, envelope: Any) -> None:
     blamed whichever seat happened to be active.
     """
 
-    text = dumps(envelope)
+    await _send_text(conn, dumps(envelope))
+
+
+async def _send_text(conn: SeatConnection, text: str) -> None:
+    """:func:`_send` for an envelope that is already serialised."""
+
     if conn.writer_task is None:
         await _send_now(conn, text)
         return
@@ -798,12 +828,38 @@ async def _close_both(
             pass
 
 
-async def _safe_receive_text(ws: "WebSocket") -> str | None:
-    """Receive one text frame; return None on any error (disconnect, close, etc.)."""
+#: Protocol sections 3 and 9: a binary frame closes the connection with 1003.
+WS_CLOSE_UNSUPPORTED_DATA = 1003
+
+
+async def receive_text_frame(ws: "WebSocket") -> str | None:
+    """Receive one text frame; ``None`` once the connection is gone.
+
+    A binary frame closes the connection with ``1003 unsupported_data`` (section
+    3) and also returns ``None``: to the caller it is a disconnect, and the seat
+    can resume. ``receive_text`` raised on a binary frame, which every caller
+    treated as a silent disconnect.
+    """
+
     try:
-        return await ws.receive_text()
+        message = await ws.receive()
     except Exception:
         return None
+    if message.get("type") != "websocket.receive":
+        return None
+    text = message.get("text")
+    if text is None:
+        try:
+            await ws.close(code=WS_CLOSE_UNSUPPORTED_DATA, reason="unsupported_data")
+        except Exception:
+            pass
+        return None
+    return text
+
+
+async def _safe_receive_text(ws: "WebSocket") -> str | None:
+    """Receive one text frame; return None on any error (disconnect, close, etc.)."""
+    return await receive_text_frame(ws)
 
 
 # ---------------------------------------------------------------------------
@@ -893,10 +949,7 @@ _DEADLINE_EXPIRED = "deadline_expired"
 
 async def _receive_one_text(ws: "WebSocket") -> str | None:
     """Receive exactly one text frame; return None on disconnect/error."""
-    try:
-        return await ws.receive_text()
-    except Exception:
-        return None
+    return await receive_text_frame(ws)
 
 
 async def _receive_action(
@@ -1551,6 +1604,35 @@ async def run_match(
             await _broadcast_match_aborted(conns, session)
 
         await _close_both(conns, WS_CLOSE_NORMAL, "normal_closure")
+
+    except Exception:
+        # A bug must not leave a match "running" until eviction with both seats
+        # hanging on a dead driver: abort it, tell everyone, close with 4500.
+        logger.exception(
+            "run_match_error", match_id=match.match_id, seat=None, schema_version=1
+        )
+        if match.session.lifecycle not in (
+            RuntimeLifecycle.FINISHED,
+            RuntimeLifecycle.ABORTED,
+        ):
+            session = match.session
+            try:
+                await _abort(
+                    AbortReason.RUNTIME_ERROR,
+                    "The server failed while running the match.",
+                    seat=None,
+                    log_reason="server_error",
+                    close_reason="server_error",
+                    close_code=WS_CLOSE_SERVER_ERROR,
+                )
+            except Exception:
+                logger.exception(
+                    "run_match_abort_failed",
+                    match_id=match.match_id,
+                    seat=None,
+                    schema_version=1,
+                )
+                await _close_both(conns, WS_CLOSE_SERVER_ERROR, "server_error")
 
     finally:
         # Cancel heartbeat task on any exit path.

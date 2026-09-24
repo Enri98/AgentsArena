@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import structlog
@@ -20,7 +21,13 @@ from arena.server.config import (
     RETRY_BUDGET_MIN,
     WIRE_SCHEMA_VERSION,
 )
-from arena.server.errors import InvalidConfig, InvalidRequest, MatchNotFound, UnknownGame
+from arena.server.errors import (
+    InvalidConfig,
+    InvalidRequest,
+    MatchNotFound,
+    ServerBusy,
+    UnknownGame,
+)
 from arena.server.payload_schemas import get_payload_schemas
 from arena.server.rate_limits import RateLimiter, RateLimitExceeded
 from arena.server.registry import MatchRegistry
@@ -34,10 +41,16 @@ logger = structlog.get_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
+#: Largest POST /matches body. A create request is a few hundred bytes; the
+#: body used to be read and parsed whole, however large, before any check.
+MAX_CREATE_BODY_BYTES: int = 64 * 1024
+MAX_PLAYER_LABEL_CHARS: int = 64
+
+
 class PlayerSpec(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    label: str | None = None
+    label: str | None = Field(default=None, max_length=MAX_PLAYER_LABEL_CHARS)
 
 
 class CreateMatchRequest(BaseModel):
@@ -45,7 +58,9 @@ class CreateMatchRequest(BaseModel):
 
     game_id: str = Field(min_length=1)
     game_config: dict[str, Any] | None = None
-    players: list[PlayerSpec] = Field(default_factory=list)
+    # Two seats: every label is echoed in every welcome, so 50,000 of them were
+    # an amplifier.
+    players: list[PlayerSpec] = Field(default_factory=list, max_length=2)
     per_turn_deadline_ms: int = Field(default=DEFAULT_PER_TURN_DEADLINE_MS)
     per_action_retry_budget: int = Field(default=DEFAULT_PER_ACTION_RETRY_BUDGET)
     disconnect_grace_ms: int = Field(default=DEFAULT_DISCONNECT_GRACE_MS)
@@ -92,11 +107,47 @@ def _validate_range(value: int, lo: int, hi: int, field_name: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _read_capped_body(request: Request, limit: int) -> bytes | None:
+    """The request body, or ``None`` once it exceeds ``limit`` bytes."""
+
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > limit:
+        return None
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            return None
+    return bytes(body)
+
+
 @router.post("/matches", status_code=201)
 async def create_match_handler(request: Request) -> JSONResponse:
+    # The creation cap is checked before the body is read: a client already
+    # over it used to have a 50 MB body read and parsed before the 429.
+    limiter: RateLimiter | None = getattr(request.app.state, "rate_limiter", None)
+    if limiter is not None:
+        try:
+            limiter.check_match_creation(ip=_client_ip(request))
+        except RateLimitExceeded as exc:
+            logger.warning(
+                "rate_limited",
+                schema_version=WIRE_SCHEMA_VERSION,
+                scope=exc.scope,
+                detail=exc.message,
+            )
+            return _error_response(429, "rate_limited", exc.message)
+
+    body_bytes = await _read_capped_body(request, MAX_CREATE_BODY_BYTES)
+    if body_bytes is None:
+        return _error_response(
+            413,
+            "request_too_large",
+            f"A create request is at most {MAX_CREATE_BODY_BYTES} bytes.",
+        )
     try:
-        raw = await request.json()
-    except Exception:
+        raw = json.loads(body_bytes)
+    except (ValueError, RecursionError):
         return _error_response(400, "invalid_request", "Request body is not valid JSON.")
 
     if not isinstance(raw, dict) or "game_id" not in raw:
@@ -134,19 +185,6 @@ async def create_match_handler(request: Request) -> JSONResponse:
             f"supports {body.supported_schema_versions}.",
         )
 
-    limiter: RateLimiter | None = getattr(request.app.state, "rate_limiter", None)
-    if limiter is not None:
-        try:
-            limiter.check_match_creation(ip=_client_ip(request))
-        except RateLimitExceeded as exc:
-            logger.warning(
-                "rate_limited",
-                schema_version=WIRE_SCHEMA_VERSION,
-                scope=exc.scope,
-                detail=exc.message,
-            )
-            return _error_response(429, "rate_limited", exc.message)
-
     registry: MatchRegistry = request.app.state.match_registry
 
     try:
@@ -163,6 +201,8 @@ async def create_match_handler(request: Request) -> JSONResponse:
     except InvalidConfig as exc:
         details = exc.details if exc.details is not None else {}
         return _error_response(400, exc.error_code, exc.message, details=details)
+    except ServerBusy as exc:
+        return _error_response(503, exc.error_code, exc.message)
     except Exception as exc:
         return _error_response(500, "server_error", str(exc))
 

@@ -5,6 +5,8 @@ Structured JSON logging will be added in Phase 33.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import FastAPI
 
 from arena.server.config import (
@@ -17,6 +19,36 @@ from arena.server.registry import MatchRegistry
 from arena.server.routes_http import router as http_router
 from arena.server.routes_ws import router as ws_router
 from arena.server.runtime_bridge import forget_match_transcripts
+
+
+def _wake_waiters(app_state: object, match_id: str) -> None:
+    """Close whoever still waits on an evicted match.
+
+    Only a match that never started, or one already over, is evicted. A seat
+    waiting for its opponent, or a spectator parked for a start that will now
+    never come, would otherwise wait until the client gave up. Eviction runs
+    inside POST /matches on the event loop, so the closes can be scheduled.
+    """
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    done = getattr(app_state, "_ws_done_events", {}).get(match_id)
+    if done is not None:
+        done.set()  # parked spectators leave their read loop and close
+    for conn in (getattr(app_state, "_ws_seat_slots", {}).get(match_id) or {}).values():
+        if conn is not None:
+            loop.create_task(_close_quietly(conn.websocket, 4410, "match_expired"))
+    for spectator in getattr(app_state, "_ws_pending_spectators", {}).get(match_id, []):
+        loop.create_task(_close_quietly(spectator.websocket, 4410, "match_expired"))
+
+
+async def _close_quietly(ws: object, code: int, reason: str) -> None:
+    try:
+        await ws.close(code=code, reason=reason)  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
 
 def create_app(
@@ -69,6 +101,7 @@ def create_app(
     )
 
     def _release_match_state(match_id: str) -> None:
+        _wake_waiters(app.state, match_id)
         for attr in _PER_MATCH_STATE_ATTRS:
             container = getattr(app.state, attr, None)
             if isinstance(container, dict):

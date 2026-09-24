@@ -7,6 +7,7 @@ WS /matches/{match_id}/spectate          -- read-only spectator channel (§4)
 from __future__ import annotations
 
 import asyncio
+import secrets
 from typing import Any
 
 import structlog
@@ -36,6 +37,7 @@ from arena.server.runtime_bridge import (
     _send,
     _start_writer,
     _stop_writer,
+    receive_text_frame,
     run_match,
     send_spectator_welcome,
     send_welcome,
@@ -47,6 +49,7 @@ router = APIRouter()
 
 # ── Close codes (protocol §9) ──────────────────────────────────────────────
 _CLOSE_SCHEMA_MISMATCH = 4400
+_CLOSE_UNAUTHORIZED = 4401
 _CLOSE_UNSUPPORTED_ENDPOINT = 4404
 _CLOSE_SEAT_TAKEN = 4409
 _CLOSE_MATCH_NOT_FOUND = 4410
@@ -63,6 +66,18 @@ def _get_seat_slots(app_state: Any) -> dict[str, dict[int, SeatConnection | None
     if not hasattr(app_state, "_ws_seat_slots"):
         app_state._ws_seat_slots = {}
     return app_state._ws_seat_slots
+
+
+def _release_slot(app_state: Any, match_id: str, seat: int, conn: SeatConnection) -> None:
+    """Free ``seat`` if ``conn`` still holds it.
+
+    Never re-creates an evicted match's entry: indexing it after eviction used
+    to bring the per-match dict back, and leak it.
+    """
+
+    slots = _get_seat_slots(app_state).get(match_id)
+    if slots is not None and slots.get(seat) is conn:
+        slots[seat] = None
 
 
 def _get_ready_events(app_state: Any) -> dict[str, asyncio.Event]:
@@ -150,9 +165,8 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
     await ws.accept()
 
     # 4. Receive the first frame; expect a hello envelope.
-    try:
-        raw = await ws.receive_text()
-    except Exception:
+    raw = await receive_text_frame(ws)
+    if raw is None:  # gone, or a binary frame (already closed 1003)
         await _close(ws, _CLOSE_MALFORMED, "no_hello_received")
         return
 
@@ -256,7 +270,7 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
             schema_version=1,
             error=str(exc),
         )
-        seat_slots[match_id][seat] = None
+        _release_slot(app_state, match_id, seat, conn)
         await _close(ws, _CLOSE_SERVER_ERROR, "server_error")
         return
 
@@ -313,7 +327,7 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
                     break
                 if result is None:
                     # WebSocket closed before second seat arrived.
-                    seat_slots[match_id][seat] = None
+                    _release_slot(app_state, match_id, seat, conn)
                     logger.info(
                         "seat_disconnected",
                         match_id=match_id,
@@ -362,7 +376,8 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
             done_event.set()
             # A resume token must not outlive the match it resumes (Phase 38).
             match.resume_tokens.clear()
-            seat_slots[match_id] = {0: None, 1: None}
+            if match_id in seat_slots:  # absent once the match is evicted
+                seat_slots[match_id] = {0: None, 1: None}
             _get_match_conns(app_state).pop(match_id, None)
             _get_pending_spectators(app_state).pop(match_id, None)
     else:
@@ -373,8 +388,7 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         except Exception:
             pass
         finally:
-            if seat_slots[match_id].get(seat) is conn:
-                seat_slots[match_id][seat] = None
+            _release_slot(app_state, match_id, seat, conn)
 
 
 # ---------------------------------------------------------------------------
@@ -404,10 +418,15 @@ async def _handle_reconnect(
         await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_over")
         return
 
-    # Validate token.
+    # Validate token. Section 11: a token bound to another seat is a 4401; one
+    # that is simply stale (rotated, or from before a restart) a 4410.
     expected = match.resume_tokens.get(seat)
-    if expected is None or expected != resume_token:
-        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "invalid_resume_token")
+    if expected is None or not secrets.compare_digest(expected, resume_token):
+        other = match.resume_tokens.get(1 - seat)
+        if other is not None and secrets.compare_digest(other, resume_token):
+            await _close(ws, _CLOSE_UNAUTHORIZED, "unauthorized")
+        else:
+            await _close(ws, _CLOSE_MATCH_NOT_FOUND, "invalid_resume_token")
         return
 
     # A reconnecting client negotiates like a new one: it will be sent a
@@ -504,10 +523,7 @@ async def _handle_reconnect(
 
 async def _safe_receive_text(ws: WebSocket) -> str | None:
     """Receive one text frame; return None on any error (disconnect, close, etc.)."""
-    try:
-        return await ws.receive_text()
-    except Exception:
-        return None
+    return await receive_text_frame(ws)
 
 
 async def _wait_done_or_superseded(done_event: asyncio.Event, conn: SeatConnection) -> None:
@@ -550,7 +566,7 @@ async def spectate_handler(ws: WebSocket, match_id: str) -> None:
 
     ip = _client_ip(ws)
     try:
-        limiter.acquire_connection(ip=ip, match_id=match_id)
+        limiter.acquire_connection(ip=ip, match_id=match_id, spectator=True)
     except RateLimitExceeded as exc:
         logger.warning(
             "rate_limited",
@@ -567,7 +583,7 @@ async def spectate_handler(ws: WebSocket, match_id: str) -> None:
     try:
         await _spectate_session(ws, match_id)
     finally:
-        limiter.release_connection(ip=ip, match_id=match_id)
+        limiter.release_connection(ip=ip, match_id=match_id, spectator=True)
 
 
 async def _spectate_session(ws: WebSocket, match_id: str) -> None:
@@ -583,9 +599,8 @@ async def _spectate_session(ws: WebSocket, match_id: str) -> None:
 
     await ws.accept()
 
-    try:
-        raw = await ws.receive_text()
-    except Exception:
+    raw = await receive_text_frame(ws)
+    if raw is None:  # gone, or a binary frame (already closed 1003)
         await _close(ws, _CLOSE_MALFORMED, "no_hello_received")
         return
 
@@ -726,3 +741,21 @@ async def _spectator_read_loop(
             ),
         )
         return
+
+
+# ---------------------------------------------------------------------------
+# Unknown endpoints (protocol section 9)
+# ---------------------------------------------------------------------------
+
+
+@router.websocket("/{path:path}")
+async def unknown_endpoint_handler(ws: WebSocket, path: str) -> None:
+    """Any other WebSocket path closes with ``4404 unsupported_endpoint``.
+
+    Registered last, so it only catches what no route above matched. Starlette
+    would otherwise refuse the handshake with HTTP 403, which a client cannot
+    tell apart from a proxy rejecting it.
+    """
+
+    await ws.accept()
+    await _close(ws, _CLOSE_UNSUPPORTED_ENDPOINT, "unsupported_endpoint")

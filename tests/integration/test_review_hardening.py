@@ -231,3 +231,32 @@ def test_the_deadline_survives_the_action_throttle() -> None:
         )
     assert out["reason"] == "turn_deadline_expired", out
     assert out["elapsed"] < 5, out
+
+
+def test_a_crashing_driver_aborts_the_match_and_closes_with_4500(monkeypatch: Any) -> None:
+    import arena.server.runtime_bridge as bridge
+
+    def broken(_local_match: Any) -> Any:
+        raise RuntimeError("simulated server bug")
+
+    monkeypatch.setattr(bridge, "build_observation_request", broken)
+
+    async def run(base: str, ws_base: str) -> dict[str, Any]:
+        match = _create(base, "tictactoe", per_turn_deadline_ms=5_000, disconnect_grace_ms=500)
+        mid = match["match_id"]
+        seat0 = await _join(ws_base, mid, 0)
+        seat1 = await _join(ws_base, mid, 1)
+        aborted = await _until(seat1, "match_aborted", mid)
+        code = await _closed_with(seat1)
+        await seat0.close()
+        status = httpx.get(f"{base}/matches/{mid}").json()
+        return {"reason": aborted["payload"]["abort"]["reason"], "code": code, "status": status}
+
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+    with serve(app) as server:
+        out = asyncio.run(
+            asyncio.wait_for(run(server.http_base_url, server.ws_base_url), 40)
+        )
+    assert out["reason"] == "runtime_error"
+    assert out["code"] == (4500, "server_error")
+    assert out["status"]["lifecycle"] == "aborted"

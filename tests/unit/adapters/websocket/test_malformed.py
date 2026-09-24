@@ -49,3 +49,17 @@ def test_missing_required_payload_field_raises_wire_decode_error() -> None:
 def test_json_array_raises_wire_decode_error() -> None:
     with pytest.raises(WireDecodeError, match="JSON object"):
         loads("[1, 2, 3]")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"a":' + "[" * 100_000 + "]" * 100_000 + "}",  # RecursionError in json
+        '{"type":"hello","schema_version":' + "9" * 5000 + "}",  # int too long
+    ],
+    ids=["deep_nesting", "huge_int"],
+)
+def test_any_json_parse_failure_is_a_wire_decode_error(text: str) -> None:
+    # Anything else escaping loads() crashed the match driver on one frame.
+    with pytest.raises(WireDecodeError):
+        loads(text)
