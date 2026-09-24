@@ -73,8 +73,13 @@ def _bucket(address: str) -> str | None:
     address gave it effectively unlimited buckets.
     """
 
+    address = address.strip()
+    if address.startswith("["):  # "[2001:db8::1]:443"
+        address = address[1:].split("]", 1)[0]
+    elif address.count(":") == 1:  # "1.2.3.4:5678"
+        address = address.split(":", 1)[0]
     try:
-        ip = ipaddress.ip_address(address.strip())
+        ip = ipaddress.ip_address(address)
     except ValueError:
         return None
     if isinstance(ip, ipaddress.IPv6Address):

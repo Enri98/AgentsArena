@@ -355,8 +355,9 @@ async def get_public_transcript(match_id: str, request: Request) -> Response:
     )
 
 
-#: Concurrent public-transcript reads per server. Each holds a whole body (up to
-#: the store's per-record cap) in memory while it is read and sent.
+#: Concurrent public-transcript reads from the store, per server. Each loads a
+#: whole body (up to the store's per-record cap). Sending it is not covered: a
+#: slow reader's unsent bytes are the transport's to buffer.
 MAX_CONCURRENT_TRANSCRIPT_READS: int = 4
 
 

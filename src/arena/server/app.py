@@ -18,6 +18,7 @@ from arena.server.config import (
 )
 from arena.server.rate_limits import RateLimiter
 from arena.server.registry import MatchRegistry
+from arena.server.routes_http import MAX_CONCURRENT_TRANSCRIPT_READS
 from arena.server.routes_http import router as http_router
 from arena.server.routes_ws import router as ws_router
 from arena.server.runtime_bridge import forget_match_transcripts
@@ -101,6 +102,9 @@ def create_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # Created here, on the serving loop: a semaphore reused across event
+        # loops (an app served twice) raises once contended.
+        _app.state.transcript_read_slots = asyncio.Semaphore(MAX_CONCURRENT_TRANSCRIPT_READS)
         try:
             yield
         finally:

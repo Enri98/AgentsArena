@@ -21,9 +21,12 @@ Three backends share one contract (``tests/unit/server/test_transcript_store.py`
 Retention is a :class:`RetentionPolicy`: a TTL from the moment the match ended,
 plus caps on the number of records, their total size, and each record's size.
 Room for a new record is made **before** it is written, oldest first, so a
-store at its cap (or a disk that filled) recovers by evicting rather than
-failing every write from then on. Expiry is checked on every read, so an
-expired record is gone at once (``404``) whether or not a sweep has run yet.
+store at its cap recovers by evicting rather than failing every write from then
+on; a write that fails because the disk itself is full evicts the oldest
+records and retries once. (On the file and memory backends, records evicted to
+make room stay evicted if the write then fails; SQLite rolls them back.)
+Expiry is checked on every read, so an expired record is gone at once
+(``404``) whether or not a sweep has run yet.
 Stores are thread-safe; the server calls them from worker threads so disk I/O
 never blocks the event loop.
 
@@ -33,6 +36,7 @@ are not designed for several servers writing one directory or database.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
 import sqlite3
@@ -187,10 +191,30 @@ class _Index:
         if old is not None:
             self.total_bytes -= old[1]
 
-    def clamp_future(self, now: float) -> None:
+    def clamp_future(self, now: float) -> list[str]:
+        """Re-date records from the future to ``now``; return their ids."""
+
+        clamped = []
         for mid, (ended, size) in list(self.entries.items()):
             if ended - now > FUTURE_SLACK_S:
                 self.entries[mid] = (now, size)
+                clamped.append(mid)
+        return clamped
+
+    def oldest(self, exclude: str, at_least: int) -> list[str]:
+        """The oldest ids, not ``exclude``, holding at least ``at_least`` bytes
+        (and at least one record, if any)."""
+
+        doomed: list[str] = []
+        freed = 0
+        for mid, (_, size) in sorted(self.entries.items(), key=lambda kv: kv[1][0]):
+            if doomed and freed >= at_least:
+                break
+            if mid == exclude:
+                continue
+            doomed.append(mid)
+            freed += size
+        return doomed
 
     def expired(self, now: float, policy: RetentionPolicy) -> list[str]:
         return [
@@ -391,9 +415,38 @@ class FileTranscriptStore:
                 self._index.add(mid, ended_at, size)
                 self._files[mid] = path
             now = self._now()
-            self._index.clamp_future(now)
+            self._clamp(now)
             self._drop(self._index.expired(now, self.policy))
             self._drop(self._index.over_caps(self.policy))
+
+    def _clamp(self, now: float) -> None:
+        """Re-date future records, renaming their files so it survives a restart."""
+
+        for mid in self._index.clamp_future(now):
+            old = self._files.get(mid)
+            if old is None:
+                continue
+            new = self.directory / f"{_file_key(mid)}.{int(now * 1000)}.json"
+            try:
+                os.replace(old, new)
+            except OSError:
+                continue  # the index is right for this run; retried next time
+            self._files[mid] = new
+
+    def _write(self, match_id: str, body: bytes, now: float) -> Path:
+        key = _file_key(match_id)
+        path = self.directory / f"{key}.{int(now * 1000)}.json"
+        tmp = self.directory / f".{key}.tmp"
+        try:
+            with open(tmp, "wb") as handle:
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, path)
+        except BaseException:
+            self._unlink(tmp)  # a partial file must not pile up uncounted
+            raise
+        return path
 
     def put(self, match_id: str, body: bytes, *, audience: str) -> StoredTranscript:
         _check_put(self.policy, match_id, body, audience)
@@ -402,23 +455,19 @@ class FileTranscriptStore:
                 raise StoreClosed("The transcript store is closed.")
             self._retry_orphans()
             now = self._now()
-            self._index.clamp_future(now)
+            self._clamp(now)
             self._drop(self._index.expired(now, self.policy))
-            # Room first: evicting only after a successful write meant a full
-            # disk refused every write from then on.
+            # Room first: evicting only after a successful write meant a store
+            # at its cap refused every write from then on.
             self._drop(self._index.room_for(self.policy, match_id, len(body)))
-            key = _file_key(match_id)
-            path = self.directory / f"{key}.{int(now * 1000)}.json"
-            tmp = self.directory / f".{key}.tmp"
             try:
-                with open(tmp, "wb") as handle:
-                    handle.write(body)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(tmp, path)
-            except BaseException:
-                self._unlink(tmp)  # a partial file must not pile up uncounted
-                raise
+                path = self._write(match_id, body, now)
+            except OSError as exc:
+                if exc.errno not in (errno.ENOSPC, errno.EDQUOT):
+                    raise
+                # The disk filled before the byte cap did: make room and retry once.
+                self._drop(self._index.oldest(exclude=match_id, at_least=2 * len(body)))
+                path = self._write(match_id, body, now)
             _fsync_directory(self.directory)
             # The new file is in place: the index follows it before anything
             # else can fail, so a get never serves the replaced body.
@@ -432,32 +481,35 @@ class FileTranscriptStore:
     def get(self, match_id: str) -> StoredTranscript | None:
         if not is_valid_match_id(match_id):
             return None
-        with self._lock:
-            now = self._now()
-            self._index.clamp_future(now)
-            entry = self._index.entries.get(match_id)
-            if entry is None:
-                return None
-            if self.policy.is_expired(entry[0], now):
-                self._drop([match_id])
-                return None
-            path = self._files[match_id]
-        try:
-            body = path.read_bytes()
-        except FileNotFoundError:
-            # Replaced or evicted since the lookup, or deleted behind our back.
+        for _ in range(2):  # a second try when a concurrent put replaced the file
             with self._lock:
-                if self._files.get(match_id) == path:
+                now = self._now()
+                self._clamp(now)
+                entry = self._index.entries.get(match_id)
+                if entry is None:
+                    return None
+                if self.policy.is_expired(entry[0], now):
+                    self._drop([match_id])
+                    return None
+                path = self._files[match_id]
+            try:
+                body = path.read_bytes()
+            except FileNotFoundError:
+                with self._lock:
+                    if self._files.get(match_id) != path:
+                        continue  # replaced meanwhile: read the new file
+                    # Deleted behind our back.
                     self._index.discard(match_id)
                     self._files.pop(match_id, None)
-            return None
-        return StoredTranscript(match_id, entry[0], body)
+                return None
+            return StoredTranscript(match_id, entry[0], body)
+        return None
 
     def sweep(self) -> int:
         with self._lock:
             self._retry_orphans()
             now = self._now()
-            self._index.clamp_future(now)
+            self._clamp(now)
             doomed = self._index.expired(now, self.policy)
             self._drop(doomed)
             return len(doomed)
@@ -534,26 +586,53 @@ class SqliteTranscriptStore:
             if self._closed:
                 raise StoreClosed("The transcript store is closed.")
             now = self._now()
-            self._db.execute("BEGIN IMMEDIATE")
             try:
-                self._clamp_future(now)
-                self._expire(now)
-                # Room first: a full disk then frees space in the same
-                # transaction instead of refusing every write from then on.
-                self._make_room(match_id, len(body))
-                self._db.execute(
-                    "INSERT OR REPLACE INTO public_transcripts (match_id, ended_at, size, body)"
-                    " VALUES (?, ?, ?, ?)",
-                    (match_id, now, len(body), body),
-                )
-                self._db.execute("COMMIT")
-            except BaseException:
-                # SQLite may have rolled back itself (SQLITE_FULL does); a second
-                # ROLLBACK would raise and hide the real error.
-                if self._db.in_transaction:
-                    self._db.execute("ROLLBACK")
-                raise
+                self._put_once(match_id, body, now, extra_room=0)
+            except sqlite3.OperationalError as exc:
+                if "full" not in str(exc).lower():
+                    raise
+                # The disk filled before the byte cap did: free room and retry once.
+                self._put_once(match_id, body, now, extra_room=2 * len(body))
             return StoredTranscript(match_id, now, body)
+
+    def _put_once(self, match_id: str, body: bytes, now: float, *, extra_room: int) -> None:
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            self._clamp_future(now)
+            self._expire(now)
+            # Room first: a store at its cap frees space in the same
+            # transaction instead of refusing every write from then on.
+            self._make_room(match_id, len(body))
+            if extra_room:
+                self._evict_oldest(match_id, extra_room)
+            self._db.execute(
+                "INSERT OR REPLACE INTO public_transcripts (match_id, ended_at, size, body)"
+                " VALUES (?, ?, ?, ?)",
+                (match_id, now, len(body), body),
+            )
+            self._db.execute("COMMIT")
+        except BaseException:
+            # SQLite may have rolled back itself (SQLITE_FULL does); a second
+            # ROLLBACK would raise and hide the real error.
+            if self._db.in_transaction:
+                self._db.execute("ROLLBACK")
+            raise
+
+    def _evict_oldest(self, keep: str, at_least: int) -> None:
+        doomed: list[str] = []
+        freed = 0
+        for mid, size in self._db.execute(
+            "SELECT match_id, size FROM public_transcripts ORDER BY ended_at, match_id"
+        ):
+            if doomed and freed >= at_least:
+                break
+            if mid == keep:
+                continue
+            doomed.append(mid)
+            freed += size
+        self._db.executemany(
+            "DELETE FROM public_transcripts WHERE match_id = ?", [(mid,) for mid in doomed]
+        )
 
     def get(self, match_id: str) -> StoredTranscript | None:
         if not is_valid_match_id(match_id):

@@ -361,3 +361,13 @@ def test_a_failing_view_sends_the_frame_to_nobody() -> None:
     finally:
         bridge._enqueue_text = original  # type: ignore[assignment]
     assert [c.sent for c in conns.all] == [[], []]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("203.0.113.9:5678", "203.0.113.9"), ("[2001:db8::1]:443", "2001:db8::/64")],
+)
+def test_a_trusted_header_value_may_carry_a_port(value: str, expected: str) -> None:
+    from arena.server.rate_limits import client_address
+
+    assert client_address(_Headers({"X-Real-IP": [value]}), "10.0.0.1", "X-Real-IP") == expected

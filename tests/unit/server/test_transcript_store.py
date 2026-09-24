@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import sqlite3
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -494,19 +493,76 @@ def test_a_failed_file_write_leaves_no_partial_file(
     assert store.get(MID) is not None
 
 
-def test_a_sqlite_store_recovers_from_a_full_database(tmp_path: Path) -> None:
+def test_a_sqlite_store_keeps_writing_when_the_disk_fills(tmp_path: Path) -> None:
     clock = Clock()
-    store = SqliteTranscriptStore(tmp_path / "t.sqlite3", RetentionPolicy(ttl_s=100), time_fn=clock)
+    # Generous caps: the disk (max_page_count stands in for it) fills first.
+    policy = RetentionPolicy(ttl_s=10**6)
+    store = SqliteTranscriptStore(tmp_path / "t.sqlite3", policy, time_fn=clock)
     try:
-        # Cap the database's size to stand in for a full disk.
         store._db.execute("PRAGMA max_page_count = 40")
         big = b"x" * 60_000
-        with pytest.raises(sqlite3.Error) as info:
-            for i in range(100):
-                store.put(_mid(i), big, audience="public")
-        assert "full" in str(info.value).lower()  # the real error, not a rollback error
-        clock.now += 100  # everything stored so far expires
-        store.put(_mid(999), big, audience="public")  # room is made first
-        assert store.get(_mid(999)) is not None
+        for i in range(30):
+            clock.now += 1
+            store.put(_mid(i), big, audience="public")  # evicts the oldest, retries
+        assert store.get(_mid(29)) is not None
+        assert store.get(_mid(0)) is None
     finally:
         store.close()
+
+
+def test_a_file_store_keeps_writing_when_the_disk_fills(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno
+
+    clock = Clock()
+    store = FileTranscriptStore(tmp_path, RetentionPolicy(ttl_s=10**6), time_fn=clock)
+    store.put(_mid(1), b"old", audience="public")
+    real_write = store._write
+    calls = 0
+
+    def full_once(match_id: str, body: bytes, now: float) -> Path:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real_write(match_id, body, now)
+
+    monkeypatch.setattr(store, "_write", full_once)
+    clock.now += 1
+    store.put(_mid(2), b"new", audience="public")
+    assert store.get(_mid(2)) is not None
+    assert store.get(_mid(1)) is None  # evicted to make room
+
+
+def test_a_future_date_is_fixed_on_disk(tmp_path: Path) -> None:
+    from arena.server.transcript_store import FUTURE_SLACK_S
+
+    clock = Clock()
+    FileTranscriptStore(tmp_path, RetentionPolicy(ttl_s=1000), time_fn=clock).put(
+        MID, b"{}", audience="public"
+    )
+    clock.now -= FUTURE_SLACK_S + 10_000  # the clock stepped back
+    FileTranscriptStore(tmp_path, RetentionPolicy(ttl_s=1000), time_fn=clock)  # re-dates
+    clock.now += 1000
+    # A later restart sees the corrected date, so the TTL runs out.
+    reopened = FileTranscriptStore(tmp_path, RetentionPolicy(ttl_s=1000), time_fn=clock)
+    assert reopened.get(MID) is None
+
+
+def test_a_get_racing_a_replace_finds_the_new_record(tmp_path: Path, monkeypatch) -> None:
+    store = FileTranscriptStore(tmp_path, time_fn=Clock())
+    store.put(MID, b"old", audience="public")
+    real_read = Path.read_bytes
+    raced = False
+
+    def read_bytes(self: Path) -> bytes:
+        nonlocal raced
+        if not raced:
+            raced = True
+            store.put(MID, b"new", audience="public")  # replaces and deletes the old file
+        return real_read(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    got = store.get(MID)
+    assert got is not None and got.body == b"new"
