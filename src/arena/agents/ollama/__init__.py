@@ -14,6 +14,7 @@ from arena.agents.ollama.exceptions import (
     OllamaServerError,
     OllamaUnavailableError,
 )
+from arena.agents.ollama.liarsdice import LiarsDicePromptBuilder
 from arena.agents.ollama.nim import NimPromptBuilder
 from arena.agents.ollama.pig import PigPromptBuilder
 from arena.agents.ollama.probe import probe_models
@@ -21,6 +22,7 @@ from arena.agents.ollama.tictactoe import TicTacToePromptBuilder
 
 __all__: tuple[str, ...] = (
     "Connect4PromptBuilder",
+    "LiarsDicePromptBuilder",
     "NimPromptBuilder",
     "OllamaAgent",
     "OllamaClient",

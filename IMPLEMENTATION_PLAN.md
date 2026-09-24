@@ -4062,7 +4062,25 @@ Acceptance criteria:
   near the end. Outcome variants, the opening roll, and `revealing_actions=(Call(),)`. Passes the
   full shared contract, including the one-step indistinguishability check.
 
-#### Slice 2 - CLI, MCP, and Ollama adapters; per-seat live CLI
+#### Slice 2 - CLI, MCP, and Ollama adapters; per-seat live CLI — ✅ COMPLETE (2026-09-24)
+
+- **CLI adapter.**
+  - Input: `bid Q F` (also `b Q F`, `Q F`, `QxF`) or `call`/`liar`.
+  - Flags: `--liarsdice-dice` and `--liarsdice-faces`, with argparse bounds.
+  - The renderer shows exactly the view it is given: its own hand, no hands, or both in the full
+    replay. It is ASCII-only; `▶` crashed cp1252 Windows consoles, and Pig's renderer had the same
+    problem.
+- **The live CLI (`arena.cli.play`) now renders hidden games from the human's seat.**
+  `play_match(human_seats=...)`:
+  - one human: that seat's view;
+  - two humans (hot-seat): the seat to move, which is inherently leaky and documented;
+  - no human: the public view.
+
+  Perfect-information games are unchanged, and the saved JSON stays full.
+- **MCP:** a `oneOf` bid/call schema with `additionalProperties: false`.
+- **Ollama:** `LiarsDicePromptBuilder` is built from the observation, so it only knows the seat's
+  own hand. It gives per-face tallies, the standing bid and the last showdown. `format_spec` uses
+  an action enum, and the parser rejects bool/str quantities and non-raising bids.
 #### Slice 3 - Wire acceptance, demo, and real agent runs
 
 ---
