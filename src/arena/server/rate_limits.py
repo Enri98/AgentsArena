@@ -12,6 +12,7 @@ creation over HTTP, returns ``429 rate_limited`` (protocol §9).
 
 from __future__ import annotations
 
+import ipaddress
 import threading
 import time
 from collections import deque
@@ -64,23 +65,52 @@ class RateLimitExceeded(Exception):
         self.message = message
 
 
+def _bucket(address: str) -> str | None:
+    """A rate-limit bucket for ``address``, or ``None`` if it is not an IP.
+
+    IPv4-mapped IPv6 is its IPv4 address. Other IPv6 addresses are bucketed by
+    their /64: one host commonly holds a whole /64, and bucketing by the full
+    address gave it effectively unlimited buckets.
+    """
+
+    try:
+        ip = ipaddress.ip_address(address.strip())
+    except ValueError:
+        return None
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.IPv6Network((ip, 64), strict=False))
+    return str(ip)
+
+
 def client_address(headers: Any, peer_host: str | None, trusted_header: str | None) -> str:
     """The address rate limits bucket a request under.
 
     The TCP peer, unless the server is configured to trust a header its reverse
     proxy sets (Fly.io's ``Fly-Client-IP``). Behind a proxy the peer is the
     proxy, so every client would share one bucket: eight WebSocket connections
-    and five match creations a minute for the whole server. The header is
-    trusted as is, so it is only configured when the proxy is the sole way in.
+    and five match creations a minute for the whole server.
+
+    Only the right-most entry of the last header line is used: that is what the
+    operator's own proxy wrote. A proxy that appends (``X-Forwarded-For`` in
+    nginx, most load balancers) leaves whatever the client sent on the left,
+    and trusting that let a client pick its bucket, or fill a victim's.
     """
 
     if trusted_header:
-        value = headers.get(trusted_header)
-        if value:
-            first = value.split(",")[0].strip()
-            if first:
-                return first[:64]
-    return peer_host or "unknown"
+        lines = headers.getlist(trusted_header) if hasattr(headers, "getlist") else []
+        if not lines and headers.get(trusted_header):
+            lines = [headers.get(trusted_header)]
+        if lines:
+            entries = [entry.strip() for entry in lines[-1].split(",") if entry.strip()]
+            if entries:
+                bucket = _bucket(entries[-1])
+                if bucket is not None:
+                    return bucket
+    if peer_host:
+        return _bucket(peer_host) or peer_host
+    return "unknown"
 
 
 def _prune(window: deque[float], now: float, span: float) -> None:

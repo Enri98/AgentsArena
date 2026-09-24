@@ -234,3 +234,130 @@ def test_repeated_spectator_attaches_reuse_the_serialised_welcome(
                 texts.append(ws.receive_text())
     assert built == 1
     assert texts[0] == texts[1] == texts[2]
+
+
+# ── Final review: client addresses, finishing matches, atomic broadcasts ─────
+
+
+class _Headers:
+    def __init__(self, lines: dict[str, list[str]]) -> None:
+        self._lines = {k.lower(): v for k, v in lines.items()}
+
+    def getlist(self, name: str) -> list[str]:
+        return self._lines.get(name.lower(), [])
+
+    def get(self, name: str) -> str | None:
+        lines = self.getlist(name)
+        return lines[0] if lines else None
+
+
+@pytest.mark.parametrize(
+    ("lines", "expected"),
+    [
+        # A proxy that appends: the client's own value is on the left.
+        (["1.1.1.1, 203.0.113.9"], "203.0.113.9"),
+        # A second header line added by the proxy wins over the client's.
+        (["1.1.1.1", "203.0.113.9"], "203.0.113.9"),
+        (["   ,203.0.113.9 "], "203.0.113.9"),
+        (["2001:db8:1:2:3:4:5:6"], "2001:db8:1:2::/64"),
+        (["::ffff:198.51.100.7"], "198.51.100.7"),
+        (["not-an-address"], "10.0.0.1"),  # falls back to the peer
+        ([], "10.0.0.1"),
+    ],
+)
+def test_the_trusted_header_uses_what_the_proxy_wrote(lines: list[str], expected: str) -> None:
+    from arena.server.rate_limits import client_address
+
+    headers = _Headers({"X-Forwarded-For": lines} if lines else {})
+    assert client_address(headers, "10.0.0.1", "X-Forwarded-For") == expected
+
+
+def test_ipv6_peers_share_a_bucket_per_slash_64() -> None:
+    from arena.server.rate_limits import client_address
+
+    a = client_address(_Headers({}), "2001:db8::1", None)
+    b = client_address(_Headers({}), "2001:db8::ffff", None)
+    assert a == b == "2001:db8::/64"
+
+
+def test_a_finishing_match_is_never_shed() -> None:
+    from arena.games import build_default_registry
+    from arena.server.errors import ServerBusy
+
+    registry = MatchRegistry(build_default_registry(), max_matches=1)
+    match = registry.create(
+        game_id="tictactoe",
+        game_config_payload=None,
+        players_spec=[],
+        per_turn_deadline_ms=1000,
+        per_action_retry_budget=1,
+        disconnect_grace_ms=1000,
+    )
+    match.session = match.arena.abort_session(match.session)  # terminal...
+    match.driver_active = True  # ...but its driver is still sending the result
+    with pytest.raises(ServerBusy):
+        registry.create(
+            game_id="tictactoe",
+            game_config_payload=None,
+            players_spec=[],
+            per_turn_deadline_ms=1000,
+            per_action_retry_budget=1,
+            disconnect_grace_ms=1000,
+        )
+    match.driver_active = False
+    registry.create(
+        game_id="tictactoe",
+        game_config_payload=None,
+        players_spec=[],
+        per_turn_deadline_ms=1000,
+        per_action_retry_budget=1,
+        disconnect_grace_ms=1000,
+    )
+    assert match.match_id not in registry.list_match_ids()
+
+
+def test_a_failing_view_sends_the_frame_to_nobody() -> None:
+    import asyncio
+
+    from arena.server.runtime_bridge import _broadcast_per_viewer
+
+    class Conn:
+        def __init__(self, seat: int | None) -> None:
+            self.seat = seat
+            self.writer_task = object()
+            self.sent: list[str] = []
+            self.outbox_overflowed = False
+
+    class Conns:
+        def __init__(self) -> None:
+            self.all = [Conn(0), Conn(1)]
+
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            return iter(self.all)
+
+        def spectators(self) -> tuple:
+            return ()
+
+    import arena.server.runtime_bridge as bridge
+
+    conns = Conns()
+    original = bridge._enqueue_text
+    bridge._enqueue_text = lambda conn, text: conn.sent.append(text)  # type: ignore[assignment]
+    try:
+        def build(viewer: int | None) -> Any:
+            if viewer == 1:
+                raise RuntimeError("seat 1's view failed")
+            from arena.adapters.websocket.envelope import ErrorEnvelope
+            from arena.adapters.websocket.messages import ErrorBody
+
+            return ErrorEnvelope(
+                schema_version=WIRE_SCHEMA_VERSION,
+                match_id="m",
+                payload=ErrorBody(code="x", message="y"),
+            )
+
+        with pytest.raises(RuntimeError):
+            asyncio.run(_broadcast_per_viewer(conns, build))  # type: ignore[arg-type]
+    finally:
+        bridge._enqueue_text = original  # type: ignore[assignment]
+    assert [c.sent for c in conns.all] == [[], []]

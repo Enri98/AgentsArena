@@ -49,6 +49,9 @@ class Match:
     # (lifecycle, committed turns) as last seen by a sweep, and when.
     activity: tuple[str, int] = ("created", 0)
     activity_at: float = 0.0
+    # Set by run_match while it runs. A match is never evicted while its driver
+    # is still storing and sending its result.
+    driver_active: bool = False
 
 
 _TERMINAL_LIFECYCLES = frozenset({"finished", "aborted"})
@@ -209,6 +212,8 @@ class MatchRegistry:
         with self._lock:
             doomed: list[str] = []
             for match_id, match in self._matches.items():
+                if match.driver_active:
+                    continue
                 lifecycle = self._lifecycle(match)
                 local = match.session.local_match
                 activity = (lifecycle, len(local.turns) if local is not None else 0)
@@ -234,8 +239,11 @@ class MatchRegistry:
                     (
                         (0 if self._lifecycle(m) in _TERMINAL_LIFECYCLES else 1, m.activity_at, mid)
                         for mid, m in self._matches.items()
-                        if self._lifecycle(m) in _TERMINAL_LIFECYCLES
-                        or self._lifecycle(m) == "created"
+                        if not m.driver_active
+                        and (
+                            self._lifecycle(m) in _TERMINAL_LIFECYCLES
+                            or self._lifecycle(m) == "created"
+                        )
                     )
                 )
                 for _, _, match_id in sheddable[:overflow]:

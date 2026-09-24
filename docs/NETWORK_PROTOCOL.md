@@ -725,9 +725,7 @@ information.
 > ones from the seat whose turn it is. An off-turn seat's frames sit unread in its socket buffer
 > until its turn arrives, so they are not counted when sent. The cap therefore bounds work the
 > match loop performs, not raw inbound traffic — the per-IP and per-match connection caps are what
-> bound the latter. Exceeding it closes that seat's connection with `4429`; no new abort reason is
-> introduced, because the closed socket surfaces as a disconnect and the existing disconnect-grace
-> path decides the match outcome.
+> bound the latter. Exceeding it throttles (see below); it never closes a connection.
 >
 > Implementation lives in `arena/server/rate_limits.py`. Caps are injectable: the test suite runs
 > with `RateLimiter.unlimited()` because the whole suite shares one client address.
@@ -740,7 +738,9 @@ information.
 > server's, not the seat's: an action that has arrived counts as on time, and the wait is not charged
 > against the per-turn deadline (the window is shared by both seats). The cap is 10 per second.
 
-- Max concurrent WebSocket connections per source IP: **8**.
+- Max concurrent WebSocket connections per source IP: **8**. "Source IP" is the TCP peer, or the
+  right-most entry of the operator's trusted client-address header (§ DEPLOYMENT); an IPv6
+  address counts by its /64, and an IPv4-mapped one as its IPv4 address.
 - Max WebSocket opens per source IP per minute, seats and spectators alike: **60**. The
   concurrent cap alone let one client attach and detach a spectator in a loop, and each attach
   to a long match costs the server a welcome of up to megabytes.
@@ -748,9 +748,9 @@ information.
   checked before the request body is read. A create body is at most 64 KiB (`413
   request_too_large`); `players` has at most two entries, and a label at most 64 characters.
 - Max `action_response` messages per match per second: **10**, enforced by throttling (see above).
-- Max concurrent seat connections per match (seats and their reconnects): **4**. A connection
-  claims its per-match slot only once its `hello` is valid, and a resume with a valid token is
-  never refused for this cap: sockets that never said hello used to hold the slots and lock a
+- Max concurrent seat connections per match: **4**. A connection claims its per-match slot only
+  once its fresh `hello` is valid; a resume with a valid token claims none and is never refused
+  for this cap: sockets that never said hello used to hold the slots and lock a
   dropped seat out of its own reconnect. Every new connection has 10 s to send its hello.
 - Max concurrent spectators per match: **16**, counted separately, so spectators can never
   lock a seat out of its own reconnect.

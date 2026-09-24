@@ -1,8 +1,8 @@
 """Entry point: python -m arena.server [--host HOST] [--port PORT] [...].
 
-Every setting also reads an ``ARENA_*`` environment variable, which is how a
-container deployment configures it (see docs/DEPLOYMENT.md). A flag wins over
-its variable.
+The transcript and client-address settings also read ``ARENA_*`` environment
+variables, which is how a container deployment configures them (see
+docs/DEPLOYMENT.md); a flag wins over its variable.
 """
 
 from __future__ import annotations

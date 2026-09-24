@@ -707,30 +707,42 @@ async def _broadcast_per_viewer(
 
     No await point until every recipient has been queued: a spectator attaching
     in the middle would otherwise be sent turns its welcome already carried.
+
+    Every view is built before anything is queued. Building and queueing seat by
+    seat meant a failure on seat 1's view had already sent seat 0 its frame, and
+    the crash handler's retry then sent seat 0 a second terminal frame.
     """
 
+    recipients = [
+        conn
+        for conn in conns
+        if turn_index is None or turn_index >= getattr(conn, "next_turn_index", 0)
+    ]
     rendered: dict[Viewer, str] = {}
-    for conn in conns:
+    for conn in recipients:  # seats come first: a seat view failing raises here
         viewer: Viewer = None if shared else conn.seat
-        if turn_index is not None and turn_index < getattr(conn, "next_turn_index", 0):
+        if viewer in rendered:
             continue
-        if viewer not in rendered:
-            if conn.seat is None:
-                try:
-                    rendered[viewer] = dumps(build(viewer))
-                except Exception as exc:
-                    logger.warning(
-                        "public_view_failed", schema_version=1, error=str(exc)
-                    )
-                    for spectator in conns.spectators():
-                        spectator.outbox_overflowed = True
-                    break
-            else:
+        if conn.seat is None:
+            try:
                 rendered[viewer] = dumps(build(viewer))
-        if conn.writer_task is None:
-            await _send_now(conn, rendered[viewer])
+            except Exception as exc:
+                logger.warning("public_view_failed", schema_version=1, error=str(exc))
+                for spectator in conns.spectators():
+                    spectator.outbox_overflowed = True
+                break
         else:
-            _enqueue_text(conn, rendered[viewer])
+            rendered[viewer] = dumps(build(viewer))
+
+    for conn in recipients:
+        viewer = None if shared else conn.seat
+        text = rendered.get(viewer)
+        if text is None:
+            continue  # a spectator whose public view could not be built
+        if conn.writer_task is None:
+            await _send_now(conn, text)
+        else:
+            _enqueue_text(conn, text)
         if turn_index is not None and conn.seat is None:
             conn.next_turn_index = turn_index + 1
     await _shed_overflowed_spectators(conns)
@@ -1200,6 +1212,9 @@ async def run_match(
     """
     arena = match.arena
     session = match.session
+    # Until the driver exits, the registry must not shed this match: it may be
+    # terminal already while its result is still being stored and sent.
+    match.driver_active = True
 
     session = arena.start_session(session)
     match.session = session
@@ -1731,6 +1746,7 @@ async def run_match(
     finally:
         # However the driver ended, a transcript GET must stop answering 409.
         match.transcript_settled = True
+        match.driver_active = False
         # Cancel heartbeat task on any exit path.
         # (deadline_timer_task is cancelled inline at each return point via _cancel_task.)
         await _cancel_hb()
