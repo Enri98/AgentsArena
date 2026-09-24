@@ -23,6 +23,10 @@ from arena.adapters.websocket.codec import (  # noqa: E402
 # server memory that way. Exceeding it aborts with ``turn_limit_exceeded``.
 MAX_TURNS_PER_MATCH: int = 5000
 
+# The only uvicorn WebSocket implementation the match handlers work on; see
+# arena.server.__main__. Tests and every deployment entry point must use it.
+UVICORN_WS_IMPL: str = "websockets-sansio"
+
 # Heartbeat defaults (Phase 32).  arena.server owns all deadline/heartbeat logic.
 HEARTBEAT_INTERVAL_MS: int = 20_000
 HEARTBEAT_MAX_MISSES: int = 2

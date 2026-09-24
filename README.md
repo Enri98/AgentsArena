@@ -139,7 +139,7 @@ assert final_match.rules_engine.is_terminal(final_match.state)
 For pure local runtime sessions, use `arena.runtime` to add match ids, player metadata, lifecycle, and UI-safe payload envelopes around the existing local match flow:
 
 The runtime envelopes are versioned with a fixed `schema_version` in the payload schema itself.
-For the current contract, both status and transcript payloads require `schema_version == 1`.
+Both status and transcript payloads are at `schema_version == 3` (Phase 38); readers accept 1-3.
 Any incompatible runtime payload change should bump that value intentionally rather than widening validation.
 
 ```python
@@ -213,14 +213,14 @@ session = arena.run_session(
 
 status = dump_session_status(session)
 validated_status = validate_session_status(status)
-assert status["schema_version"] == 1
+assert status["schema_version"] == 3
 assert validated_status.lifecycle == "finished"
 assert status["current_seat"] is None
 assert status["latest_snapshot"]["game_id"] == "connect4"
 
 runtime_transcript = dump_runtime_transcript(session)
 loaded = validate_runtime_transcript(Connect4GameDefinition, runtime_transcript)
-assert runtime_transcript["schema_version"] == 1
+assert runtime_transcript["schema_version"] == 3
 assert all(event["event_scope"] == "runtime" for event in runtime_transcript["events"])
 assert loaded is not None
 assert loaded.latest_state == session.local_match.state

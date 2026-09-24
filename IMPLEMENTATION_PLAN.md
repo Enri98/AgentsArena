@@ -3928,12 +3928,62 @@ code.
   still replays, and a seat's transcript is refused for replay. A reconnect replays exactly the
   turns the seat was sent live, field for field.
 
-Known limitation, documented in protocol §11: reconnects are fully supported only for the active
-seat. An off-turn seat's disconnect is noticed only on its turn, so an early reconnect can miss
-frames. The match-owned driver deferred to Phase 41 is the fix.
-
 Deferred to Phase 39: rendering a hidden game in the *live* local CLI (`arena.cli.play`) from the
 human seat's perspective. No hidden game is registered yet, so nothing leaks today.
+
+#### Adversarial review of Slices 2-3, and a real-server check — fixes landed (2026-09-24)
+
+Two more reviewers attacked `fae369c`: one on the leak surface, one on correctness. Every
+confirmed finding is fixed with a regression test.
+
+- **High: post-match seat hijack.** A finished match releases its seats, and the match id, which
+  every spectator holds, was enough to claim one and read that seat's private transcript. Now
+  `hello` and reconnects are refused (`4410 match_over`) once the driver has ended, and resume
+  tokens are invalidated. Residual, documented in protocol §11: until both seats are claimed,
+  anyone who can spectate can take a seat. That is inherent to capability-by-match-id; separate
+  spectate capabilities belong with real auth (deferred).
+- **Off-turn reconnect** used to abort the match and blame the reconnecting seat. The reconnect
+  handler now swaps the new connection in within the same uninterrupted step that builds its
+  replay transcript: no gap, no duplicate, active seat or not. The driver uses the already-swapped
+  connection, and the old `reconnect_event.clear()` race is gone.
+- **Attach/detach DoS:** transcripts are cached per (match, view, progress). Perfect-information
+  broadcasts are built once, not three times.
+- **Contract:** the one-step check now compares the blind seat's observation and legal actions
+  after the move or outcome. `revealing_actions` lets a showdown (Liar's Dice "call") reveal
+  legitimately.
+- **UI/CLI:** status and transcript must be the same perspective. The CLI redacts each full file
+  independently, and `--seat` gets an argparse type. The UI event mirror keeps public events'
+  shape.
+- **Validator:** forged `is_public`/`audience` markers are rejected. `transcript_view_for`
+  validates its viewer.
+- **MCP:** an out-of-turn `make_move` returns `not_committed` when the next observation arrives,
+  instead of waiting 30 s while the seat's deadline runs.
+- **Small fixes:**
+  - a public-view build failure sheds spectators instead of crashing the driver;
+  - a failed spectator welcome closes the spectator;
+  - a replaced seat's writer is stopped;
+  - `create_app(max_turns_per_match=)`;
+  - envelopes and welcome share one match id.
+- Docs: §6/§7 version and negotiation text, README version asserts, CLAUDE.md's
+  `adapters.websocket` import rule (the architecture test allows `arena.runtime.payloads`).
+
+**The production server has been broken for every match, found by running the real stack.**
+`python -m arena.server`, which the Dockerfile runs, aborted every match `peer_disconnected`, for
+two reasons:
+1. uvicorn's default `websockets` implementation corrupts its receive state when a pending
+   `receive_text()` is cancelled, and the first-arriving seat's handler does exactly that while
+   waiting for its opponent. The test servers always ran `websockets-sansio`, so CI never saw it.
+   The entry point now uses `UVICORN_WS_IMPL = "websockets-sansio"`, pinned by a test.
+2. The §13 action cap closed a seat with `4429` at 2 actions per second, which fast bots exceed
+   instantly. The cap now **throttles** at 10 per second: reads are delayed, bounding work the
+   same way, and a flooder only burns its own turn deadline.
+
+After both fixes, two Ollama agents played Pig to completion through `examples/run_remote_demo.py`
+against a real `python -m arena.server`, and both seats' transcripts validated.
+
+Still open, documented: a buggy engine whose chance resolution raises after an action is reported
+against the acting seat; `examples/run_remote_demo.py` assumes identical, replayable seat
+transcripts and needs adapting for Liar's Dice (Phase 39).
 
 ---
 

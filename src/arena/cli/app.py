@@ -29,12 +29,15 @@ def _load(
     with open(transcript_path, encoding="utf-8") as fh:
         transcript_payload: dict[str, Any] = json.load(fh)
 
-    if seat is not None and transcript_payload.get("view", "full") == "full":
+    if seat is not None:
         from arena.games import build_default_registry
         from arena.runtime.payloads import redact_runtime_transcript, redact_session_status
 
+        # Each file is redacted on its own: a full status beside a seat-view
+        # transcript would otherwise show the full state.
         definition = build_default_registry().get(transcript_payload["game_id"])
-        transcript_payload = redact_runtime_transcript(definition, transcript_payload, seat)
+        if transcript_payload.get("view", "full") == "full":
+            transcript_payload = redact_runtime_transcript(definition, transcript_payload, seat)
         if status_payload.get("view", "full") == "full":
             status_payload = redact_session_status(definition, status_payload, seat)
 

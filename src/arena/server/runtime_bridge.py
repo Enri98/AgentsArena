@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import secrets as _secrets
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from dataclasses import replace as dc_replace
@@ -103,7 +104,6 @@ from arena.runtime.payloads import (
 )
 from arena.runtime.session import MatchSession
 from arena.server.config import MAX_TURNS_PER_MATCH
-from arena.server.rate_limits import CLOSE_RATE_LIMITED, RateLimitExceeded
 
 if TYPE_CHECKING:
     from fastapi import WebSocket
@@ -213,6 +213,10 @@ class MatchConnections:
         twice.
         """
 
+        old = self._seats.get(seat)
+        if old is not None and old is not conn and old.writer_task is not None:
+            old.writer_task.cancel()
+            old.writer_task = None
         self._seats[seat] = conn
         _start_writer(conn)
 
@@ -270,10 +274,9 @@ async def send_spectator_welcome(
 
     transcript: RuntimeTranscriptPayload | None = None
     if local_match is not None:
-        try:
-            transcript = _build_transcript_payload(session, None)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("spectator_transcript_failed", error=str(exc))
+        # Not swallowed: a spectator whose welcome lacks the history would never
+        # get it (the watermark skips those turns). The handler closes it instead.
+        transcript = _build_transcript_payload(session, None)
     # Every turn up to here is in the welcome's transcript; live frames resume
     # after it. See SpectatorConnection.next_turn_index.
     conn.next_turn_index = turn_count
@@ -347,14 +350,33 @@ def _dump_abort_dict(abort: AbortMetadata) -> dict:
     return payload.model_dump(mode="json")
 
 
+#: Recently built transcripts, keyed by what determines their content. Building
+#: one is linear in match length (~0.5 s at the turn cap), and a client can loop
+#: attach/detach as a spectator, or reconnect, against a long match; without a
+#: cache each loop blocks the event loop and stalls every match on the server.
+_TRANSCRIPT_CACHE: "OrderedDict[tuple, RuntimeTranscriptPayload]" = OrderedDict()
+_TRANSCRIPT_CACHE_SIZE = 32
+
+
 def _build_transcript_payload(session: MatchSession, viewer: Viewer) -> RuntimeTranscriptPayload:
     """The transcript ``viewer`` may receive: its seat's, or the public's (``None``).
 
     Never the full one: for a hidden-information game that exists only here.
     """
 
-    raw = dump_runtime_transcript(session, viewer=viewer)
-    return RuntimeTranscriptPayload.model_validate(raw)
+    turns = len(session.local_match.turns) if session.local_match is not None else -1
+    key = (session.match_id, viewer, turns, session.lifecycle.value, len(session.events))
+    cached = _TRANSCRIPT_CACHE.get(key)
+    if cached is not None:
+        _TRANSCRIPT_CACHE.move_to_end(key)
+        return cached
+    payload = RuntimeTranscriptPayload.model_validate(
+        dump_runtime_transcript(session, viewer=viewer)
+    )
+    _TRANSCRIPT_CACHE[key] = payload
+    while len(_TRANSCRIPT_CACHE) > _TRANSCRIPT_CACHE_SIZE:
+        _TRANSCRIPT_CACHE.popitem(last=False)
+    return payload
 
 
 async def _send_now(conn: SeatConnection, text: str) -> bool:
@@ -501,13 +523,18 @@ async def _broadcast_per_viewer(
     build: Callable[[Viewer], Any],
     *,
     turn_index: int | None = None,
+    shared: bool = False,
 ) -> None:
     """Send each recipient the envelope built for its own view (Phase 38).
 
     A seat's viewer is its seat; a spectator's is ``None``, the public. Each
-    distinct view is built and serialised once, so a perfect-information match
-    still serialises one payload per broadcast, and even a hidden-information one
-    at most one per seat plus one public.
+    distinct view is built and serialised once: at most one per seat plus one
+    public. With ``shared`` (a perfect-information game, where every view is the
+    same) a single payload serves everyone.
+
+    If building the public view fails, spectators are dropped rather than the
+    match: an error in a view only a spectator needs must not end a match the
+    seats are playing.
 
     ``turn_index`` marks a turn_committed frame. A spectator whose welcome already
     carried that turn is skipped.
@@ -518,11 +545,22 @@ async def _broadcast_per_viewer(
 
     rendered: dict[Viewer, str] = {}
     for conn in conns:
-        viewer: Viewer = conn.seat
+        viewer: Viewer = None if shared else conn.seat
         if turn_index is not None and turn_index < getattr(conn, "next_turn_index", 0):
             continue
         if viewer not in rendered:
-            rendered[viewer] = dumps(build(viewer))
+            if conn.seat is None:
+                try:
+                    rendered[viewer] = dumps(build(viewer))
+                except Exception as exc:
+                    logger.warning(
+                        "public_view_failed", schema_version=1, error=str(exc)
+                    )
+                    for spectator in conns.spectators():
+                        spectator.outbox_overflowed = True
+                    break
+            else:
+                rendered[viewer] = dumps(build(viewer))
         if conn.writer_task is None:
             await _send_now(conn, rendered[viewer])
         else:
@@ -584,6 +622,7 @@ async def _broadcast_turns_committed(
             conns,
             lambda viewer, i=turn_index: _build_turn_committed_env(session, i, viewer),
             turn_index=turn_index,
+            shared=not session.definition.has_hidden_information,
         )
 
 
@@ -643,7 +682,9 @@ async def _broadcast_match_finished(
             ),
         )
 
-    await _broadcast_per_viewer(conns, build)
+    await _broadcast_per_viewer(
+        conns, build, shared=not session.definition.has_hidden_information
+    )
 
 
 async def _broadcast_match_aborted(
@@ -666,7 +707,9 @@ async def _broadcast_match_aborted(
             ),
         )
 
-    await _broadcast_per_viewer(conns, build)
+    await _broadcast_per_viewer(
+        conns, build, shared=not session.definition.has_hidden_information
+    )
 
 
 async def _close_both(
@@ -870,24 +913,27 @@ async def _receive_action(
             continue
 
         if limiter is not None:
-            try:
-                limiter.check_action(match_id=match_id)
-            except RateLimitExceeded as exc:
-                logger.warning(
-                    "rate_limited",
+            # Protocol 13: throttle, don't disconnect. Waiting bounds the work
+            # the loop does per match exactly as closing did, but a fast,
+            # legitimate agent is no longer shed. The wait still honours the
+            # per-turn deadline.
+            delay = limiter.reserve_action(match_id=match_id)
+            if delay > 0:
+                logger.info(
+                    "action_throttled",
                     match_id=match_id,
                     seat=active_conn.seat,
                     schema_version=1,
-                    scope=exc.scope,
-                    detail=exc.message,
+                    delay_ms=int(delay * 1000),
                 )
-                try:
-                    await active_conn.websocket.close(
-                        code=CLOSE_RATE_LIMITED, reason=exc.scope
-                    )
-                except Exception:
-                    pass
-                return None, None, "disconnected"
+                if deadline_event is not None:
+                    try:
+                        await asyncio.wait_for(deadline_event.wait(), timeout=delay)
+                        return None, None, _DEADLINE_EXPIRED
+                    except asyncio.TimeoutError:
+                        pass
+                else:
+                    await asyncio.sleep(delay)
 
         turn_id = envelope.turn_id or str(uuid.uuid4())
 
@@ -1175,7 +1221,12 @@ async def run_match(
                         await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
-                    reconnect_event.clear()
+                    # The reconnect handler swaps the new connection into
+                    # conns itself. If that already happened, there is nothing
+                    # to wait for; checking first also closes the window where
+                    # clearing the event would discard a reconnect that beat us.
+                    if conns[active_seat] is active_conn:
+                        reconnect_event.clear()
                     logger.debug(
                         "seat_disconnected_awaiting_reconnect",
                         match_id=match.match_id,
@@ -1184,7 +1235,8 @@ async def run_match(
                         schema_version=1,
                     )
                     try:
-                        await asyncio.wait_for(reconnect_event.wait(), timeout=grace_s)
+                        if conns[active_seat] is active_conn:
+                            await asyncio.wait_for(reconnect_event.wait(), timeout=grace_s)
                     except asyncio.TimeoutError:
                         session = arena.abort_session(
                             session,
@@ -1204,12 +1256,14 @@ async def run_match(
                         await _close_both(conns, WS_CLOSE_NORMAL, "peer_disconnected")
                         return
 
-                    # Reconnected: swap in the new SeatConnection.
-                    new_conn = (
-                        _get_reconnect_conns(app_state)
-                        .get(match.match_id, {})
-                        .get(active_seat)
-                    )
+                    # Reconnected: use the connection the handler swapped in.
+                    new_conn = conns[active_seat]
+                    if new_conn is active_conn:
+                        new_conn = (
+                            _get_reconnect_conns(app_state)
+                            .get(match.match_id, {})
+                            .get(active_seat)
+                        )
                     if new_conn is None:
                         session = arena.abort_session(
                             session,

@@ -21,7 +21,11 @@ from collections.abc import Callable, Sequence
 
 MAX_WS_CONNECTIONS_PER_IP: int = 8
 MAX_MATCH_CREATIONS_PER_IP_PER_MIN: int = 5
-MAX_ACTIONS_PER_MATCH_PER_SEC: int = 2
+#: Throttled, not disconnected (see ``reserve_action``). 2 per second, the v1
+#: figure, was chosen as "well above any sane agent", but a scripted or fast
+#: bot plays two alternating moves in milliseconds; closing it with 4429 then
+#: aborted the match as peer_disconnected, blaming a seat that did nothing wrong.
+MAX_ACTIONS_PER_MATCH_PER_SEC: int = 10
 MAX_CONNECTIONS_PER_MATCH: int = 4
 
 MATCH_CREATION_WINDOW_S: float = 60.0
@@ -186,6 +190,29 @@ class RateLimiter:
                     f"(cap {self._max_actions_per_match} per second).",
                 )
             window.append(now)
+
+    def reserve_action(self, *, match_id: str) -> float:
+        """Reserve the next action slot on ``match_id``; return seconds to wait.
+
+        The cap bounds the work the match loop does per match, and delaying the
+        read bounds it just as well as closing the connection, without punishing
+        a legitimate fast agent. A flooding seat only slows itself: it is the
+        active seat, so its own per-turn deadline keeps running.
+
+        Returns 0.0 when a slot is free now. Otherwise the slot is reserved at
+        the moment the window next has room, and the caller waits until then.
+        """
+
+        now = self._now()
+        with self._lock:
+            window = self._actions.setdefault(match_id, deque())
+            _prune(window, now, ACTION_WINDOW_S)
+            if len(window) < self._max_actions_per_match:
+                window.append(now)
+                return 0.0
+            slot = max(now, window[-self._max_actions_per_match] + ACTION_WINDOW_S)
+            window.append(slot)
+            return slot - now
 
     # ── Cleanup ────────────────────────────────────────────────────────────
 

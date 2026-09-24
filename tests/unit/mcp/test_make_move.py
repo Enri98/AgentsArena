@@ -52,3 +52,28 @@ def test_make_move_returns_the_callers_own_turn() -> None:
     confirmed = asyncio.run(run())
     assert confirmed["turn_record"]["turn_index"] == 2
     assert confirmed["turn_record"]["seat"] == 0
+
+
+def test_an_out_of_turn_move_returns_as_soon_as_an_observation_arrives() -> None:
+    """The server discards an out-of-turn action; waiting 30 s for a confirmation
+    that never comes would burn the seat's own deadline (review of Phase 38)."""
+
+    from arena.sdk._events import ObservationEvent
+
+    async def run() -> tuple[dict, list]:
+        queue: asyncio.Queue = asyncio.Queue()
+        observation = ObservationEvent(body=SimpleNamespace(model_dump=lambda mode: {}))
+        queue.put_nowait(_committed(0, 1))
+        queue.put_nowait(observation)
+        handle = SimpleNamespace(queue=queue, session=_Session())
+        registry = SimpleNamespace(get=lambda match_id, seat: handle)
+        result = await asyncio.wait_for(
+            _make_move(registry, {"match_id": "m", "seat": 0, "action": {"choice": "roll"}}),
+            timeout=5,
+        )
+        remaining = [queue.get_nowait() for _ in range(queue.qsize())]
+        return json.loads(result.content[0].text), remaining
+
+    error, remaining = asyncio.run(run())
+    assert error["error"] is True and error["code"] == "not_committed"
+    assert any(type(e).__name__ == "ObservationEvent" for e in remaining)

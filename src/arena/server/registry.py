@@ -110,15 +110,18 @@ class MatchRegistry:
             for i, spec in enumerate(players_spec)
         )
 
+        # One id everywhere: the session used to mint its own, so envelopes
+        # built from session.match_id disagreed with welcome and GET /matches.
+        match_id = secrets.token_urlsafe(16)
         arena = Arena()
         session = arena.create_session(
             definition=definition,
             config=config,
             players=list(players),
             policy_bindings={},
+            match_id=match_id,
         )
 
-        match_id = secrets.token_urlsafe(16)
         match = Match(
             match_id=match_id,
             game_id=game_id,

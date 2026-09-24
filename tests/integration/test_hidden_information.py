@@ -320,3 +320,145 @@ def test_a_reconnect_replays_the_seats_own_history_and_adds_nothing(secrets_serv
         for key in ("kind", "seat", "action", "outcome", "events", "post_snapshot"):
             assert record[key] == turn[key], key
     assert rewelcome["payload"]["match_config"] == {"max_turns": 4}
+
+
+# ---------------------------------------------------------------------------
+# Adversarial review of Phase 38 Slices 2-3
+# ---------------------------------------------------------------------------
+
+
+def test_no_seat_can_be_claimed_or_resumed_after_the_match(secrets_server) -> None:
+    """A finished match releases its seats; claiming one must not hand anyone
+    holding the match id (every spectator) that seat's private transcript."""
+
+    from arena.adapters.websocket import dumps
+
+    server, _ = secrets_server
+
+    async def run() -> list[tuple[int | None, str]]:
+        resp = httpx.post(
+            f"{server.http_base_url}/matches",
+            json={"game_id": "secrets-game", "game_config": {"max_turns": 2}},
+        )
+        match = resp.json()
+        tokens: list[str] = []
+        async with (
+            await connect(match["seat_0_url"]) as ws0,
+            await connect(match["seat_1_url"]) as ws1,
+        ):
+            seen0: list[dict] = []
+            await ws0.send(dumps(_hello(0)))
+            tokens.append((await _until(ws0, "welcome", seen0))["payload"]["resume_token"])
+            await ws1.send(dumps(_hello(1)))
+            await _until(ws1, "welcome", [])
+            await asyncio.gather(
+                play_scripted_after_welcome(ws0, 0), play_scripted_after_welcome(ws1, 1)
+            )
+
+        outcomes = []
+        for hello in (_hello(0), _hello(1), _hello(0, tokens[0])):
+            url = match["seat_0_url"] if hello.seat == 0 else match["seat_1_url"]
+            async with await connect(url) as ws:
+                await ws.send(dumps(hello))
+                try:
+                    frame = await asyncio.wait_for(ws.recv(), timeout=5)
+                    outcomes.append((None, json.loads(frame)["type"]))
+                except websockets.exceptions.ConnectionClosed as exc:
+                    outcomes.append((exc.rcvd.code if exc.rcvd else None, exc.rcvd.reason))
+        return outcomes
+
+    outcomes = asyncio.run(asyncio.wait_for(run(), timeout=60))
+    assert outcomes == [(4410, "match_over")] * 3
+
+
+async def play_scripted_after_welcome(ws: Any, seat: int) -> None:
+    from arena.adapters.websocket import dumps
+
+    while True:
+        frame = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+        if frame["type"] == "observation_request":
+            await ws.send(dumps(_pass_env(seat)))
+        if frame["type"] in ("match_finished", "match_aborted"):
+            return
+
+
+def test_an_off_turn_reconnect_is_swapped_in_with_no_gap(secrets_server) -> None:
+    """Seat 0 drops while seat 1 is to move and comes straight back. The match
+    must continue (it used to abort, blaming seat 0), and the replayed history
+    plus the live frames after it must cover every turn exactly once."""
+
+    from arena.adapters.websocket import dumps
+
+    server, _ = secrets_server
+
+    async def run() -> tuple[dict, list[dict], dict]:
+        resp = httpx.post(
+            f"{server.http_base_url}/matches",
+            json={
+                "game_id": "secrets-game",
+                "game_config": {"max_turns": 4},
+                "disconnect_grace_ms": 10_000,
+            },
+        )
+        match = resp.json()
+        ws0 = await connect(match["seat_0_url"])
+        ws1 = await connect(match["seat_1_url"])
+        await ws0.send(dumps(_hello(0)))
+        token = (await _until(ws0, "welcome", []))["payload"]["resume_token"]
+        await ws1.send(dumps(_hello(1)))
+        await _until(ws1, "welcome", [])
+
+        await _until(ws0, "observation_request", [])
+        await ws0.send(dumps(_pass_env(0)))
+        # Seat 1 is to move; seat 0 drops and reconnects before seat 1 acts.
+        await _until(ws1, "observation_request", [])
+        await ws0.close()
+        ws0 = await connect(match["seat_0_url"])
+        await ws0.send(dumps(_hello(0, token)))
+        after: list[dict] = []
+        rewelcome = await _until(ws0, "welcome", after)
+
+        await ws1.send(dumps(_pass_env(1)))
+        await _until(ws0, "observation_request", after)
+        await ws0.send(dumps(_pass_env(0)))
+        await _until(ws1, "observation_request", [])
+        await ws1.send(dumps(_pass_env(1)))
+        finished = await _until(ws0, "match_finished", after)
+        await ws0.close()
+        await ws1.close()
+        return rewelcome, after, finished
+
+    rewelcome, after, finished = asyncio.run(asyncio.wait_for(run(), timeout=60))
+
+    replayed = len(rewelcome["payload"]["transcript"]["match_transcript"]["turns"])
+    live = [
+        f["payload"]["turn_record"]["turn_index"]
+        for f in after
+        if f["type"] == "turn_committed"
+    ]
+    total = len(finished["payload"]["transcript"]["match_transcript"]["turns"])
+    assert live == list(range(replayed, total))
+    assert finished["payload"]["transcript"]["lifecycle"] == "finished"
+
+
+def test_every_envelope_carries_the_match_id_from_post_matches(secrets_server) -> None:
+    server, _ = secrets_server
+
+    async def run() -> tuple[str, set[str]]:
+        resp = httpx.post(
+            f"{server.http_base_url}/matches", json={"game_id": "secrets-game"}
+        )
+        match = resp.json()
+        frames: list[str] = []
+        async with (
+            await connect(match["seat_0_url"]) as ws0,
+            await connect(match["seat_1_url"]) as ws1,
+        ):
+            await asyncio.gather(
+                play_scripted(ws0, 0, _pass, frames=frames), play_scripted(ws1, 1, _pass)
+            )
+        ids = {json.loads(f).get("match_id") for f in frames} - {None}
+        return match["match_id"], ids
+
+    match_id, ids = asyncio.run(asyncio.wait_for(run(), timeout=60))
+    assert ids == {match_id}

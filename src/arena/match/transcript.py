@@ -17,6 +17,7 @@ from arena.core.game_definition import GameDefinition
 from arena.core.observations import Observation
 from arena.core.public_view import (
     Viewer,
+    check_viewer,
     dump_chance_outcome_for_viewer,
     dump_config_for_viewer,
 )
@@ -288,6 +289,14 @@ def _ensure_turn_shapes(payload: MatchTranscriptPayload) -> None:
         raise ValueError("Only a seat-view transcript has a viewer_seat.")
 
     for index, turn in enumerate(payload.turns, start=1):
+        for event in turn.events:
+            marked = {"is_public", "audience"} & event.model_fields_set
+            if marked and payload.schema_version < 3:
+                raise ValueError(f"Turn {index}: event audiences predate schema_version 3.")
+            if event.is_public and event.audience is not None:
+                raise ValueError(f"Turn {index}: a public event has no audience.")
+            if not event.is_public and not event.audience:
+                raise ValueError(f"Turn {index}: a private event must name its audience.")
         if turn.kind == TURN_KIND_CHANCE:
             if payload.schema_version < 2:
                 raise ValueError(
@@ -443,6 +452,7 @@ def transcript_view_for(
     exactly what they were before views existed.
     """
 
+    check_viewer(viewer)
     if not definition.has_hidden_information:
         return VIEW_FULL, None
     if viewer is None:

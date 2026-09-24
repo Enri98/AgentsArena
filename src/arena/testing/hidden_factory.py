@@ -281,6 +281,7 @@ class SecretsContractBundle:
     private_variants: tuple[object, ...]
     chance_state: SecretsState
     private_outcome_variants: tuple[object, ...]
+    revealing_actions: tuple[object, ...] = ()
 
 
 def build_secrets_contract_bundle() -> SecretsContractBundle:

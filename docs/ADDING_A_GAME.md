@@ -327,7 +327,7 @@ The PostToolUse hook handles this automatically on Claude Code sessions. Per
 - **Mutating events with non-JSON-native fields.** Use `list[int]`, not
   `tuple[int, ...]`, for event fields that are dumped verbatim; transcripts
   validate strictly. See `NimObjectsTaken.remaining`.
-- **`schema_version` drift.** Runtime payloads are at `schema_version=2`. New
+- **`schema_version` drift.** Runtime payloads are at `schema_version=3`. New
   games inherit this; bumping it is an explicit, separate change.
 
 ## Games with chance nodes
@@ -364,9 +364,41 @@ validates without the seed, and the seed never appears in the transcript. If onl
 one action can end the game, set `terminal_action` on your contract bundle, as
 Pig's does.
 
+## Games with hidden information
+
+Since Phase 38 a game may keep information private to a seat (a hand of cards,
+dice under a cup). `arena.testing.hidden_factory` (the secrets game) is the
+minimal reference; Liar's Dice (Phase 39) will be the full one.
+
+1. Set `has_hidden_information=True`. Registration then requires:
+   - `rules_engine.public_state(state)`
+   - serializer `dump_public_state` / `load_public_state` (what spectators see)
+   - serializer `dump_state_for_seat(state, seat)` (what one seat sees)
+   - if the game also has chance nodes, `dump_chance_outcome_for_seat(outcome,
+     seat)` and `dump_public_chance_outcome(outcome)`. A deal is usually private.
+2. `observation(state, seat)` must contain only what `seat` may see. The
+   observation *object* matters, not just its dump: in-process agents receive
+   the object.
+3. An event carrying private information overrides
+   `DomainEvent.visible_to(viewer)` (``viewer`` is a seat, or ``None`` for the
+   public). The server delivers it only to seats it is visible to.
+4. Config and actions are public. Never put a secret or a seed in either.
+
+The server does the rest: every snapshot, event, chance outcome, transcript and
+welcome config is built per recipient.
+
+The contract suite proves the redaction by **indistinguishability**. Your bundle
+supplies `private_variants`: `PrivateVariant(state, variant, blind_seat)` pairs
+that differ only in what `blind_seat` may not see, covering every seat as the
+blind one and more than one state. For chance games it also supplies
+`chance_state` and `private_outcome_variants`. Everything the blind seat receives
+must be identical across each pair: its state view, observation, legal actions,
+the public view, and the events and views one step later. A game that opens at a
+chance node also supplies `opening_outcomes`. See
+`build_secrets_contract_bundle()`.
+
 ## Still out of scope
 
-- Imperfect information (hidden hands, private state) — Phase 38
 - Simultaneous moves — Phase 41
 - More than two seats
 

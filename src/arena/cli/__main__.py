@@ -8,6 +8,16 @@ import sys
 from arena.cli.app import render_all_frames, render_session_from_files
 
 
+def _seat(text: str) -> int:
+    try:
+        seat = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a seat: {text!r}") from None
+    if seat not in (0, 1):
+        raise argparse.ArgumentTypeError("a seat is 0 or 1")
+    return seat
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m arena.cli",
@@ -21,7 +31,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--seat",
-        type=int,
+        type=_seat,
         metavar="N",
         help=(
             "Render seat N's view: what that seat could see during the match. "

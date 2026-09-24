@@ -16,7 +16,6 @@ from arena.adapters.websocket import (
     WIRE_SCHEMA_VERSION,
     ErrorEnvelope,
     MatchStateEnvelope,
-    dumps,
     loads,
 )
 from arena.adapters.websocket.errors import SchemaVersionMismatch, WireProtocolError
@@ -207,6 +206,14 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         )
         return
 
+    # 4b. Phase 38: once a match's driver has ended, no seat can be claimed. The
+    # finished match stays in the registry for late transcript reads, and its
+    # seats are released, so without this anyone holding the match id (every
+    # spectator) could take a seat and read that seat's private transcript.
+    if _match_closed(match, app_state):
+        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_over")
+        return
+
     # 5. Validate requested_seat matches the URL ?seat= param.
     if hello.requested_seat != seat:
         await _close(ws, _CLOSE_MALFORMED, "seat_mismatch")
@@ -337,6 +344,8 @@ async def _play_session(ws: WebSocket, match_id: str, seat: int = -1) -> None:
             )
         finally:
             done_event.set()
+            # A resume token must not outlive the match it resumes (Phase 38).
+            match.resume_tokens.clear()
             seat_slots[match_id] = {0: None, 1: None}
             _get_match_conns(app_state).pop(match_id, None)
             _get_pending_spectators(app_state).pop(match_id, None)
@@ -365,7 +374,18 @@ async def _handle_reconnect(
     app_state: Any,
     supported_schema_versions: list[int],
 ) -> None:
-    """Handle a reconnecting client presenting a valid resume_token."""
+    """Handle a reconnecting client presenting a valid resume_token.
+
+    Phase 38: the new connection takes over the seat's broadcast slot in the same
+    uninterrupted step that builds its replay transcript. Every turn committed
+    before the swap is in ``welcome.transcript``, and every turn after it arrives
+    live, with no gap and no duplicate. That also makes an off-turn reconnect
+    work: the seat is swapped in straight away rather than when its turn comes.
+    """
+
+    if _match_closed(match, app_state):
+        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_over")
+        return
 
     # Validate token.
     expected = match.resume_tokens.get(seat)
@@ -383,7 +403,13 @@ async def _handle_reconnect(
     # send_welcome rotates the resume_token in match.resume_tokens[seat] atomically.
     # Phase 38: the welcome carries the seat's own transcript so far (§11), so a
     # reconnecting client recovers everything it missed and nothing more.
+    from arena.server.runtime_bridge import _build_match_state_body, _send, _start_writer
+
     new_conn = SeatConnection(websocket=ws, seat=seat)
+    # With its writer running, every send below only queues: nothing from here
+    # to replace_seat yields to the event loop, so no turn can commit between
+    # the transcript being built and the connection joining the broadcast.
+    _start_writer(new_conn)
     try:
         await send_welcome(new_conn, match, with_transcript=True)
     except Exception:
@@ -391,18 +417,18 @@ async def _handle_reconnect(
         return
 
     # Send current match_state so the client knows the lifecycle.
-    from arena.server.runtime_bridge import _build_match_state_body
-
-    state_body = _build_match_state_body(match.session)
-    state_env = MatchStateEnvelope(
-        schema_version=WIRE_SCHEMA_VERSION,
-        match_id=match_id,
-        payload=state_body,
+    await _send(
+        new_conn,
+        MatchStateEnvelope(
+            schema_version=WIRE_SCHEMA_VERSION,
+            match_id=match_id,
+            payload=_build_match_state_body(match.session),
+        ),
     )
-    try:
-        await ws.send_text(dumps(state_env))
-    except Exception:
-        pass
+
+    live = _get_match_conns(app_state).get(match_id)
+    if live is not None:
+        live.replace_seat(seat, new_conn)
 
     # Register new connection so run_match can pick it up.
     reconnect_conns = _get_reconnect_conns(app_state)
@@ -438,6 +464,15 @@ async def _safe_receive_text(ws: WebSocket) -> str | None:
         return await ws.receive_text()
     except Exception:
         return None
+
+
+def _match_closed(match: Match, app_state: Any) -> bool:
+    """Whether the match's driver has ended: finished, aborted, or crashed."""
+
+    done = _get_done_events(app_state).get(match.match_id)
+    if done is not None and done.is_set():
+        return True
+    return match.session.lifecycle.value in ("finished", "aborted")
 
 
 # ---------------------------------------------------------------------------

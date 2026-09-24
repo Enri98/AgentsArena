@@ -7,7 +7,11 @@ from __future__ import annotations
 
 from fastapi import FastAPI
 
-from arena.server.config import HEARTBEAT_INTERVAL_MS, HEARTBEAT_MAX_MISSES
+from arena.server.config import (
+    HEARTBEAT_INTERVAL_MS,
+    HEARTBEAT_MAX_MISSES,
+    MAX_TURNS_PER_MATCH,
+)
 from arena.server.rate_limits import RateLimiter
 from arena.server.registry import MatchRegistry
 from arena.server.routes_http import router as http_router
@@ -20,6 +24,7 @@ def create_app(
     heartbeat_interval_ms: int | None = None,
     heartbeat_max_misses: int | None = None,
     rate_limiter: RateLimiter | None = None,
+    max_turns_per_match: int | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -77,6 +82,10 @@ def create_app(
         heartbeat_max_misses if heartbeat_max_misses is not None else HEARTBEAT_MAX_MISSES
     )
     app.state.rate_limiter = limiter
+    # Committed turns per match, chance turns included; see config.
+    app.state.max_turns_per_match = (
+        max_turns_per_match if max_turns_per_match is not None else MAX_TURNS_PER_MATCH
+    )
 
     app.include_router(http_router)
     app.include_router(ws_router)

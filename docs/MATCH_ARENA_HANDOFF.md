@@ -90,7 +90,28 @@ roll. Chance is now nature's action: `sample_chance(state, rng)` draws an outcom
 `LocalMatch.rng`, never in state, config, or any payload. Transcripts record outcomes, and replay
 (`start_replay_match`) applies them without the seed.
 
-Active phase: **38 — imperfect-information contract**, carrying the bump to `schema_version=3`.
+**Phase 38 is complete** (2026-09-24), carrying the bump to `schema_version=3`. Every payload a
+client receives is now built for that recipient. A viewer is a seat, or `None` for the public.
+Snapshots, chance outcomes, domain events (`DomainEvent.visible_to`), transcripts (`view`:
+full/seat/public), and `welcome.match_config` are all redacted per viewer, and a reconnect's
+`welcome.transcript` replays the seat's own history (§11). The server's gate refusing
+hidden-information games is lifted. Proof: over real TCP, two matches that differ only in seat 1's
+secret give byte-identical frames to seat 0 and to a spectator.
+
+**Adversarial review is now part of the workflow** (owner rule, 2026-09-24): after each slice,
+reviewer subagents attack it and confirmed findings are fixed before the next slice. The first two
+rounds found real problems:
+- the Slice 1 leak contract let leaky games pass;
+- the transcript validator accepted forged shapes;
+- Pig could run forever (now bounded by a server turn cap);
+- spectators could get duplicate turns;
+- MCP `make_move` confirmed a stale turn;
+- the browser spectator had been refused since Phase 37.
+
+Active phase: **39 — Liar's Dice**. No wire bump. Everything it needs exists: chance nodes for the
+roll, per-seat redaction, private events, and the indistinguishability contract. Its CLI adapter
+must render the live game from the human seat's view; the local `arena.cli.play` still shows full
+state.
 
 The Phase 36-38 specs were revised on 2026-09-22 after an adversarial review that checked every
 claim against the code. Three findings are worth carrying forward, because each is easy to
@@ -104,8 +125,10 @@ rediscover the hard way:
   `post_snapshot` carries the full state. Phase 37 keeps the generator on `LocalMatch` for this reason.
   Phase 38's `dump_state_for_seat` covers `state`, not `config`, and a chance turn's `outcome` can
   itself be private (Liar's Dice's opening roll).
-- **`_handle_reconnect` never replays the transcript** (`routes_ws.py:289-353`) despite protocol
-  §11 promising it. It sends `welcome` + one `match_state` and nothing else.
+- ~~**`_handle_reconnect` never replays the transcript**~~ Fixed in Phase 38:
+  `welcome.transcript` carries the seat's own history. Still a known limitation: only the active
+  seat's reconnect is fully supported. An off-turn disconnect is noticed on that seat's turn, so an
+  early reconnect can miss frames. The Phase 41 match-owned driver is the fix.
 
 Decisions that diverge from the RFC's own recommendations, and are therefore easy to get wrong:
 - a **real chance-node primitive** (Phase 37), not seeded init-time randomness

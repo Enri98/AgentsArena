@@ -27,6 +27,7 @@ from arena.testing.hidden_factory import (
     SecretsDeal,
     SecretsDealt,
     SecretsObservation,
+    SecretsPass,
     SecretsRulesEngine,
     SecretsSerializer,
     SecretsState,
@@ -204,3 +205,78 @@ def test_bogus_viewers_are_rejected(viewer: object) -> None:
 def test_dump_state_for_seat_needs_a_seat() -> None:
     with pytest.raises(ValueError):
         dump_state_for_seat(SecretsSerializer(), SecretsState(1, 2, (3, 8)), None)  # type: ignore[arg-type]
+
+
+# -- adversarial review of Slices 2-3 --------------------------------------
+
+
+class _LeaksNextTurnObservation(SecretsRulesEngine):
+    """Clean at every variant state; leaks in the observation one move later."""
+
+    def observation(self, state, seat):
+        obs = super().observation(state, seat)
+        if state.secrets and state.turn >= 2 and not self.is_terminal(state):
+            return replace(obs, my_secret=obs.my_secret * 100 + state.secrets[1 - seat])
+        return obs
+
+
+def test_an_observation_leak_one_step_on_fails_the_contract() -> None:
+    bundle = build_secrets_contract_bundle()
+    # Keep only variants at turn 1, so the leak can only be seen after a move.
+    variants = tuple(v for v in bundle.private_variants if v.state.turn == 1)
+    early = dataclasses.replace(
+        _bundle_with(engine=_LeaksNextTurnObservation()), private_variants=variants
+    )
+    early = dataclasses.replace(
+        early,
+        private_variants=tuple(
+            dataclasses.replace(
+                v,
+                state=replace(v.state, max_turns=4),
+                variant=replace(v.variant, max_turns=4),
+            )
+            for v in variants
+        ),
+    )
+    with pytest.raises(AssertionError, match="after it"):
+        assert_seat_view_contract(early)
+
+
+@dataclass(frozen=True)
+class _Reveal(SecretsPass):
+    """A showdown: tells the table both digits."""
+
+
+@dataclass(frozen=True)
+class _HandsRevealed(SecretsDealt):
+    secrets: list[int] = dataclasses.field(default_factory=list)
+
+
+class _WithShowdown(SecretsRulesEngine):
+    def legal_actions(self, state, seat):
+        base = super().legal_actions(state, seat)
+        return base + (_Reveal(),) if base else base
+
+    def validate_action(self, state, seat, action):
+        if isinstance(action, _Reveal):
+            return super().validate_action(state, seat, SecretsPass())
+        return super().validate_action(state, seat, action)
+
+    def apply_action(self, state, seat, action):
+        transition = super().apply_action(state, seat, SecretsPass())
+        if isinstance(action, _Reveal):
+            return replace(
+                transition,
+                events=transition.events + (_HandsRevealed(secrets=list(state.secrets)),),
+            )
+        return transition
+
+
+def test_a_declared_showdown_is_not_a_leak() -> None:
+    """Liar's Dice's "call" legitimately reveals both hands to the table."""
+
+    with pytest.raises(AssertionError, match="Reveal"):
+        assert_seat_view_contract(_bundle_with(engine=_WithShowdown()))
+    assert_seat_view_contract(
+        _bundle_with(engine=_WithShowdown(), revealing_actions=(_Reveal(),))
+    )

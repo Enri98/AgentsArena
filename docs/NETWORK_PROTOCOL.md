@@ -220,7 +220,7 @@ Field rules:
 | Field | Required | Notes |
 |-------|----------|-------|
 | `type` | Always | One of the message types in §8. |
-| `schema_version` | Always | Currently `1`. Servers and Clients reject unknown major versions. |
+| `schema_version` | Always | Currently `3` (§7.1). Servers and Clients reject unknown major versions. |
 | `match_id` | Always | Echoed back on every message after the handshake completes. |
 | `seat` | Sometimes | Required on Client→Server messages once joined; optional on broadcasts. |
 | `turn_id` | Required on `action_response` | Client-generated UUID4; idempotency key. |
@@ -251,17 +251,14 @@ inside known message types are also ignored.
 it can still read — see `SUPPORTED_WIRE_SCHEMA_VERSIONS`. A build that can only read what it writes
 cannot migrate without a flag day.
 
-A v1-only client is refused at `hello` with `4400`, and correctly so: it cannot parse a v2
-transcript, so letting it connect would only move the failure later. Clients that read both should
-advertise `[1, 2]`.
-
-- **A server always emits its own `schema_version`.** The `hello.supported_schema_versions` list and
-  the negotiation flow exist to give v2+ servers a forward-compatible upgrade path without breaking
-  v1 clients. Negotiation rule for any server: pick the highest integer present in both
-  `hello.supported_schema_versions` and the server's own supported range; if no overlap, close with
-  code `4400` (`schema_version_mismatch`) and a reason string naming the server's supported range.
-  A server reduces this to: accept the connection iff its emitted version is in
-  `hello.supported_schema_versions`.
+**Negotiation is strict: a server serves only its own version.** It accepts a connection
+(`hello`, a reconnect `hello`, or `spectator_hello`) **iff its emitted version is in
+`supported_schema_versions`**, and otherwise closes with `4400` (`schema_version_mismatch`). A
+client that cannot read the current version is refused rather than served an older shape. For a
+hidden-information game an older shape could not even be produced without leaking, since v1 and v2
+have no per-recipient payloads. A client should advertise every version it reads; the reference
+SDK sends `[1, 2, 3]`. `POST /matches` accepts the same list (optional), so a creator learns of a
+mismatch before handing out seat URLs.
 - This policy is **independent** of game-config schema evolution. Each registered game carries its
   own `game_schema_version` (integer) returned by `GET /games` and echoed in `welcome.match_config`.
   Adding an optional Connect 4 config field is a Connect 4 schema bump, not an envelope schema
@@ -615,10 +612,19 @@ negotiation in v1.
   equivalent state** to one that never disconnected. Framing is not byte-identical; the resulting
   state is. The server then sends `match_state` and, if the reconnecting seat is the active seat,
   re-sends the in-flight `observation_request`, so the client always knows what to act on.
-- **Reconnects are only fully supported for the active seat.** The server notices an off-turn
-  seat's disconnect only when that seat's turn arrives. An off-turn client that reconnects early
-  may miss turns committed between its welcome and that point. Known limitation; the match-owned
-  driver planned for Phase 41 is the fix.
+- **The reconnected connection takes over immediately**, active seat or not. The server builds the
+  replay transcript and swaps the connection into the broadcast set in one uninterrupted step, so
+  every turn is either in `welcome.transcript` or delivered live afterwards, never both and never
+  neither.
+- **No seat can be claimed or resumed once a match has ended** (finished, aborted, or its driver
+  crashed): a `hello` closes with `4410 match_over`, and resume tokens are invalidated. A finished
+  match stays in the registry for late reads and releases its seats. Without this rule, anyone
+  holding the `match_id`, including every spectator, could claim a seat and read that seat's
+  private transcript.
+- **Capability caveat.** Seat URLs and the spectate URL share one `match_id`, so until both seats
+  are claimed, anyone who can spectate can take a seat. Share a hidden-information match's id only
+  with its players until both have joined. Separate spectate capabilities belong with real
+  authentication, which is deferred.
 
 **Information model (v3).** A reconnecting seat is replayed its *own* view: the same per-seat
 redaction as the live frames, so it learns nothing it would not have learned by staying
@@ -666,13 +672,22 @@ information.
 >
 > Implementation lives in `arena/server/rate_limits.py`. Caps are injectable: the test suite runs
 > with `RateLimiter.unlimited()` because the whole suite shares one client address.
+>
+> **The action cap throttles instead of closing (Phase 38 hardening).** It used to close the seat
+> with `4429` at 2 actions per second. Two scripted or fast bots exceed that within one move each,
+> and every real-server demo then aborted as `peer_disconnected`, blaming a seat that did nothing
+> wrong. CI never saw it because tests run unlimited. The server now delays reading the next action
+> until the window has room, which bounds the loop's work just as closing did. A flooding seat only
+> slows itself, because it is the active seat and its own per-turn deadline keeps running. The cap
+> is 10 per second.
 
 - Max concurrent WebSocket connections per source IP: **8**.
 - Max match creations per source IP per minute: **5**.
-- Max `action_response` messages per match per second: **2** (well above any sane agent).
+- Max `action_response` messages per match per second: **10**, enforced by throttling (see above).
 - Max concurrent connections per match (across seats and reconnects in grace): **4**.
 
-Exceeding any cap closes the offending connection with `4429`. The same caps apply to malformed
+Exceeding a connection or creation cap closes the connection with `4429` (HTTP `429` for match
+creation); the action cap throttles. The same caps apply to malformed
 or `protocol_violation`-emitting connections; a peer flooding the server with malformed frames
 hits the per-IP connection cap and is shed. This bounds the cost of the "logging DoS" attack
 surface to the cost of opening 8 sockets.

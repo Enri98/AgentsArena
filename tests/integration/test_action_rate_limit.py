@@ -3,9 +3,10 @@
 The three connection/creation caps landed in Phase 36 Slice 0. This one is
 enforced inside the turn loop, so it landed with the Slice 2 transport work.
 
-Exceeding it closes the offending connection with 4429. No new abort reason is
-introduced: the closed socket surfaces as a disconnect and the existing
-disconnect-grace path decides the match outcome.
+Exceeding it no longer closes the connection (Phase 38 hardening): the server
+delays reading the next action until the window has room. A scripted or fast
+bot legitimately plays faster than any per-second cap, and closing it with
+4429 aborted the match as peer_disconnected, blaming an innocent seat.
 
 Scope note: the cap counts action frames the server actually *reads*, which are
 the ones from the seat whose turn it is. An off-turn seat's frames sit unread in
@@ -26,13 +27,12 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn
-import websockets
 
 from arena.adapters.in_process import ActionResponsePayload
 from arena.adapters.websocket.envelope import ActionResponseEnvelope, HelloEnvelope
 from arena.adapters.websocket.messages import ActionResponseBody, HelloBody
 from arena.server.app import create_app
-from arena.server.rate_limits import CLOSE_RATE_LIMITED, RateLimiter
+from arena.server.rate_limits import RateLimiter
 from tests.integration._ws_client import connect, recv_envelope, send_envelope
 from tests.integration.conftest import RunningServer
 
@@ -126,15 +126,19 @@ def _create_match(http_base: str, **extra: Any) -> dict[str, Any]:
     return resp.json()
 
 
-def test_action_flood_closes_the_offending_seat_with_4429(
+def test_an_action_flood_is_throttled_not_disconnected(
     running_server_tight_actions: RunningServer,
 ) -> None:
-    """A seat exceeding the per-match action rate is shed with 4429."""
+    """A seat exceeding the per-match action rate is slowed down, not shed.
 
-    async def run() -> None:
+    With a cap of 1 per second, five rejected actions sent at once are read about
+    one second apart, and the connection stays open.
+    """
+
+    async def run() -> list[float]:
         match = _create_match(
             running_server_tight_actions.http_base_url,
-            per_turn_deadline_ms=10_000,
+            per_turn_deadline_ms=20_000,
             disconnect_grace_ms=500,
             # A generous retry budget keeps seat 0 active across several
             # rejected actions, so the loop keeps reading from it.
@@ -155,19 +159,17 @@ def test_action_flood_closes_the_offending_seat_with_4429(
             assert (await recv_envelope(ws0)).type == "observation_request"
 
             # Illegal actions are rejected without ending the turn, so seat 0
-            # stays active and the loop keeps reading its frames. A legal action
-            # would pass the turn to seat 1 after the first send, and seat 0's
-            # remaining frames would never be read.
-            for _ in range(5):
+            # stays active and the loop keeps reading its frames.
+            for _ in range(3):
                 await send_envelope(ws0, _action(0, 99))
 
-            # Seat 0's socket is closed with 4429 once the cap trips. Reading
-            # drains whatever was already in flight first.
-            with pytest.raises(websockets.exceptions.ConnectionClosed) as exc:
-                for _ in range(20):
-                    await recv_envelope(ws0)
+            stamps: list[float] = []
+            while len(stamps) < 3:
+                env = await asyncio.wait_for(recv_envelope(ws0), timeout=10)
+                assert env.type == "action_rejected", env.type
+                stamps.append(time.monotonic())
+            return stamps
 
-            assert exc.value.rcvd is not None
-            assert exc.value.rcvd.code == CLOSE_RATE_LIMITED
-
-    asyncio.run(asyncio.wait_for(run(), timeout=30))
+    stamps = asyncio.run(asyncio.wait_for(run(), timeout=30))
+    # Read at most once per second: the three rejections span about two seconds.
+    assert stamps[-1] - stamps[0] >= 1.5

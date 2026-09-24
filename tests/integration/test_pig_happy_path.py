@@ -195,8 +195,7 @@ def test_a_match_that_never_ends_is_capped_by_the_server() -> None:
     from arena.server.rate_limits import RateLimiter
     from tests.integration.conftest import serve
 
-    app = create_app(rate_limiter=RateLimiter.unlimited())
-    app.state.max_turns_per_match = 40
+    app = create_app(rate_limiter=RateLimiter.unlimited(), max_turns_per_match=40)
 
     async def run(server: RunningServer) -> Any:
         match = _create_match(server.http_base_url)

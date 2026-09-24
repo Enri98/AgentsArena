@@ -135,3 +135,75 @@ def test_the_cli_viewer_renders_one_seats_perspective(tmp_path, monkeypatch) -> 
     assert "Seat 1's view" in out
     assert "I hold a 3" not in out  # seat 0's reasoning
     assert "I hold an 8" in out
+
+
+# -- adversarial review of Slices 2-3 --------------------------------------
+
+
+def test_the_ui_refuses_mixed_perspectives() -> None:
+    session, _ = _session()
+    with pytest.raises(ValueError, match="different perspectives"):
+        build_match_screen(
+            status_payload=dump_session_status(session),
+            transcript_payload=dump_runtime_transcript(session, viewer=0),
+        )
+    with pytest.raises(ValueError, match="different perspectives"):
+        build_match_screen(
+            status_payload=dump_session_status(session, viewer=1),
+            transcript_payload=dump_runtime_transcript(session, viewer=0),
+        )
+
+
+def test_ui_turn_events_keep_their_shape_for_public_events() -> None:
+    from arena.games.connect4 import Connect4Config, DropDisc
+    from arena.ui import build_match_transcript
+
+    connect4 = build_default_registry().get("connect4")
+    arena = Arena()
+    session = arena.start_session(
+        arena.create_session(
+            connect4,
+            Connect4Config(),
+            [PlayerRecord(player_id="p0", seat=0), PlayerRecord(player_id="p1", seat=1)],
+            {},
+        )
+    )
+    session = dataclasses.replace(
+        session, local_match=apply_match_action(session.local_match, 0, DropDisc(column=0))
+    )
+    ui = build_match_transcript(dump_runtime_transcript(session))
+    for event in ui["turns"][0]["events"]:
+        assert "is_public" not in event and "audience" not in event
+
+
+def test_the_cli_redacts_a_full_status_beside_a_seat_transcript(tmp_path, monkeypatch) -> None:
+    import arena.games
+    from arena.cli.app import render_session_from_files
+
+    session, match = _session()
+    (tmp_path / "s.json").write_text(json.dumps(dump_session_status(session)), "utf-8")
+    (tmp_path / "t.json").write_text(
+        json.dumps(dump_runtime_transcript(session, viewer=0)), "utf-8"
+    )
+    registry = build_default_registry()
+    registry.register(SECRETS)
+    monkeypatch.setattr(arena.games, "build_default_registry", lambda: registry)
+
+    out = render_session_from_files(tmp_path / "s.json", tmp_path / "t.json", seat=0)
+    assert '"secrets"' not in out and "'secrets'" not in out
+
+
+@pytest.mark.parametrize("seat", ["5", "-1", "x"])
+def test_cli_rejects_bad_seats_with_a_usage_error(seat: str, capsys) -> None:
+    from arena.cli.__main__ import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--status", "s", "--transcript", "t", "--seat", seat])
+    assert exc.value.code == 2
+    assert "--seat" in capsys.readouterr().err
+
+
+def test_transcript_views_validate_the_viewer() -> None:
+    session, _ = _session()
+    with pytest.raises(ValueError):
+        dump_runtime_transcript(session, viewer=7)

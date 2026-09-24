@@ -277,3 +277,25 @@ def _first(payload, kind):
 def test_forged_transcripts_are_rejected(mutate, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         validate_match_transcript(build_coin_game_definition(), _forge(mutate))
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda e: e.update(is_public=True, audience=[0]), "public event has no audience"),
+        (lambda e: e.update(is_public=False), "must name its audience"),
+    ],
+)
+def test_forged_event_markers_are_rejected(mutate, message: str) -> None:
+    payload = dump_match_transcript(_play(SEED))
+    mutate(payload["turns"][0]["events"][0])
+    with pytest.raises(ValueError, match=message):
+        validate_match_transcript(build_coin_game_definition(), payload)
+
+
+def test_event_markers_in_an_old_transcript_are_rejected() -> None:
+    payload = dump_match_transcript(_play(SEED))
+    payload["schema_version"] = 2
+    payload["turns"][0]["events"][0].update(is_public=True)
+    with pytest.raises(ValueError, match="predate schema_version 3"):
+        validate_match_transcript(build_coin_game_definition(), payload)

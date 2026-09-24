@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Literal, TypeAlias
+from typing import Any, Literal, TypeAlias
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_serializer
 
 from arena.runtime import (
     RuntimeAbortPayload,
@@ -96,6 +96,16 @@ class _MatchEventPayload(BaseModel):
     payload: JSONMapping = Field(default_factory=dict)
     is_public: bool = True
     audience: list[int] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_public_marker(self, handler: Any) -> Any:
+        # Mirrors arena.match.MatchEventPayload: public events keep their
+        # pre-Phase-38 shape.
+        data = handler(self)
+        if self.is_public:
+            data.pop("is_public", None)
+            data.pop("audience", None)
+        return data
 
 
 class _MatchResultPayload(BaseModel):
@@ -394,6 +404,12 @@ def _ensure_screen_inputs_match(
         raise ValueError(
             "UI status and transcript payloads refer to different game ids: "
             f"{status.game_id!r} != {transcript.game_id!r}."
+        )
+    if (status.view, status.viewer_seat) != (transcript.view, transcript.viewer_seat):
+        raise ValueError(
+            "UI status and transcript payloads are different perspectives: "
+            f"{(status.view, status.viewer_seat)!r} != "
+            f"{(transcript.view, transcript.viewer_seat)!r}."
         )
     if status.runtime_schema_version != transcript.runtime_schema_version:
         raise ValueError(

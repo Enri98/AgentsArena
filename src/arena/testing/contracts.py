@@ -32,6 +32,9 @@ class GameContractBundle(Protocol):
     A game that opens at a chance node must define ``opening_outcomes``: the
     outcomes that take ``initial_state(config)`` to ``bundle.initial_state``.
 
+    A hidden-information game with an action that legitimately reveals private
+    information to the table (a showdown) lists it in ``revealing_actions``.
+
     A bundle may also define ``terminal_action``: the action that takes
     ``near_terminal_state`` to ``terminal_state``, when that is not
     ``legal_action``. Pig needs it — only ``roll`` is legal as a turn opens, and
@@ -352,8 +355,12 @@ def assert_seat_view_contract(bundle: GameContractBundle) -> None:
         "seat view contract failed: private_variants must cover every seat as blind_seat"
     )
 
+    # Actions that legitimately reveal private information to the table (Liar's
+    # Dice "call" shows both hands): excluded from the one-step comparison,
+    # because their whole point is that the result differs.
+    revealing = tuple(getattr(bundle, "revealing_actions", ()) or ())
     for pv in variants:
-        _assert_state_variant(engine, serializer, pv)
+        _assert_state_variant(engine, serializer, pv, revealing)
 
     if getattr(definition, "has_chance_nodes", False):
         chance_state = getattr(bundle, "chance_state", None)
@@ -374,7 +381,9 @@ def assert_seat_view_contract(bundle: GameContractBundle) -> None:
             _assert_outcome_variant(engine, serializer, chance_state, ov)
 
 
-def _assert_state_variant(engine: object, serializer: object, pv: PrivateVariant) -> None:
+def _assert_state_variant(
+    engine: object, serializer: object, pv: PrivateVariant, revealing: tuple[object, ...] = ()
+) -> None:
     blind, a, b = pv.blind_seat, pv.state, pv.variant
     assert serializer.dump_state(a) != serializer.dump_state(b), (
         "seat view contract failed: a private variant must differ in its private information"
@@ -415,11 +424,14 @@ def _assert_state_variant(engine: object, serializer: object, pv: PrivateVariant
     )
     common = [x for x in engine.legal_actions(a, mover) if x in engine.legal_actions(b, mover)]
     for action in common:
+        if action in revealing:
+            continue
         ta, tb = engine.apply_action(a, mover, action), engine.apply_action(b, mover, action)
         _assert_indistinguishable(
             f"the results of {action!r}",
             blind,
             {
+                **_views_after(engine, serializer, ta.state, tb.state, blind),
                 "events": (_visible_events(ta.events, blind), _visible_events(tb.events, blind)),
                 "public events": (
                     _visible_events(ta.events, None),
@@ -437,6 +449,28 @@ def _assert_state_variant(engine: object, serializer: object, pv: PrivateVariant
         )
 
 
+def _views_after(
+    engine: object, serializer: object, a: object, b: object, blind: int
+) -> dict[str, tuple[object, object]]:
+    """What the blind seat is sent about the resulting state: agents act on the
+    observation (object and dump) and its legal actions, not the state view."""
+
+    if engine.is_terminal(a) and engine.is_terminal(b):
+        return {}
+    obs_a, obs_b = engine.observation(a, blind), engine.observation(b, blind)
+    return {
+        "the observation object after it": (obs_a, obs_b),
+        "dump_observation after it": (
+            serializer.dump_observation(obs_a),
+            serializer.dump_observation(obs_b),
+        ),
+        "legal_actions after it": (
+            engine.legal_actions(a, blind),
+            engine.legal_actions(b, blind),
+        ),
+    }
+
+
 def _assert_outcome_variant(
     engine: object, serializer: object, chance_state: object, ov: PrivateVariant
 ) -> None:
@@ -451,6 +485,7 @@ def _assert_outcome_variant(
         "chance outcomes",
         blind,
         {
+            **_views_after(engine, serializer, ta.state, tb.state, blind),
             "dump_chance_outcome_for_seat": (
                 dump_chance_outcome_for_viewer(serializer, a, blind),
                 dump_chance_outcome_for_viewer(serializer, b, blind),

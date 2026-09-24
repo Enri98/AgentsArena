@@ -139,6 +139,35 @@ def test_action_window() -> None:
     limiter.check_action(match_id="m1")
 
 
+def test_reserve_action_throttles_instead_of_refusing() -> None:
+    """Over the cap, an action waits for the window rather than being refused.
+
+    Closing with 4429 aborted matches between fast legitimate bots as
+    peer_disconnected; throttling bounds the loop's work just the same.
+    """
+
+    clock = _Clock()
+    limiter = RateLimiter(max_actions_per_match_per_sec=2, time_fn=clock)
+
+    assert limiter.reserve_action(match_id="m1") == 0.0
+    assert limiter.reserve_action(match_id="m1") == 0.0
+    # Third and fourth in the same instant: pushed to when the window has room.
+    assert limiter.reserve_action(match_id="m1") == pytest.approx(1.0)
+    assert limiter.reserve_action(match_id="m1") == pytest.approx(1.0)
+    assert limiter.reserve_action(match_id="m1") == pytest.approx(2.0)
+    # Other matches are unaffected.
+    assert limiter.reserve_action(match_id="m2") == 0.0
+
+    clock.advance(10.0)
+    assert limiter.reserve_action(match_id="m1") == 0.0
+
+
+def test_the_action_cap_is_sized_for_bots() -> None:
+    from arena.server.rate_limits import MAX_ACTIONS_PER_MATCH_PER_SEC
+
+    assert MAX_ACTIONS_PER_MATCH_PER_SEC >= 10
+
+
 def test_forget_match_clears_per_match_state() -> None:
     limiter = RateLimiter(max_connections_per_match=1, max_actions_per_match_per_sec=1)
     limiter.acquire_connection(ip="a", match_id="m1")

@@ -345,6 +345,18 @@ async def _make_move(
             if isinstance(event, TurnCommittedEvent) and not _is_own_action(event, seat):
                 # Someone else's turn, or a chance turn: in history already.
                 continue
+            if isinstance(event, ObservationEvent):
+                # Asked to act again before our move was confirmed: the move was
+                # not taken, most likely because it was sent out of turn (the
+                # server discards those). Hand the request back rather than wait
+                # out the timeout while this seat's own deadline runs.
+                for e in (event, *deferred):
+                    await handle.queue.put(e)
+                return _error_result(
+                    "not_committed",
+                    "The move was not committed (was it your turn?). An observation "
+                    "is waiting: call get_observation.",
+                )
             if isinstance(event, (TurnCommittedEvent, ErrorEvent)):
                 for e in deferred:
                     await handle.queue.put(e)
