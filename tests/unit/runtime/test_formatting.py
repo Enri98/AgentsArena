@@ -205,3 +205,33 @@ def test_runtime_transcript_formatting_validates_nested_match_transcript_shape()
 
     with pytest.raises(ValidationError, match="turns"):
         format_runtime_transcript(payload)
+
+
+class _FirstLegal:
+    def select_action(self, observation: object) -> object:
+        return observation.legal_actions[0]  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("game", "expected"),
+    [("rps", "joint actions="), ("pig", "chance outcome=")],
+)
+def test_chance_and_joint_turns_are_reported_by_kind(game: str, expected: str) -> None:
+    """They used to print as 'seat None action=null'."""
+
+    from arena.games import build_default_registry
+
+    definition = build_default_registry().get(game)
+    arena = Arena(id_factory=lambda: MatchId("kinds"))
+    policies = {
+        seat: TypedPayloadPolicyAdapter(definition, _FirstLegal()) for seat in (0, 1)
+    }
+    session = arena.create_session(
+        definition, definition.config_type(), _players(), policies
+    )
+    session = arena.start_session(session)
+    for _ in range(4):
+        session = arena.step_session(session)
+    text = format_runtime_transcript(dump_runtime_transcript(session))
+    assert expected in text
+    assert "seat None" not in text

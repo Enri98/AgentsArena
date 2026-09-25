@@ -16,10 +16,10 @@ from arena.sdk._session import Session
 from arena.sdk.errors import MatchAbortedError, ProtocolError, SdkError
 
 
-async def _next_event(session: object, backlog: list[asyncio.Future[Any]]) -> Any:
+async def _next_event(session: Session, backlog: list[asyncio.Future[Any]]) -> Any:
     if backlog:
         return backlog.pop(0).result()  # re-raises what the receive raised
-    return await session.recv()  # type: ignore[union-attr]
+    return await session.recv()
 
 
 def _run_in_daemon_thread(fn: Callable[[Any], Any], arg: Any) -> asyncio.Future[Any]:
@@ -56,7 +56,7 @@ def _run_in_daemon_thread(fn: Callable[[Any], Any], arg: Any) -> asyncio.Future[
 
 
 async def _choose_while_serving(
-    session: object,
+    session: Session,
     choose: Callable[[Any], dict[str, Any]],
     observation: Any,
     backlog: list[asyncio.Future[Any]],
@@ -78,7 +78,7 @@ async def _choose_while_serving(
     receiving: asyncio.Future[Any] | None = None
     try:
         while not decision.done():
-            receiving = asyncio.ensure_future(session.recv())  # type: ignore[union-attr]
+            receiving = asyncio.ensure_future(session.recv())
             await asyncio.wait({decision, receiving}, return_when=asyncio.FIRST_COMPLETED)
             if not receiving.done():
                 break  # decided; the finally cancels the pending receive
@@ -104,7 +104,7 @@ async def _choose_while_serving(
 
 
 async def _decide_and_send(
-    session: object,
+    session: Session,
     choose: Callable[[Any], dict[str, Any]],
     observation: Any,
     backlog: list[asyncio.Future[Any]],
@@ -113,7 +113,7 @@ async def _decide_and_send(
     if action is None:
         return
     try:
-        await session.send_action(action)  # type: ignore[union-attr]
+        await session.send_action(action)
     except ProtocolError:
         # The server closed first (an abort racing our move). Its terminal frame,
         # if it arrived, is read next, so the caller learns why, not just that
@@ -122,7 +122,7 @@ async def _decide_and_send(
 
 
 async def _run_session(
-    session: object,
+    session: Session,
     choose: Callable[[Any], dict[str, Any]],
 ) -> tuple[dict[str, Any], Any]:
     """Drive a match session to completion using a choose() callback.

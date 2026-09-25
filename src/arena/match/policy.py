@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Protocol
+from typing import Protocol, TypeVar
 
+from arena.core.actions import Action
+from arena.core.observations import Observation
 from arena.core.simultaneous import acting_seats
 from arena.core.types import Seat
 from arena.match.local_match import (
@@ -18,11 +20,15 @@ from arena.match.local_match import (
     apply_match_joint_action,
 )
 
+# A policy consumes observations and produces actions.
+_ObservationContraT = TypeVar("_ObservationContraT", bound=Observation, contravariant=True)
+_ActionCoT = TypeVar("_ActionCoT", bound=Action, covariant=True)
 
-class Policy(Protocol[ObservationT, ActionT]):
+
+class Policy(Protocol[_ObservationContraT, _ActionCoT]):
     """Select an action from a player-facing observation."""
 
-    def select_action(self, observation: ObservationT) -> ActionT:
+    def select_action(self, observation: _ObservationContraT) -> _ActionCoT:
         """Return the next action to apply for the observed seat."""
 
 

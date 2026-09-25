@@ -15,6 +15,7 @@ import string
 import sys
 from pathlib import Path
 
+from arena._entry import program_name
 from arena.games.scaffold import _templates
 
 _NAME_PATTERN = re.compile(r"[a-z][a-z0-9_]*")
@@ -372,7 +373,7 @@ def _name_problem(name: str, root: Path) -> str | None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m arena.games.scaffold",
+        prog=program_name("python -m arena.games.scaffold"),
         description="Scaffold the boilerplate for a new AgentsArena game.",
     )
     parser.add_argument(

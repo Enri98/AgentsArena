@@ -10,7 +10,7 @@ export const WIRE_SCHEMA_VERSION = 4;
 /** Versions this client reads. The server serves only its own (section 7). */
 export const SUPPORTED_SCHEMA_VERSIONS: readonly number[] = [4];
 export const CLIENT_NAME = "arena-sdk-ts";
-export const CLIENT_VERSION = "0.1.0";
+export const CLIENT_VERSION = "0.2.0";
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type JsonObject = { [key: string]: Json };

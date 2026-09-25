@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 from arena.core.chance import is_chance_node
 from arena.core.exceptions import ArenaCoreError
@@ -46,13 +46,13 @@ class GameContractBundle(Protocol):
     unaffected.
     """
 
-    definition: object
-    config: object
-    initial_state: object
-    near_terminal_state: object
-    terminal_state: object
-    legal_action: object
-    illegal_action: object
+    definition: Any
+    config: Any
+    initial_state: Any
+    near_terminal_state: Any
+    terminal_state: Any
+    legal_action: Any
+    illegal_action: Any
 
 
 def assert_valid_initial_state(bundle: GameContractBundle) -> None:
@@ -94,15 +94,15 @@ def assert_valid_initial_state(bundle: GameContractBundle) -> None:
     )
 
 
-def _apply(rules_engine: object, state: object, action: object) -> object:
+def _apply(rules_engine: Any, state: Any, action: Any) -> Any:
     """Apply ``action`` as the acting seat would: at a joint node (Phase 41) every
     acting seat plays it, so a simultaneous game runs the same contract."""
 
     seats = acting_seats(rules_engine, state)
     if len(seats) > 1:
         return apply_joint_action(rules_engine, state, {seat: action for seat in seats})
-    seat = seats[0] if seats else rules_engine.current_seat(state)  # type: ignore[attr-defined]
-    return rules_engine.apply_action(state, seat, action)  # type: ignore[attr-defined]
+    seat = seats[0] if seats else rules_engine.current_seat(state)
+    return rules_engine.apply_action(state, seat, action)
 
 
 def assert_legal_action_generation(bundle: GameContractBundle) -> None:
@@ -158,7 +158,7 @@ def assert_illegal_action_rejection(bundle: GameContractBundle) -> None:
         # The core helper validates before calling the engine, which would hide
         # an engine hook that never revalidates: call the hook itself.
         try:
-            rules_engine.apply_joint_action(  # type: ignore[attr-defined]
+            rules_engine.apply_joint_action(
                 state, {s: bundle.illegal_action for s in seats}
             )
         except ArenaCoreError:
@@ -313,12 +313,12 @@ class PrivateVariant:
     (``private_outcome_variants``) they are outcomes.
     """
 
-    state: object
-    variant: object
+    state: Any
+    variant: Any
     blind_seat: int
 
 
-def _visible_events(events: Sequence[object], viewer: object) -> list[dict]:
+def _visible_events(events: Sequence[Any], viewer: int | None) -> list[dict]:
     from arena.match.transcript import dump_domain_event, filter_event_payloads
 
     return filter_event_payloads(
@@ -327,7 +327,7 @@ def _visible_events(events: Sequence[object], viewer: object) -> list[dict]:
 
 
 def _assert_indistinguishable(
-    label: str, blind: int, pairs: dict[str, tuple[object, object]]
+    label: str, blind: int, pairs: dict[str, tuple[Any, Any]]
 ) -> None:
     for name, (a, b) in pairs.items():
         assert a == b, (
@@ -407,11 +407,11 @@ def assert_seat_view_contract(bundle: GameContractBundle) -> None:
 
 
 def _assert_state_variant(
-    engine: object,
-    serializer: object,
+    engine: Any,
+    serializer: Any,
     pv: PrivateVariant,
-    revealing: tuple[object, ...] = (),
-    reveals: object = None,
+    revealing: tuple[Any, ...] = (),
+    reveals: Any = None,
 ) -> None:
     blind, a, b = pv.blind_seat, pv.state, pv.variant
     assert serializer.dump_state(a) != serializer.dump_state(b), (
@@ -479,8 +479,8 @@ def _assert_state_variant(
 
 
 def _views_after(
-    engine: object, serializer: object, a: object, b: object, blind: int
-) -> dict[str, tuple[object, object]]:
+    engine: Any, serializer: Any, a: Any, b: Any, blind: int
+) -> dict[str, tuple[Any, Any]]:
     """What the blind seat is sent about the resulting state: agents act on the
     observation (object and dump) and its legal actions, not the state view."""
 
@@ -501,7 +501,7 @@ def _views_after(
 
 
 def _assert_outcome_variant(
-    engine: object, serializer: object, chance_state: object, ov: PrivateVariant
+    engine: Any, serializer: Any, chance_state: Any, ov: PrivateVariant
 ) -> None:
     from arena.core.public_view import dump_chance_outcome_for_viewer
 
@@ -548,7 +548,7 @@ def _assert_outcome_variant(
 _CHANCE_PLAYOUT_STEPS = 60
 
 
-def _first_legal_playout(definition: object, seed: int) -> object:
+def _first_legal_playout(definition: Any, seed: int) -> Any:
     from arena.match import apply_match_action, apply_match_joint_action, start_match
 
     match = start_match(definition, definition.config_type(), seed=seed)
@@ -593,7 +593,8 @@ def assert_chance_contract(bundle: GameContractBundle) -> None:
     assert first == second, (
         "chance contract failed: the same seed and actions produced different transcripts"
     )
-    assert any(turn["kind"] == "chance" for turn in first["turns"]), (
+    turns = cast(list[dict[str, Any]], first["turns"])
+    assert any(turn["kind"] == "chance" for turn in turns), (
         "chance contract failed: a first-legal-action playout reached no chance node"
     )
 
@@ -636,14 +637,14 @@ def assert_game_contract(bundle: GameContractBundle) -> None:
     assert_chance_contract(bundle)
 
 
-def _terminal_action(bundle: GameContractBundle) -> object:
+def _terminal_action(bundle: GameContractBundle) -> Any:
     return getattr(bundle, "terminal_action", None) or bundle.legal_action
 
 
 def _state_semantics_match(
-    rules_engine: object,
-    original_state: object,
-    rehydrated_state: object,
+    rules_engine: Any,
+    original_state: Any,
+    rehydrated_state: Any,
 ) -> bool:
     """Compare public state semantics through the shared rules-engine contract."""
 

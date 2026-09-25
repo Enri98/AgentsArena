@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_transcript_store(args: argparse.Namespace):  # type: ignore[no-untyped-def]
+def build_transcript_store(args: argparse.Namespace):
     """The store the flags describe. Raises ``ValueError`` for a bad spec."""
 
     from arena.server.transcript_store import (

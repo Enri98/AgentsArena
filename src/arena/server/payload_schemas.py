@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from pydantic import BaseModel
+
 from arena.adapters.in_process import (
     ActionResponsePayload,
     DomainErrorPayload,
@@ -42,7 +44,7 @@ _cache: dict[str, Any] | None = None
 
 def _build_envelope_schema() -> dict[str, Any]:
     """Build a merged JSON Schema for all envelope message types."""
-    envelope_types = [
+    envelope_types: list[type[BaseModel]] = [
         HelloEnvelope,
         WelcomeEnvelope,
         MatchStateEnvelope,

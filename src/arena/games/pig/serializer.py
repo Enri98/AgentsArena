@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Literal, TypeVar
+from typing import Literal, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -25,12 +25,15 @@ class PigConfigPayload(BaseModel):
     target_score: int = Field(default=DEFAULT_TARGET_SCORE, ge=1, le=1000)
 
 
+#: The two moves, as the payload names them.
+PigChoice = Literal["roll", "hold"]
+
 class PigMovePayload(BaseModel):
     """JSON-facing payload for Pig actions."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    choice: Literal["roll", "hold"]
+    choice: PigChoice
 
 
 class DieRollPayload(BaseModel):
@@ -98,7 +101,7 @@ class PigSerializer:
 
     def dump_action(self, action: object) -> JSONMapping:
         move = _expect(action, PigMove)
-        return PigMovePayload(choice=move.choice).model_dump(mode="json")
+        return PigMovePayload(choice=cast(PigChoice, move.choice)).model_dump(mode="json")
 
     def load_action(self, payload: JSONMapping) -> object:
         return PigMove(choice=PigMovePayload.model_validate(payload).choice)
@@ -111,7 +114,9 @@ class PigSerializer:
             current_seat=obs.current_seat,
             turn_total=obs.turn_total,
             target_score=obs.target_score,
-            legal_actions=[PigMovePayload(choice=a.choice) for a in obs.legal_actions],
+            legal_actions=[
+                PigMovePayload(choice=cast(PigChoice, a.choice)) for a in obs.legal_actions
+            ],
         ).model_dump(mode="json")
 
     def load_observation(self, payload: JSONMapping) -> object:

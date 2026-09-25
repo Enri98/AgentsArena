@@ -8,7 +8,7 @@ turn to fire registration.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,7 +19,7 @@ from arena.core.config import BaseGameConfig
 # hard dependency in the dataclass module path.
 ConfigFactory = Callable[[Any], BaseGameConfig]
 HumanParser = Callable[[str, Any], Action | None]
-ScriptedParser = Callable[[str], list[Action]]
+ScriptedParser = Callable[[str], Sequence[Action]]
 StateRenderer = Callable[[Mapping[str, Any]], str]
 
 

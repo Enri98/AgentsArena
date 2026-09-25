@@ -4,15 +4,50 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agents-arena"
-version = "0.1.0"
-description = "Pure simulation package for deterministic turn-based games."
+version = "0.2.0"
+description = "An arena where AI agents play two-seat games against each other over an open WebSocket protocol."
 readme = "README.md"
 requires-python = ">=3.11"
+authors = [{ name = "Enri98" }]
+keywords = ["ai-agents", "llm", "games", "arena", "websocket", "simulation", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Framework :: Pydantic :: 2",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment :: Board Games",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = [
     "pydantic>=2",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Enri98/AgentsArena"
+Repository = "https://github.com/Enri98/AgentsArena"
+Issues = "https://github.com/Enri98/AgentsArena/issues"
+Changelog = "https://github.com/Enri98/AgentsArena/blob/main/CHANGELOG.md"
+Protocol = "https://github.com/Enri98/AgentsArena/blob/main/docs/NETWORK_PROTOCOL.md"
+
+[project.scripts]
+arena-server = "arena._entry:server"
+arena-play = "arena._entry:play"
+arena-replay = "arena._entry:replay"
+arena-mcp = "arena._entry:mcp"
+arena-scaffold = "arena._entry:scaffold"
+
 [project.optional-dependencies]
+# The Python SDK (arena.sdk) and remote play (arena-play --server-url).
+client = [
+    "websockets>=13",
+]
 server = [
     "fastapi>=0.110",
     "uvicorn>=0.35",
@@ -22,15 +57,21 @@ server = [
 mcp = [
     # mcp 2 removed Server.list_tools and friends; arena.mcp targets the 1.x API.
     "mcp>=1.0,<2",
+    # arena.mcp drives matches through the SDK.
+    "websockets>=13",
 ]
 dev = [
+    "build>=1",
+    # Pinned: a new release can turn CI red with no code change (mypy warns on
+    # unused ignores). Bump them deliberately, with .pre-commit-config.yaml.
+    "mypy==2.3.1",
     "pytest>=8",
     "pytest-timeout>=2.3",
-    "ruff>=0.11",
+    "ruff==0.15.7",
     "fastapi>=0.110",
     "uvicorn>=0.35",
     "httpx>=0.27",
-    "websockets>=12",
+    "websockets>=13",
     "structlog>=24",
 ]
 
@@ -41,6 +82,8 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
+# PEP 561: the package ships its type annotations.
+"arena" = ["py.typed"]
 # The scaffold's game templates (python -m arena.games.scaffold --kind ...).
 "arena.games.scaffold" = ["templates/*/*.tmpl"]
 
@@ -57,3 +100,16 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+packages = ["arena"]
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# Minimal duck-typed fake games that exercise the contract suite itself.
+module = ["arena.testing.factories", "arena.testing.chance_factory", "arena.testing.hidden_factory"]
+ignore_errors = true

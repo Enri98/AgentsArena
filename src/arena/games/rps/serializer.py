@@ -77,7 +77,7 @@ def _expect(value: object, kind: type[_T]) -> _T:
 def _dump_round(result: RoundResult | None) -> RoundResultPayload | None:
     if result is None:
         return None
-    return RoundResultPayload(throws=list(result.throws), winner=result.winner)  # type: ignore[arg-type]
+    return RoundResultPayload(throws=list(result.throws), winner=result.winner)
 
 
 def _load_round(payload: RoundResultPayload | None) -> RoundResult | None:
@@ -118,7 +118,7 @@ class RpsSerializer:
 
     def dump_action(self, action: object) -> JSONMapping:
         a = _expect(action, Throw)
-        return ThrowPayload(shape=a.shape).model_dump(mode="json")  # type: ignore[arg-type]
+        return ThrowPayload(shape=a.shape).model_dump(mode="json")
 
     def load_action(self, payload: JSONMapping) -> object:
         return Throw(shape=ThrowPayload.model_validate(payload).shape)
@@ -132,7 +132,7 @@ class RpsSerializer:
             target_wins=o.target_wins,
             max_rounds=o.max_rounds,
             last_round=_dump_round(o.last_round),
-            legal_actions=[ThrowPayload(shape=a.shape) for a in o.legal_actions],  # type: ignore[arg-type]
+            legal_actions=[ThrowPayload(shape=a.shape) for a in o.legal_actions],
         ).model_dump(mode="json")
 
     def load_observation(self, payload: JSONMapping) -> object:

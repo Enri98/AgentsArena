@@ -20,6 +20,10 @@ ObservationT = TypeVar("ObservationT", bound=Observation)
 EventT = TypeVar("EventT", bound=DomainEvent)
 ResultT = TypeVar("ResultT", bound=RuleResult | None)
 
+# The protocol only consumes configs and only produces observations.
+_ConfigContraT = TypeVar("_ConfigContraT", bound=BaseGameConfig, contravariant=True)
+_ObservationCoT = TypeVar("_ObservationCoT", bound=Observation, covariant=True)
+
 
 @dataclass(frozen=True)
 class TransitionResult(Generic[StateT, EventT, ResultT]):
@@ -27,17 +31,17 @@ class TransitionResult(Generic[StateT, EventT, ResultT]):
 
     state: StateT
     events: tuple[EventT, ...] = field(default_factory=tuple)
-    result: ResultT = None
+    result: ResultT = None  # type: ignore[assignment]  # None is a ResultT for non-terminal moves
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "events", tuple(self.events))
 
 
 @runtime_checkable
-class RulesEngine(Protocol[ConfigT, StateT, ActionT, ObservationT]):
+class RulesEngine(Protocol[_ConfigContraT, StateT, ActionT, _ObservationCoT]):
     """Shared contract that concrete game rules engines must satisfy."""
 
-    def initial_state(self, config: ConfigT) -> StateT:
+    def initial_state(self, config: _ConfigContraT) -> StateT:
         """Create the validated initial state for a game config."""
 
     def current_seat(self, state: StateT) -> Seat:
@@ -63,7 +67,7 @@ class RulesEngine(Protocol[ConfigT, StateT, ActionT, ObservationT]):
     def result(self, state: StateT) -> RuleResult | None:
         """Return the terminal result for a state, if any."""
 
-    def observation(self, state: StateT, seat: Seat) -> ObservationT:
+    def observation(self, state: StateT, seat: Seat) -> _ObservationCoT:
         """Build a player-facing observation for the given seat."""
 
 

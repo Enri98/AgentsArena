@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterable, Sequence
+from typing import Any, cast
 
 from arena.core.serializer import JSONMapping
 from arena.match.transcript import MatchResultPayload, MatchTranscriptPayload
@@ -132,7 +133,7 @@ def _format_players(players: Iterable[JSONMapping]) -> list[str]:
             f"{player['label'] or '<unlabeled>'} "
             f"({player['player_id']})"
         )
-        for player in sorted(players, key=lambda player: player["seat"])
+        for player in sorted(players, key=lambda player: cast(int, player["seat"]))
     ]
 
 
@@ -176,13 +177,18 @@ def _format_turn_history(match_transcript: JSONMapping | None) -> list[str]:
 
     lines: list[str] = []
     for turn_number, turn in enumerate(turns, start=1):
-        action = turn.action
         events = turn.events
         result = turn.result
-        lines.append(
-            f"- turn {turn_number}: seat {turn.seat} "
-            f"action={_format_json(action)}"
-        )
+        # A chance turn has no seat and an outcome; a joint turn every seat's action.
+        if turn.kind == "chance":
+            lines.append(f"- turn {turn_number}: chance outcome={_format_json(turn.outcome)}")
+        elif turn.actions is not None:
+            lines.append(f"- turn {turn_number}: joint actions={_format_json(turn.actions)}")
+        else:
+            lines.append(
+                f"- turn {turn_number}: seat {turn.seat} "
+                f"action={_format_json(turn.action)}"
+            )
         if events:
             event_text = ", ".join(
                 f"{event.event_type} {_format_json(event.payload)}"
@@ -204,7 +210,7 @@ def _format_match_result(result: MatchResultPayload | None) -> str:
     return f"{result_payload['result_type']}{payload_suffix}"
 
 
-def _format_json(payload: JSONMapping) -> str:
+def _format_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(", ", ": "))
 
 

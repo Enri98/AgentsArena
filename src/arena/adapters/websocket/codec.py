@@ -47,12 +47,12 @@ WIRE_SCHEMA_VERSION = 4
 SUPPORTED_WIRE_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3, 4)
 
 
-def dumps(envelope: WireEnvelope) -> str:  # type: ignore[valid-type]
+def dumps(envelope: WireEnvelope) -> str:
     """Serialise a typed envelope to a JSON string."""
     return json.dumps(envelope.model_dump(mode="json"))
 
 
-def loads(text: str | bytes) -> WireEnvelope:  # type: ignore[valid-type]
+def loads(text: str | bytes) -> WireEnvelope:
     """Parse a JSON string into a typed envelope.
 
     Raises:
