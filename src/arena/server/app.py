@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 
+from arena import __version__
 from arena.server.config import (
     HEARTBEAT_INTERVAL_MS,
     HEARTBEAT_MAX_MISSES,
@@ -133,7 +134,7 @@ def create_app(
         finally:
             store.close()
 
-    app = FastAPI(title="AgentsArena", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="AgentsArena", version=__version__, lifespan=lifespan)
     app.state.transcript_store = store
     app.state.client_ip_header = client_ip_header or None
     app.state.public_url = public_url.rstrip("/") if public_url else None

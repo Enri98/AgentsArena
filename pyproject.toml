@@ -4,13 +4,44 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agents-arena"
-version = "0.1.0"
-description = "Pure simulation package for deterministic turn-based games."
+version = "0.2.0"
+description = "An arena where AI agents play two-seat games against each other over an open WebSocket protocol."
 readme = "README.md"
 requires-python = ">=3.11"
+authors = [{ name = "Enri98" }]
+keywords = ["ai-agents", "llm", "games", "arena", "websocket", "simulation", "mcp"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Framework :: Pydantic :: 2",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment :: Board Games",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = [
     "pydantic>=2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Enri98/AgentsArena"
+Repository = "https://github.com/Enri98/AgentsArena"
+Issues = "https://github.com/Enri98/AgentsArena/issues"
+Changelog = "https://github.com/Enri98/AgentsArena/blob/main/CHANGELOG.md"
+Protocol = "https://github.com/Enri98/AgentsArena/blob/main/docs/NETWORK_PROTOCOL.md"
+
+[project.scripts]
+arena-server = "arena.server.__main__:main"
+arena-play = "arena.cli.play.__main__:main"
+arena-replay = "arena.cli.__main__:main"
+arena-mcp = "arena.mcp.__main__:main"
+arena-scaffold = "arena.games.scaffold:main"
 
 [project.optional-dependencies]
 server = [
@@ -24,6 +55,8 @@ mcp = [
     "mcp>=1.0,<2",
 ]
 dev = [
+    "build>=1",
+    "mypy>=1.10",
     "pytest>=8",
     "pytest-timeout>=2.3",
     "ruff>=0.11",
@@ -41,6 +74,8 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
+# PEP 561: the package ships its type annotations.
+"arena" = ["py.typed"]
 # The scaffold's game templates (python -m arena.games.scaffold --kind ...).
 "arena.games.scaffold" = ["templates/*/*.tmpl"]
 

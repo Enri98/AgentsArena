@@ -9,6 +9,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as _ws_connect
 from websockets.exceptions import ConnectionClosed
 
+from arena import __version__
 from arena.adapters.websocket.codec import dumps, loads
 from arena.adapters.websocket.envelope import (
     ActionResponseEnvelope,
@@ -36,7 +37,7 @@ from arena.sdk._events import (
 from arena.sdk.errors import HandshakeError, close_code_to_error
 
 CLIENT_NAME = "arena-sdk-python"
-CLIENT_VERSION = "0.1.0"
+CLIENT_VERSION = __version__
 # Phase 37 bumped the wire to 2 (transcripts carry chance turns), Phase 38 to 3
 # (per-seat views), Phase 41 to 4 (joint turns). The SDK reads them all.
 SUPPORTED_SCHEMA_VERSIONS = [1, 2, 3, 4]
