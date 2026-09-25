@@ -361,7 +361,8 @@ def _build_match_state_body(
     seats: list[int] | None = None
     if local_match is not None:
         turn_count = len(local_match.turns)
-        if not local_match.rules_engine.is_terminal(local_match.state):
+        # Nobody acts in an ended match, an aborted one included (section 8.3).
+        if lc == "running" and not local_match.rules_engine.is_terminal(local_match.state):
             seats = list(acting_seats(local_match.rules_engine, local_match.state))
             current_seat = seats[0] if len(seats) == 1 else None
 
@@ -1043,8 +1044,8 @@ async def _receive_one_text(ws: "WebSocket") -> str | None:
 async def _receive_action(
     active_conn: SeatConnection,
     match_id: str,
-    committed_turn_ids: set[str],
-    rejected_turn_ids: set[str],
+    committed_turn_ids: set[tuple[int, str]],
+    rejected_turn_ids: set[tuple[int, str]],
     *,
     deadline_event: asyncio.Event | None = None,
     limiter: Any = None,
@@ -1145,7 +1146,10 @@ async def _receive_action(
 
         turn_id = envelope.turn_id or str(uuid.uuid4())
 
-        if turn_id in committed_turn_ids or turn_id in rejected_turn_ids:
+        # Per seat: in a simultaneous round one seat reusing the other's turn_id
+        # (a rejected one, say) must not get the other's action dropped.
+        key = (active_conn.seat, turn_id)
+        if key in committed_turn_ids or key in rejected_turn_ids:
             logger.debug("duplicate_turn_id_dropped", turn_id=turn_id, match_id=match_id)
             continue
 
@@ -1266,6 +1270,9 @@ async def run_match(
     # below must send it if not, and must not send it twice.
     terminal_sent = False
 
+    abort_task: asyncio.Future[None] | None = None
+    deadline_timers: dict[int, asyncio.Task] = {}
+
     async def _abort(
         reason: AbortReason,
         message: str,
@@ -1275,13 +1282,47 @@ async def run_match(
         close_reason: str,
         close_code: int = WS_CLOSE_NORMAL,
     ) -> None:
-        """Abort the match: record it, tell everyone, close both seats."""
+        """Abort the match: record it, tell everyone, close both seats.
 
+        Runs once, as one shielded task. In a simultaneous round both seats'
+        loops can reach an abort (two deadlines of the same length), and the
+        round then cancels the loops; run inside a loop, the first abort was
+        cancelled half-way, and nobody received match_aborted. A second caller,
+        or a cancelled one, waits for the abort instead.
+        """
+
+        nonlocal abort_task
+        if abort_task is None:
+            if session.lifecycle is not RuntimeLifecycle.RUNNING:
+                return
+            abort_task = asyncio.ensure_future(
+                _perform_abort(
+                    reason,
+                    message,
+                    seat=seat,
+                    log_reason=log_reason,
+                    close_reason=close_reason,
+                    close_code=close_code,
+                )
+            )
+        await asyncio.shield(abort_task)
+
+    async def _abort_finished() -> None:
+        """Wait for an abort in flight (the driver must not exit before it)."""
+
+        if abort_task is not None:
+            await asyncio.gather(abort_task, return_exceptions=True)
+
+    async def _perform_abort(
+        reason: AbortReason,
+        message: str,
+        *,
+        seat: int | None,
+        log_reason: str,
+        close_reason: str,
+        close_code: int,
+    ) -> None:
         nonlocal session, terminal_sent
-        if session.lifecycle is not RuntimeLifecycle.RUNNING:
-            # Already ended: in a simultaneous round both seats' loops can
-            # reach an abort (two deadlines of the same length, say).
-            return
         session = arena.abort_session(session, reason=reason, message=message)
         match.session = session
         await persist_public_transcript(app_state, match)
@@ -1348,6 +1389,8 @@ async def run_match(
             deadline_timer_task = asyncio.create_task(
                 _deadline_sleep(deadline_event, deadline_s)
             )
+            # Tracked so a loop cancelled mid-round does not leave its timer.
+            deadline_timers[active_seat] = deadline_timer_task
 
         async def _deadline_abort() -> None:
             _cancel_task(deadline_timer_task)
@@ -1378,6 +1421,11 @@ async def run_match(
                 deadline_event=deadline_event,
                 limiter=getattr(app_state, "rate_limiter", None),
             )
+            if session.lifecycle is not RuntimeLifecycle.RUNNING:
+                # The other seat's loop ended the match meanwhile: send nothing
+                # more (an error after match_aborted would break section 8.10).
+                _cancel_task(deadline_timer_task)
+                return None
 
             # --- Per-turn deadline expired ---
             if error_msg == _DEADLINE_EXPIRED:
@@ -1431,12 +1479,14 @@ async def run_match(
                     waiters = {asyncio.ensure_future(reconnect_event.wait())}
                     if deadline_event is not None:
                         waiters.add(asyncio.ensure_future(deadline_event.wait()))
-                    await asyncio.wait(
-                        waiters, timeout=grace_s, return_when=asyncio.FIRST_COMPLETED
-                    )
-                    for waiter in waiters:
-                        waiter.cancel()
-                    await asyncio.gather(*waiters, return_exceptions=True)
+                    try:
+                        await asyncio.wait(
+                            waiters, timeout=grace_s, return_when=asyncio.FIRST_COMPLETED
+                        )
+                    finally:
+                        for waiter in waiters:
+                            waiter.cancel()
+                        await asyncio.gather(*waiters, return_exceptions=True)
 
                 reconnected = (
                     conns[active_seat] is not active_conn or reconnect_event.is_set()
@@ -1528,7 +1578,7 @@ async def run_match(
                 accepted = accept(typed_action)
             except ArenaCoreError as exc:
                 domain_err = dump_domain_error(exc)
-                rejected_turn_ids.add(turn_id)
+                rejected_turn_ids.add((active_seat, turn_id))
                 logger.warning(
                     "action_rejected",
                     match_id=session.match_id,
@@ -1572,7 +1622,7 @@ async def run_match(
                     code="adapter_error",
                     message=str(exc) or "Unknown error",
                 )
-                rejected_turn_ids.add(turn_id)
+                rejected_turn_ids.add((active_seat, turn_id))
                 logger.warning(
                     "action_rejected",
                     match_id=session.match_id,
@@ -1652,6 +1702,9 @@ async def run_match(
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks.values(), return_exceptions=True)
+            for timer in deadline_timers.values():
+                _cancel_task(timer)
+            await _abort_finished()
 
     # One writer task per seat for the life of the match: the driver enqueues and
     # never blocks on a socket.
@@ -1672,8 +1725,8 @@ async def run_match(
         await _broadcast_turns_committed(conns, session, since=0)
         await _broadcast_match_state(conns, session)
 
-        committed_turn_ids: set[str] = set()
-        rejected_turn_ids: set[str] = set()
+        committed_turn_ids: set[tuple[int, str]] = set()
+        rejected_turn_ids: set[tuple[int, str]] = set()
 
         deadline_s = (
             match.per_turn_deadline_ms / 1000.0 if match.per_turn_deadline_ms > 0 else None
@@ -1725,7 +1778,7 @@ async def run_match(
             active_seat = seats[0] if len(seats) == 1 else None
 
             # Every acting seat's action accepted.
-            committed_turn_ids.update(turn_ids.values())
+            committed_turn_ids.update(turn_ids.items())
 
             new_events = session.events + tuple(
                 TurnAccepted(match_id=session.match_id, seat=seat, turn_index=turns_before + 1)
@@ -1808,6 +1861,9 @@ async def run_match(
         logger.exception(
             "run_match_error", match_id=match.match_id, seat=None, schema_version=1
         )
+        # An abort already under way finishes first; it may have sent the
+        # terminal frame, and sending it again would duplicate it.
+        await _abort_finished()
         session = match.session
         if session.lifecycle not in (
             RuntimeLifecycle.FINISHED,
@@ -1851,6 +1907,8 @@ async def run_match(
             await _close_both(conns, WS_CLOSE_SERVER_ERROR, "server_error")
 
     finally:
+        for timer in deadline_timers.values():
+            _cancel_task(timer)
         # However the driver ended, a transcript GET must stop answering 409.
         match.transcript_settled = True
         match.driver_active = False

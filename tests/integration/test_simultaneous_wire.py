@@ -268,3 +268,105 @@ def test_a_seat_that_drops_mid_round_resumes_it() -> None:
     assert 0 < out["resent"]["payload"]["deadline_ms"] < 10_000
     turn = out["done0"]["payload"]["transcript"]["match_transcript"]["turns"][0]
     assert turn["actions"] == {"0": {"shape": "scissors"}, "1": {"shape": "paper"}}
+
+
+async def _terminal_and_close(ws: Any) -> tuple[list[str], int | None]:
+    kinds: list[str] = []
+    try:
+        while True:
+            frame = json.loads(await asyncio.wait_for(ws.recv(), 10))
+            kinds.append(frame["type"])
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    except asyncio.TimeoutError:
+        pass
+    return kinds, ws.close_code
+
+
+def test_two_deadlines_at_once_still_abort_properly() -> None:
+    # Both seats silent: both loops reach the abort together. Run inside a
+    # loop, the first abort was cancelled half-way and nobody heard of it.
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+
+    async def run(base: str, ws_base: str) -> dict:
+        match = _create(base, per_turn_deadline_ms=500, disconnect_grace_ms=500)
+        spectate = f"{ws_base}/matches/{match['match_id']}/spectate"
+        async with await connect(match["seat_0_url"]) as ws0, await connect(
+            match["seat_1_url"]
+        ) as ws1, await connect(spectate) as spec:
+            await send_envelope(spec, _spectator_hello())
+            await send_envelope(ws0, _hello(0))
+            await send_envelope(ws1, _hello(1))
+            results = await asyncio.gather(
+                _terminal_and_close(ws0), _terminal_and_close(ws1), _terminal_and_close(spec)
+            )
+        await asyncio.sleep(0.2)
+        transcript = httpx.get(f"{base}/matches/{match['match_id']}/public-transcript")
+        return {"results": results, "transcript": transcript.status_code}
+
+    with serve(app) as server:
+        for _ in range(3):  # it failed in every run before the fix
+            out = asyncio.run(
+                asyncio.wait_for(run(server.http_base_url, server.ws_base_url), 60)
+            )
+            (k0, c0), (k1, c1), (ks, _cs) = out["results"]
+            assert k0.count("match_aborted") == 1 and c0 == 1000, (k0, c0)
+            assert k1.count("match_aborted") == 1 and c1 == 1000, (k1, c1)
+            assert ks.count("match_aborted") == 1, ks
+            assert out["transcript"] == 200
+
+
+def test_both_seats_dropping_still_aborts_properly() -> None:
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+
+    async def run(base: str, ws_base: str) -> dict:
+        match = _create(base, per_turn_deadline_ms=10_000, disconnect_grace_ms=400)
+        spectate = f"{ws_base}/matches/{match['match_id']}/spectate"
+        async with await connect(spectate) as spec:
+            await send_envelope(spec, _spectator_hello())
+            ws0 = await connect(match["seat_0_url"])
+            ws1 = await connect(match["seat_1_url"])
+            await send_envelope(ws0, _hello(0))
+            await send_envelope(ws1, _hello(1))
+            await _next(ws0, "observation_request")
+            await _next(ws1, "observation_request")
+            await ws0.close()
+            await ws1.close()
+            kinds, _ = await _terminal_and_close(spec)
+        await asyncio.sleep(0.2)
+        transcript = httpx.get(f"{base}/matches/{match['match_id']}/public-transcript")
+        return {"spectator": kinds, "transcript": transcript.status_code}
+
+    with serve(app) as server:
+        out = asyncio.run(asyncio.wait_for(run(server.http_base_url, server.ws_base_url), 60))
+    assert out["spectator"].count("match_aborted") == 1, out
+    assert out["transcript"] == 200
+
+
+def test_one_seat_cannot_block_the_others_action_by_its_turn_id() -> None:
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+
+    async def run(base: str, ws_base: str) -> dict:
+        match = _create(base, game_config={"target_wins": 1}, per_action_retry_budget=2)
+        mid = match["match_id"]
+        async with await connect(match["seat_0_url"]) as ws0, await connect(
+            match["seat_1_url"]
+        ) as ws1:
+            await send_envelope(ws0, _hello(0))
+            await send_envelope(ws1, _hello(1))
+            await _next(ws0, "observation_request")
+            await _next(ws1, "observation_request")
+            bad = _action(mid, 0, "rock").model_copy(update={"turn_id": "round-1"})
+            await ws0.send(dumps(bad).replace('"rock"', '"lizard"'))
+            await _next(ws0, "action_rejected")
+            # Seat 1 happens to use the same turn id: its throw must count.
+            good = _action(mid, 1, "rock").model_copy(update={"turn_id": "round-1"})
+            await send_envelope(ws1, good)
+            await send_envelope(ws0, _action(mid, 0, "scissors"))
+            return await _next(ws1, "match_finished")
+
+    with serve(app) as server:
+        finished = asyncio.run(
+            asyncio.wait_for(run(server.http_base_url, server.ws_base_url), 60)
+        )
+    assert finished["payload"]["transcript"]["lifecycle"] == "finished"

@@ -412,6 +412,11 @@ Where `<ObservationRequestPayload>` is exactly the payload defined by
 the server will wait for the action; on expiry the server aborts the match with reason
 `turn_deadline_expired`.
 
+**One action per request.** A client sends exactly one `action_response` per
+`observation_request` (plus retries after `action_rejected`). The server reads a seat's frames
+only while it is waiting for that seat, so an extra action is not discarded: it is read as the
+answer to the seat's next request.
+
 **Simultaneous rounds (v4).** When several seats act at once, each acting seat receives its own
 `observation_request` at the same time, and none depends on another's choice. Each seat has
 its own deadline (the match's `per_turn_deadline_ms`, from when its request was sent), its own
@@ -521,7 +526,8 @@ the failure reason.
 { "nonce": "<echoed>" }
 ```
 
-Sent every 20 seconds by the server to the **active seat** while its turn is open. An off-turn
+Sent every 20 seconds by the server to the **active seat** while its turn is open (in a
+simultaneous round, to each acting seat until its action is accepted). An off-turn
 seat is not pinged: the server does not read from it, and it is checked when its turn comes
 (the protocol-level keepalive of §3 covers every connection meanwhile). Clients must reply with
 `pong` echoing the same `nonce` within 20 seconds. Two consecutive missed `pong` responses close
@@ -681,7 +687,9 @@ negotiation in v1.
   rides inside the welcome rather than as separate frames. The client reaches **logically
   equivalent state** to one that never disconnected. Framing is not byte-identical; the resulting
   state is. The server then sends `match_state` and, if the reconnecting seat is the active seat,
-  re-sends the in-flight `observation_request`, so the client always knows what to act on.
+  re-sends the in-flight `observation_request`, so the client always knows what to act on. In a
+  simultaneous round (v4) a seat whose action was already accepted is not asked again: its action
+  stands, and it waits for the round's `turn_committed`.
 - **A resume is only for a running match.** Before both seats have joined there is nothing to
   resume: a `hello` with a `resume_token` closes with `4409 match_not_started`, and the client
   should send a fresh `hello`.
@@ -766,6 +774,8 @@ information.
   checked before the request body is read. A create body is at most 64 KiB (`413
   request_too_large`); `players` has at most two entries, and a label at most 64 characters.
 - Max `action_response` messages per match per second: **10**, enforced by throttling (see above).
+  The window is per match, so in a simultaneous round (v4) both seats share it: one seat's flood
+  slows both. It adds delay only and is never charged to either seat's deadline.
 - Max concurrent seat connections per match: **4**. A connection claims its per-match slot only
   once its fresh `hello` is valid; a resume with a valid token claims none and is never refused
   for this cap: sockets that never said hello used to hold the slots and lock a
