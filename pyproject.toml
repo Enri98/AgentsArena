@@ -56,7 +56,7 @@ server = [
 ]
 mcp = [
     # mcp 2 removed Server.list_tools and friends; arena.mcp targets the 1.x API.
-    "mcp>=1.0,<2",
+    "mcp>=1.0,<3",
     # arena.mcp drives matches through the SDK.
     "websockets>=13",
 ]
