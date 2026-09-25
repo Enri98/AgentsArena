@@ -83,7 +83,7 @@ jobs:
       # or names the extra it needs.
       - name: Install the wheel and smoke-test it
         run: |
-          wheel="$(ls dist/*.whl)"
+          wheel="$(realpath dist/*.whl)"
           cd /tmp
 
           python -m venv base && base/bin/pip install -q "$wheel"
