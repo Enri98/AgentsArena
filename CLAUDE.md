@@ -1,6 +1,6 @@
 # AgentsArena — Project Context
 
-Python 3.11 library powering an agent-vs-agent arena for sequential two-seat games — deterministic or stochastic (chance nodes, Phase 37), with perfect or hidden information (per-seat views, Phase 38). **v1 milestone reached** (Phases 0-35 complete): simulation core, local runtime, terminal CLI, local Ollama agents, WebSocket server, reference Python SDK, resilience (deadlines/heartbeats/reconnect), structured logging, public-deployment recipe, and an MCP server layer all shipped. Persistence beyond JSON files, real auth, web spectator UI, Prometheus metrics, OpenTelemetry tracing, lobby/matchmaking, and a TypeScript SDK port are explicitly v2 concerns.
+Python 3.11 library powering an agent-vs-agent arena for two-seat games — sequential or simultaneous (joint turns, Phase 41), deterministic or stochastic (chance nodes, Phase 37), with perfect or hidden information (per-seat views, Phase 38). **v1 milestone reached** (Phases 0-35): simulation core, local runtime, terminal CLI, local Ollama agents, WebSocket server, reference Python SDK, resilience (deadlines/heartbeats/reconnect), structured logging, public-deployment recipe, and an MCP server layer. **v2 (Phases 36-42)** added spectators, rate limits, chance nodes, hidden information, Liar's Dice, transcript persistence, simultaneous moves, a packaged TypeScript SDK (`sdk-ts/`), and scaffold templates per game kind. Real auth, a designed web UI, Prometheus metrics, OpenTelemetry tracing, and lobby/matchmaking remain deferred.
 
 > Source of truth for plan + status: `IMPLEMENTATION_PLAN.md`. Working rules + style: `AGENTS.md`. Wire protocol: `docs/NETWORK_PROTOCOL.md`. Adapter boundaries: `docs/ADAPTER_BOUNDARIES.md`. Cross-session handoff: `docs/MATCH_ARENA_HANDOFF.md`.
 
@@ -20,7 +20,8 @@ Python 3.11 library powering an agent-vs-agent arena for sequential two-seat gam
 | CLI | `arena.cli` | Terminal renderer, `python -m arena.cli` replay viewer, `python -m arena.cli.play` interactive driver supporting `human`, `scripted:`, and `ollama:<model>` seats. May depend on `arena.sdk` for `--server-url` remote play. |
 | Local agents | `arena.agents.ollama` | Stdlib HTTP client, generic `OllamaAgent` with retry-with-feedback, per-game prompt builders, typed exceptions, `probe_models`. Surfaces retries via the `PolicyRetried` runtime event. |
 | Server | `arena.server` | Single-process FastAPI + WebSocket server. `MatchRegistry`, `POST /matches`, `GET /games`, `GET /matches/{id}/public-transcript`, `WS /matches/{id}/play`, `WS /matches/{id}/spectate`. Protocol §13 rate limits, match eviction, per-connection outbound queues, the public-transcript store (Phase 40). Owns per-turn deadlines, heartbeats, disconnect grace, structured JSON logging. The **only** layer allowed to instantiate logging at module scope. |
-| SDK | `arena.sdk` | Reference Python client for `arena.server`. Both `connect(url, seat, choose=...)` callback form and `Session` loop form. Ships Connect 4 / Tic-Tac-Toe / Nim schemas. Includes `LocalSession` test helper and reconnect helper. Stays silent (no log output) by default. |
+| SDK | `arena.sdk` | Reference Python client for `arena.server`. Both `connect(url, seat, choose=...)` callback form and `Session` loop form. Game-agnostic: actions and observations are JSON. Includes `LocalSession` test helper and reconnect helper. Stays silent (no log output) by default. |
+| TypeScript SDK | `sdk-ts/` (`@agents-arena/sdk`) | Phase 42. Standalone npm package on the standard `WebSocket`/`fetch`; shares no code with Python and speaks only `docs/NETWORK_PROTOCOL.md`. `playMatch`, `SeatSession`, `spectate`, `createMatch`, `fetchPublicTranscript`. Tested against the real server by `tests/integration/test_typescript_sdk.py`. |
 | MCP server | `arena.mcp` | MCP wrapper exposing the SDK via stdio or HTTP/SSE transports. Tools: `join_match`, `get_observation`, `make_move`, `get_history`, `match_status`. Per-game action JSON schemas. May only import `arena.sdk` and `arena.core`. |
 
 Dependency direction is enforced by architecture tests: `core`/`games` import none of the upper layers; `match` cannot import adapters/runtime/ui; `adapters.in_process` cannot import runtime/ui; `adapters.websocket` may import only `arena.core`, `arena.adapters.in_process` payload models, and `arena.runtime.payloads` (transcripts ride inside `match_finished`/`welcome`); runtime cannot import ui; nothing below `arena.server` may import `arena.server`; nothing below `arena.sdk` may import `arena.sdk`; `arena.sdk` must not import `arena.match`, `arena.adapters.in_process`, `arena.runtime`, `arena.ui`, `arena.cli`, or `arena.server`; `arena.mcp` may only import `arena.sdk`, `arena.core`, and `arena.games` (its per-game adapters need the game ids), and no lower layer may import `arena.mcp`.
@@ -35,7 +36,7 @@ Outside the numbered roadmap: `arena.games.nim` (commit `3da879a`) is registered
 
 **Post-v1 work already landed** (not part of the numbered roadmap):
 - `68b011a` — per-layer adapter registries. `arena.cli.games`, `arena.mcp.games`, and `arena.agents.ollama._adapters` each expose a registry that per-game modules register into at import time, replacing hand-maintained `if game_id == ...` ladders. **New games must register with each layer's registry rather than adding dispatch branches.**
-- `a408787` — `docs/ADDING_A_GAME.md` plus a scaffold generator: `python -m arena.games.scaffold`.
+- `a408787` — `docs/ADDING_A_GAME.md` plus a scaffold generator: `python -m arena.games.scaffold`. Since Phase 42, `--kind chance|hidden|simultaneous` generates a working game of that kind (templates in `arena/games/scaffold/templates/`) with adapters and a contract test.
 - `cce1846` — `docs/RFC_IMPERFECT_INFORMATION.md`, a draft v2 RFC proposing Phases 36-40 (per-seat snapshots, `schema_version` 1→2, spectator endpoint, Liar's Dice exemplar). **Draft only — not approved, no code attached.**
 
 **Known gaps:**
@@ -59,7 +60,7 @@ Open items: no v1 follow-ups remain. Future work is the v2 backlog (see "Deferre
 - **Per-turn deadlines and wall-clock timeouts live exclusively in `arena.server`. `arena.runtime` stays deadline-free.** Server-enforced expiry produces an existing-style runtime abort with reason `turn_deadline_expired`.
 - **Match identity is an unguessable opaque token** (`secrets.token_urlsafe(16)`, >=128 bits of entropy). In v1 there is no auth: possession of the `match_id` is the capability.
 - **Structured logging at module-load scope is allowed only in `arena.server`.** Lower layers may use `logging` lazily inside functions when explicitly opted in. The SDK stays silent by default.
-- **`docs/NETWORK_PROTOCOL.md` is the language-agnostic source of truth for the wire protocol.** The Python SDK is a reference implementation, not the spec.
+- **`docs/NETWORK_PROTOCOL.md` is the language-agnostic source of truth for the wire protocol.** The Python and TypeScript SDKs are reference implementations, not the spec.
 - The wire format is JSON over WebSocket; this is not configurable.
 - Architecture/import-boundary tests are load-bearing — do not introduce upward imports.
 
@@ -121,7 +122,6 @@ Two items moved OUT of the v2 deferral list by owner decision: **transcript pers
 - Lobby, matchmaking, tournaments
 - Prometheus metrics endpoint
 - OpenTelemetry tracing
-- TypeScript SDK port
 - Anthropic-SDK-backed agent
 - Third-party game registration
 
