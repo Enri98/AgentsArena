@@ -1,0 +1,32 @@
+"""What each viewer of a ${Name} match may see."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+from arena.core.observations import Observation
+from arena.games.${name}.actions import ${Name}Action
+
+
+@dataclass(frozen=True)
+class ${Name}Observation(Observation):
+    """One seat's view: its own number, never the other's."""
+
+    digits: int
+    my_secret: int | None
+    choices: tuple[str, ...]
+    legal_actions: tuple[${Name}Action, ...]
+
+
+@dataclass(frozen=True)
+class ${Name}PublicView:
+    """What a spectator may see: both numbers only after a showdown."""
+
+    digits: int
+    dealt: bool
+    choices: tuple[str, ...]
+    revealed: tuple[int, int] | None
+
+
+__all__: Sequence[str] = ["${Name}Observation", "${Name}PublicView"]

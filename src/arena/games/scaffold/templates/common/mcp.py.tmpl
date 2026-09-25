@@ -1,0 +1,27 @@
+"""MCP adapter registration for ${Name}."""
+
+from __future__ import annotations
+
+from arena.games.${name}.actions import CHOICES
+from arena.games.${name}.definition import ${NAME}_GAME_ID
+from arena.mcp._adapters import McpGameAdapter, register_mcp_adapter
+
+${NAME}_ACTION_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "choice": {"type": "string", "enum": list(CHOICES)},
+    },
+    "required": ["choice"],
+    "additionalProperties": False,
+}
+
+
+register_mcp_adapter(
+    McpGameAdapter(
+        game_id=${NAME}_GAME_ID,
+        action_schema=${NAME}_ACTION_SCHEMA,
+    )
+)
+
+
+__all__: tuple[str, ...] = ("${NAME}_ACTION_SCHEMA",)

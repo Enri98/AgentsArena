@@ -1,0 +1,21 @@
+"""${Name} chance outcomes: what nature deals."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+
+@dataclass(frozen=True)
+class ${Name}Deal:
+    """The opening deal: one private number per seat.
+
+    Private: seat ``i`` may see only ``secrets[i]``. The serializer's
+    ``dump_chance_outcome_for_seat`` and ``dump_public_chance_outcome`` decide
+    what each viewer is sent.
+    """
+
+    secrets: tuple[int, int]
+
+
+__all__: Sequence[str] = ["${Name}Deal"]

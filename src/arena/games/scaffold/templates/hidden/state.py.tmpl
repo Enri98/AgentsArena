@@ -1,0 +1,43 @@
+"""Immutable ${Name} game state."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+from arena.games.${name}.actions import CHOICES
+
+VALID_SEATS = (0, 1)
+
+
+@dataclass(frozen=True)
+class ${Name}State:
+    """The minimum authoritative state.
+
+    ``secrets`` is private: seat ``i`` may see only ``secrets[i]``, and the
+    public nothing until a showdown. It is ``None`` until the opening deal (a
+    chance node) resolves. ``choices`` lists the choices made so far, seat 0's
+    first.
+    """
+
+    digits: int
+    secrets: tuple[int, int] | None = None
+    choices: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.digits) is not int or self.digits < 2:
+            raise ValueError("digits must be an int of at least 2")
+        if self.secrets is None:
+            if self.choices:
+                raise ValueError("nobody chooses before the deal")
+        elif len(self.secrets) != 2 or any(
+            type(secret) is not int or not 0 <= secret < self.digits for secret in self.secrets
+        ):
+            raise ValueError("secrets must be two ints in [0, digits)")
+        if len(self.choices) > 2 or any(choice not in CHOICES for choice in self.choices):
+            raise ValueError(f"choices must be at most two of {CHOICES}")
+        if self.choices[:1] == ("fold",) and len(self.choices) > 1:
+            raise ValueError("the game ends at a fold")
+
+
+__all__: Sequence[str] = ["VALID_SEATS", "${Name}State"]

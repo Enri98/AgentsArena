@@ -1,0 +1,21 @@
+"""Validated configuration for ${Name}."""
+
+from __future__ import annotations
+
+from typing import Sequence
+
+from pydantic import Field
+
+from arena.core.config import BaseGameConfig
+
+DEFAULT_TARGET = 3
+MAX_TARGET = 20
+
+
+class ${Name}Config(BaseGameConfig):
+    """The first seat to win ``target`` rounds wins the match."""
+
+    target: int = Field(default=DEFAULT_TARGET, ge=1, le=MAX_TARGET)
+
+
+__all__: Sequence[str] = ["DEFAULT_TARGET", "MAX_TARGET", "${Name}Config"]

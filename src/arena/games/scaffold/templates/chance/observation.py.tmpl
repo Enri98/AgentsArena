@@ -1,0 +1,21 @@
+"""What a seat sees of a ${Name} match: everything (perfect information)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+from arena.core.observations import Observation
+from arena.games.${name}.actions import ${Name}Action
+
+
+@dataclass(frozen=True)
+class ${Name}Observation(Observation):
+    """A seat's view: the score, the target, and its legal moves."""
+
+    scores: tuple[int, int]
+    target: int
+    legal_actions: tuple[${Name}Action, ...]
+
+
+__all__: Sequence[str] = ["${Name}Observation"]

@@ -40,6 +40,10 @@ package-dir = {"" = "src"}
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# The scaffold's game templates (python -m arena.games.scaffold --kind ...).
+"arena.games.scaffold" = ["templates/*/*.tmpl"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # A hung WebSocket test must fail, not block CI forever. thread method because the

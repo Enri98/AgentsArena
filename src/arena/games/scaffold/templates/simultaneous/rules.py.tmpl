@@ -1,0 +1,138 @@
+"""${Name} rules engine: simultaneous moves.
+
+Matching pennies. Every round both seats choose ``heads`` or ``tails`` at once,
+without seeing the other's choice. Seat 0 scores when the choices match, seat 1
+when they differ. The first seat to win ``target`` rounds wins.
+
+A round is one **joint turn** (``arena.core.simultaneous``): ``acting_seats``
+names every seat that must choose, each choice is checked with
+``validate_action`` as it arrives, and ``apply_joint_action`` resolves the
+round from all of them. No seat ever acts alone, so ``apply_action`` refuses.
+Replace the rules with your game's; keep the structure.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import replace
+from typing import Sequence
+
+from arena.core.actions import Action
+from arena.core.events import DomainEvent
+from arena.core.exceptions import GameFinished, IllegalAction, WrongPlayer
+from arena.core.results import RuleResult, Win
+from arena.core.rules_engine import TransitionResult
+from arena.core.types import Seat
+from arena.games.${name}.actions import CHOICES, ${Name}Action
+from arena.games.${name}.config import ${Name}Config
+from arena.games.${name}.events import ${Name}RoundPlayed
+from arena.games.${name}.observation import ${Name}Observation
+from arena.games.${name}.state import VALID_SEATS, ${Name}State
+
+#: The rules in a few sentences, for agents (see arena.agents.ollama.${name}).
+RULES_SUMMARY = (
+    "You are playing ${Name} (matching pennies) against another player.\n"
+    "Every round you both choose 'heads' or 'tails' at the same time.\n"
+    "Seat 0 wins the round when the choices match; seat 1 when they differ.\n"
+    "The first player to win the target number of rounds wins. Be unpredictable."
+)
+
+_ALL_ACTIONS = tuple(${Name}Action(choice=choice) for choice in CHOICES)
+
+
+class ${Name}RulesEngine:
+    """Rules engine for ${Name}."""
+
+    def initial_state(self, config: ${Name}Config) -> ${Name}State:
+        return ${Name}State(scores=(0, 0), target=config.target)
+
+    # -- seats -------------------------------------------------------------
+
+    def current_seat(self, state: ${Name}State) -> Seat:
+        # Both seats act every round; see acting_seats. Seat 0 by convention,
+        # and the winner at a finished state.
+        result = self.result(state)
+        return result.seat if isinstance(result, Win) else 0
+
+    def acting_seats(self, state: ${Name}State) -> tuple[Seat, ...]:
+        return () if self.is_terminal(state) else VALID_SEATS
+
+    # -- actions -----------------------------------------------------------
+
+    def legal_actions(
+        self, state: ${Name}State, seat: Seat
+    ) -> tuple[${Name}Action, ...]:
+        if self.is_terminal(state) or seat not in VALID_SEATS:
+            return ()
+        return _ALL_ACTIONS
+
+    def validate_action(self, state: ${Name}State, seat: Seat, action: Action) -> None:
+        if self.is_terminal(state):
+            raise GameFinished("The match is already over.")
+        if seat not in VALID_SEATS:
+            raise WrongPlayer("Only seats 0 and 1 play.", details={"seat": seat})
+        if not isinstance(action, ${Name}Action):
+            raise IllegalAction(
+                "${Name} takes ${Name}Action moves.",
+                details={"action_type": type(action).__name__},
+            )
+
+    def apply_action(
+        self, state: ${Name}State, seat: Seat, action: Action
+    ) -> TransitionResult[${Name}State, DomainEvent, RuleResult | None]:
+        if self.is_terminal(state):
+            raise GameFinished("The match is already over.")
+        raise WrongPlayer(
+            "Both seats choose at once: a round is resolved with apply_joint_action.",
+            details={"seat": seat},
+        )
+
+    def apply_joint_action(
+        self, state: ${Name}State, actions: Mapping[Seat, Action]
+    ) -> TransitionResult[${Name}State, DomainEvent, RuleResult | None]:
+        # Revalidate every choice: callers are not trusted to have checked.
+        if sorted(actions) != list(VALID_SEATS):
+            raise WrongPlayer(
+                "A round needs one choice from each seat.",
+                details={"seats": sorted(actions)},
+            )
+        for seat in VALID_SEATS:
+            self.validate_action(state, seat, actions[seat])
+        first, second = (actions[seat].choice for seat in VALID_SEATS)  # type: ignore[attr-defined]
+        scorer = 0 if first == second else 1
+        scores = list(state.scores)
+        scores[scorer] += 1
+        next_state = replace(
+            state, scores=(scores[0], scores[1]), last_round=(first, second)
+        )
+        return TransitionResult(
+            state=next_state,
+            events=(${Name}RoundPlayed(choices=[first, second], scorer=scorer),),
+            result=self.result(next_state),
+        )
+
+    # -- outcome -----------------------------------------------------------
+
+    def is_terminal(self, state: ${Name}State) -> bool:
+        return max(state.scores) >= state.target
+
+    def result(self, state: ${Name}State) -> RuleResult | None:
+        if not self.is_terminal(state):
+            return None
+        return Win(seat=0 if state.scores[0] >= state.target else 1)
+
+    def observation(
+        self, state: ${Name}State, seat: Seat
+    ) -> ${Name}Observation:
+        if seat not in VALID_SEATS:
+            raise WrongPlayer("Only seats 0 and 1 play.", details={"seat": seat})
+        return ${Name}Observation(
+            seat=seat,
+            scores=state.scores,
+            target=state.target,
+            last_round=state.last_round,
+            legal_actions=self.legal_actions(state, seat),
+        )
+
+
+__all__: Sequence[str] = ["RULES_SUMMARY", "${Name}RulesEngine"]

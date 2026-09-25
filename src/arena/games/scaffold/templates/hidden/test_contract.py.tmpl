@@ -1,0 +1,99 @@
+"""The shared contract suite for ${Name}: hidden information plus chance.
+
+Each private variant pairs two states that differ only in what its blind seat
+may not see; the suite checks that seat is sent identical data for both.
+``keep`` is declared revealing: when both seats keep, showing both numbers is
+its whole point.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+
+from arena.core.results import Draw, Win
+from arena.games.${name} import (
+    ${NAME}_GAME_ID,
+    ${Name}Action,
+    ${Name}Config,
+    ${Name}GameDefinition,
+    ${Name}State,
+)
+from arena.games.${name}.outcomes import ${Name}Deal
+from arena.testing import PrivateVariant, assert_game_contract
+
+
+@dataclass(frozen=True)
+class ${Name}ContractBundle:
+    definition: object
+    config: ${Name}Config
+    initial_state: ${Name}State
+    near_terminal_state: ${Name}State
+    terminal_state: ${Name}State
+    legal_action: ${Name}Action
+    illegal_action: object
+    opening_outcomes: tuple[${Name}Deal, ...]
+    private_variants: tuple[PrivateVariant, ...]
+    chance_state: ${Name}State
+    private_outcome_variants: tuple[PrivateVariant, ...]
+    revealing_actions: tuple[object, ...]
+
+
+def build_${name}_contract_bundle() -> ${Name}ContractBundle:
+    definition = ${Name}GameDefinition
+    engine = definition.rules_engine
+    config = ${Name}Config()
+    deal = ${Name}Deal(secrets=(3, 8))
+    opening = engine.apply_chance(engine.initial_state(config), deal).state
+    # Seat 0 kept; seat 1 to choose.
+    near_terminal = replace(opening, choices=("keep",))
+    keep = ${Name}Action(choice="keep")
+    return ${Name}ContractBundle(
+        definition=definition,
+        config=config,
+        initial_state=opening,
+        near_terminal_state=near_terminal,
+        terminal_state=engine.apply_action(near_terminal, 1, keep).state,
+        legal_action=keep,
+        illegal_action=object(),
+        opening_outcomes=(deal,),
+        # Each seat blind to the other's number, on its own turn and the other's.
+        private_variants=(
+            PrivateVariant(opening, replace(opening, secrets=(3, 5)), blind_seat=0),
+            PrivateVariant(opening, replace(opening, secrets=(6, 8)), blind_seat=1),
+            PrivateVariant(near_terminal, replace(near_terminal, secrets=(3, 5)), blind_seat=0),
+            PrivateVariant(near_terminal, replace(near_terminal, secrets=(6, 8)), blind_seat=1),
+        ),
+        chance_state=engine.initial_state(config),
+        private_outcome_variants=(
+            PrivateVariant(deal, ${Name}Deal(secrets=(3, 5)), blind_seat=0),
+            PrivateVariant(deal, ${Name}Deal(secrets=(6, 8)), blind_seat=1),
+        ),
+        revealing_actions=(keep,),
+    )
+
+
+def test_${name}_passes_the_shared_contract_suite() -> None:
+    bundle = build_${name}_contract_bundle()
+    assert bundle.definition.game_id == ${NAME}_GAME_ID
+    assert bundle.definition.has_hidden_information is True
+    assert_game_contract(bundle)
+
+
+def test_the_showdown_goes_to_the_higher_number() -> None:
+    bundle = build_${name}_contract_bundle()
+    engine = bundle.definition.rules_engine
+    assert engine.result(bundle.terminal_state) == Win(seat=1)
+    tied = replace(bundle.terminal_state, secrets=(4, 4))
+    assert engine.result(tied) == Draw()
+
+
+def test_a_fold_loses_and_shows_nothing() -> None:
+    bundle = build_${name}_contract_bundle()
+    engine = bundle.definition.rules_engine
+    serializer = bundle.definition.serializer
+    fold = ${Name}Action(choice="fold")
+    folded = engine.apply_action(bundle.initial_state, 0, fold).state
+    assert engine.result(folded) == Win(seat=1)
+    assert serializer.dump_public_state(folded)["revealed"] is None
+    shown = serializer.dump_public_state(bundle.terminal_state)["revealed"]
+    assert shown == [3, 8]

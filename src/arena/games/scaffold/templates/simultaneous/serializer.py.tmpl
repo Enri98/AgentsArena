@@ -1,0 +1,138 @@
+"""Boundary serializers for ${Name}.
+
+Everything a client sends is validated here with strict Pydantic payloads.
+State never holds a pending choice, so every viewer may see all of it.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Annotated, TypeVar
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from arena.core.config import BaseGameConfig
+from arena.core.serializer import JSONMapping
+from arena.games.${name}.actions import ${Name}Action
+from arena.games.${name}.config import (
+    DEFAULT_TARGET,
+    MAX_TARGET,
+    ${Name}Config,
+)
+from arena.games.${name}.observation import ${Name}Observation
+from arena.games.${name}.state import ${Name}State
+
+_T = TypeVar("_T")
+_STRICT = ConfigDict(extra="forbid", strict=True)
+
+#: One score per seat.
+Scores = Annotated[list[Annotated[int, Field(ge=0)]], Field(min_length=2, max_length=2)]
+#: One choice per seat.
+Round = Annotated[list[str], Field(min_length=2, max_length=2)]
+
+
+class ${Name}ConfigPayload(BaseModel):
+    model_config = _STRICT
+
+    target: int = Field(default=DEFAULT_TARGET, ge=1, le=MAX_TARGET)
+
+
+class ${Name}ActionPayload(BaseModel):
+    model_config = _STRICT
+
+    choice: str
+
+
+class ${Name}StatePayload(BaseModel):
+    model_config = _STRICT
+
+    scores: Scores
+    target: int = Field(ge=1, le=MAX_TARGET)
+    last_round: Round | None = None
+
+
+class ${Name}ObservationPayload(BaseModel):
+    model_config = _STRICT
+
+    seat: int = Field(ge=0, le=1)
+    scores: Scores
+    target: int = Field(ge=1, le=MAX_TARGET)
+    last_round: Round | None = None
+    legal_actions: list[${Name}ActionPayload]
+
+
+def _expect(value: object, kind: type[_T]) -> _T:
+    if not isinstance(value, kind):
+        raise TypeError(f"expected {kind.__name__}, got {type(value).__name__}")
+    return value
+
+
+def _pair(values: list[str] | None) -> tuple[str, str] | None:
+    return (values[0], values[1]) if values is not None else None
+
+
+class ${Name}Serializer:
+    """Boundary serializer for ${Name} domain models."""
+
+    def dump_config(self, config: BaseGameConfig) -> JSONMapping:
+        cfg = _expect(config, ${Name}Config)
+        return ${Name}ConfigPayload(target=cfg.target).model_dump(mode="json")
+
+    def load_config(self, payload: JSONMapping) -> BaseGameConfig:
+        p = ${Name}ConfigPayload.model_validate(payload)
+        return ${Name}Config(**p.model_dump())
+
+    def dump_state(self, state: object) -> JSONMapping:
+        s = _expect(state, ${Name}State)
+        return ${Name}StatePayload(
+            scores=list(s.scores),
+            target=s.target,
+            last_round=list(s.last_round) if s.last_round is not None else None,
+        ).model_dump(mode="json")
+
+    def load_state(self, payload: JSONMapping) -> object:
+        p = ${Name}StatePayload.model_validate(payload)
+        return ${Name}State(
+            scores=(p.scores[0], p.scores[1]), target=p.target, last_round=_pair(p.last_round)
+        )
+
+    def dump_action(self, action: object) -> JSONMapping:
+        a = _expect(action, ${Name}Action)
+        return ${Name}ActionPayload(choice=a.choice).model_dump(mode="json")
+
+    def load_action(self, payload: JSONMapping) -> object:
+        # Client input: an unknown choice raises ValueError, which the server
+        # answers with action_rejected.
+        p = ${Name}ActionPayload.model_validate(payload)
+        return ${Name}Action(choice=p.choice)
+
+    def dump_observation(self, observation: object) -> JSONMapping:
+        o = _expect(observation, ${Name}Observation)
+        return ${Name}ObservationPayload(
+            seat=o.seat,
+            scores=list(o.scores),
+            target=o.target,
+            last_round=list(o.last_round) if o.last_round is not None else None,
+            legal_actions=[
+                ${Name}ActionPayload(choice=a.choice) for a in o.legal_actions
+            ],
+        ).model_dump(mode="json")
+
+    def load_observation(self, payload: JSONMapping) -> object:
+        p = ${Name}ObservationPayload.model_validate(payload)
+        return ${Name}Observation(
+            seat=p.seat,
+            scores=(p.scores[0], p.scores[1]),
+            target=p.target,
+            last_round=_pair(p.last_round),
+            legal_actions=tuple(${Name}Action(choice=a.choice) for a in p.legal_actions),
+        )
+
+
+__all__: Sequence[str] = [
+    "${Name}ActionPayload",
+    "${Name}ConfigPayload",
+    "${Name}ObservationPayload",
+    "${Name}Serializer",
+    "${Name}StatePayload",
+]

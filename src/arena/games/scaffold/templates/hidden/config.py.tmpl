@@ -1,0 +1,25 @@
+"""Validated configuration for ${Name}."""
+
+from __future__ import annotations
+
+from typing import Sequence
+
+from pydantic import Field
+
+from arena.core.config import BaseGameConfig
+
+DEFAULT_DIGITS = 10
+MAX_DIGITS = 100
+
+
+class ${Name}Config(BaseGameConfig):
+    """Each seat is dealt a private number from ``0`` to ``digits - 1``.
+
+    Never put a random seed here: the config is sent to both seats and embedded
+    in every snapshot. Chance comes from the match's generator (Phase 37).
+    """
+
+    digits: int = Field(default=DEFAULT_DIGITS, ge=2, le=MAX_DIGITS)
+
+
+__all__: Sequence[str] = ["DEFAULT_DIGITS", "MAX_DIGITS", "${Name}Config"]
