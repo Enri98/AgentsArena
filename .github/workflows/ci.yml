@@ -34,5 +34,22 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      # The TypeScript SDK (sdk-ts/) is type-checked and unit-tested here, and
+      # tests/integration/test_typescript_sdk.py plays it against the server,
+      # running its sources with Node's type stripping.
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: sdk-ts/package-lock.json
+
+      - name: TypeScript SDK (typecheck, unit tests)
+        working-directory: sdk-ts
+        run: |
+          npm ci
+          npm run typecheck
+          npm test
+
       - name: Test
         run: pytest -q
