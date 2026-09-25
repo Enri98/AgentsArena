@@ -20,8 +20,9 @@ enqueues and never awaits a socket.  Before this, _broadcast awaited send_text o
 each connection in turn from inside run_match: one blocked send suspended the
 driver while the per-turn deadline kept running, so a slow or stalled reader
 aborted the match and the abort was attributed to whichever seat was active.
-A recipient that falls OUTBOX_MAXSIZE frames behind has frames dropped rather
-than being allowed to stall the match.
+A recipient that falls OUTBOX_MAXSIZE frames behind is closed rather than being
+allowed to stall the match: a spectator for good, a seat with 1013 so it can
+resume (its welcome replays the transcript it missed).
 
 An asyncio.Lock per connection still serialises the actual send_text calls, and
 the writer is the only thing that touches the socket once a match is running.
@@ -98,6 +99,7 @@ from arena.match.local_match import (
 from arena.match.transcript import (
     MATCH_TRANSCRIPT_SCHEMA_VERSION,
     VIEW_PUBLIC,
+    dump_rule_result,
     transcript_view_for,
     turn_record_for_viewer,
 )
@@ -126,9 +128,15 @@ logger = structlog.get_logger(__name__)
 WS_CLOSE_NORMAL = 1000
 #: Protocol section 9: internal server failure.
 WS_CLOSE_SERVER_ERROR = 4500
+WS_CLOSE_MALFORMED = 4422
 #: Frames a single connection may have in flight before it is considered
 #: too slow. Well above any legitimate burst: one turn produces ~3 frames.
 OUTBOX_MAXSIZE = 64
+
+#: Malformed or unexpected frames a seat may send during one turn. Each is
+#: answered with an in-band ``error`` and logged; past the cap the seat is closed
+#: 4422 (it can resume), so one socket cannot flood the log.
+MAX_PROTOCOL_ERRORS_PER_TURN = 16
 HEARTBEAT_CLOSE_CODE = 4408
 
 
@@ -347,6 +355,16 @@ def _build_player_info(match: "Match") -> list[PlayerInfoBody]:
     ]
 
 
+def final_result(session: MatchSession) -> dict[str, Any] | None:
+    """A finished match's result (``{result_type, payload}``); None before the
+    end and for an aborted match. Results are public: everyone sees who won."""
+
+    local_match = session.local_match
+    if session.lifecycle is not RuntimeLifecycle.FINISHED or local_match is None:
+        return None
+    return dump_rule_result(local_match.rules_engine.result(local_match.state))
+
+
 def _build_match_state_body(
     session: MatchSession,
     *,
@@ -374,7 +392,7 @@ def _build_match_state_body(
         current_seat=current_seat,
         acting_seats=seats,
         turn_count=turn_count,
-        result=None,
+        result=final_result(session) if override_lifecycle is None else None,
         abort=abort_dict,
     )
 
@@ -572,8 +590,21 @@ async def _writer_loop(conn: SeatConnection) -> None:
         text = await conn.outbox.get()
         if text is None:  # shutdown sentinel
             return
+        if isinstance(text, tuple):  # a close queued after the frames before it
+            _, code, reason = text
+            await _close_ws_quietly(conn.websocket, code, reason)
+            return
         if not await _send_now(conn, text):
             return
+
+
+def _queue_close(conn: SeatConnection, code: int, reason: str) -> None:
+    """Close ``conn`` once the frames already queued for it are sent."""
+
+    try:
+        conn.outbox.put_nowait(("close", code, reason))
+    except asyncio.QueueFull:
+        asyncio.get_running_loop().create_task(_close_ws_quietly(conn.websocket, code, reason))
 
 
 def _start_writer(conn: SeatConnection) -> None:
@@ -623,16 +654,7 @@ async def _send_text(conn: SeatConnection, text: str) -> None:
     if conn.writer_task is None:
         await _send_now(conn, text)
         return
-    try:
-        conn.outbox.put_nowait(text)
-    except asyncio.QueueFull:
-        conn.outbox_overflowed = True
-        logger.warning(
-            "outbox_overflow",
-            seat=conn.seat,
-            schema_version=1,
-            detail="recipient too slow; frame dropped",
-        )
+    _enqueue_text(conn, text)
 
 
 async def _send_to_ws(ws: "WebSocket", envelope: Any) -> None:
@@ -678,12 +700,25 @@ async def _close_quietly(ws: "WebSocket") -> None:
         pass
 
 
+#: Close code for a seat that fell OUTBOX_MAXSIZE frames behind: reconnect and
+#: resume (the welcome carries the transcript it missed).
+WS_CLOSE_TRY_AGAIN = 1013
+
+
 def _enqueue_text(conn: Any, text: str) -> None:
-    """Queue pre-serialised text on a connection whose writer is running."""
+    """Queue pre-serialised text on a connection whose writer is running.
+
+    A full outbox means the recipient stopped reading. A spectator is dropped
+    at the next broadcast (see _shed_overflowed_spectators). A seat is closed
+    now: silently dropping its frames would leave it playing on a state it never
+    saw. The close surfaces as a disconnect, so the seat gets its grace period
+    and can resume.
+    """
 
     try:
         conn.outbox.put_nowait(text)
     except asyncio.QueueFull:
+        first = not conn.outbox_overflowed
         conn.outbox_overflowed = True
         logger.warning(
             "outbox_overflow",
@@ -691,6 +726,17 @@ def _enqueue_text(conn: Any, text: str) -> None:
             schema_version=1,
             detail="recipient too slow; frame dropped",
         )
+        if first and conn.seat is not None:
+            asyncio.get_running_loop().create_task(
+                _close_ws_quietly(conn.websocket, WS_CLOSE_TRY_AGAIN, "outbox_overflow")
+            )
+
+
+async def _close_ws_quietly(ws: "WebSocket", code: int, reason: str) -> None:
+    try:
+        await ws.close(code=code, reason=reason)
+    except Exception:
+        pass
 
 
 async def _broadcast_per_viewer(
@@ -868,7 +914,8 @@ async def _broadcast_match_finished(
             schema_version=WIRE_SCHEMA_VERSION,
             match_id=session.match_id,
             payload=MatchFinishedBody(
-                result={}, transcript=_build_transcript_payload(session, viewer)
+                result=final_result(session) or {},
+                transcript=_build_transcript_payload(session, viewer),
             ),
         )
 
@@ -1372,6 +1419,7 @@ async def run_match(
         await _send(active_conn, obs_env)
 
         retries_left = match.per_action_retry_budget
+        protocol_errors = 0
 
         # Per-turn deadline: create a fresh Event + timer task per observation.
         # The event is passed into _receive_action so it can return without
@@ -1563,6 +1611,10 @@ async def run_match(
                     payload=ErrorBody(code="malformed_envelope", message=error_msg),
                 )
                 await _send(active_conn, err_env)
+                protocol_errors += 1
+                if protocol_errors >= MAX_PROTOCOL_ERRORS_PER_TURN:
+                    # The next read sees the close: grace, then resume or abort.
+                    _queue_close(active_conn, WS_CLOSE_MALFORMED, "too_many_malformed_frames")
                 continue
 
             # --- Idempotency: duplicate turn_id silently dropped ---

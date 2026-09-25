@@ -64,6 +64,7 @@ def create_app(
     max_turns_per_match: int | None = None,
     transcript_store: TranscriptStore | None = None,
     client_ip_header: str | None = None,
+    public_url: str | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -89,7 +90,16 @@ def create_app(
         A request header carrying the client address, set by a trusted reverse
         proxy (``Fly-Client-IP``). Rate limits bucket by it instead of the TCP
         peer. Leave unset unless the proxy is the only way in.
+    public_url:
+        The server's public base URL (``https://arena.example.com``). The seat
+        URLs ``POST /matches`` returns are built on it (``wss://`` for https).
+        Without it they follow the request (``Host`` header, and ``wss://`` when
+        the request came over https), which is wrong behind a TLS-terminating
+        proxy that forwards plain http.
     """
+
+    if public_url is not None and not public_url.startswith(("http://", "https://")):
+        raise ValueError("public_url must start with http:// or https://")
 
     if game_registry is None:
         from arena.games import build_default_registry
@@ -113,6 +123,7 @@ def create_app(
     app = FastAPI(title="AgentsArena", version="0.1.0", lifespan=lifespan)
     app.state.transcript_store = store
     app.state.client_ip_header = client_ip_header or None
+    app.state.public_url = public_url.rstrip("/") if public_url else None
 
     limiter = rate_limiter if rate_limiter is not None else RateLimiter()
 

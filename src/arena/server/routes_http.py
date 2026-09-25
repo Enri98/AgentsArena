@@ -33,6 +33,7 @@ from arena.server.errors import (
 from arena.server.payload_schemas import get_payload_schemas
 from arena.server.rate_limits import RateLimiter, RateLimitExceeded, client_address
 from arena.server.registry import MatchRegistry
+from arena.server.runtime_bridge import final_result
 from arena.server.transcript_store import TranscriptStore, is_valid_match_id
 
 router = APIRouter()
@@ -220,9 +221,9 @@ async def create_match_handler(request: Request) -> JSONResponse:
         game_id=match.game_id,
     )
 
-    host = request.headers.get("host", "localhost")
-    seat_0_url = f"ws://{host}/matches/{match.match_id}/play?seat=0"
-    seat_1_url = f"ws://{host}/matches/{match.match_id}/play?seat=1"
+    base = _ws_base(request)
+    seat_0_url = f"{base}/matches/{match.match_id}/play?seat=0"
+    seat_1_url = f"{base}/matches/{match.match_id}/play?seat=1"
 
     return JSONResponse(
         status_code=201,
@@ -291,7 +292,7 @@ def get_match(match_id: str, request: Request) -> JSONResponse:
             "acting_seats": seats,
             "turn_count": turn_count,
             "players": players_out,
-            "result": None,
+            "result": final_result(session),
             "abort": abort_out,
         },
     )
@@ -372,6 +373,18 @@ def _read_slots(app_state: Any) -> asyncio.Semaphore:
         slots = asyncio.Semaphore(MAX_CONCURRENT_TRANSCRIPT_READS)
         app_state.transcript_read_slots = slots
     return slots
+
+
+def _ws_base(request: Request) -> str:
+    """``ws://host`` or ``wss://host`` for the seat URLs: from the configured
+    public URL when there is one, else from the request itself."""
+
+    public_url: str | None = getattr(request.app.state, "public_url", None)
+    if public_url:
+        scheme, _, rest = public_url.partition("://")
+        return f"{'wss' if scheme == 'https' else 'ws'}://{rest}"
+    host = request.headers.get("host", "localhost")
+    return f"{'wss' if request.url.scheme == 'https' else 'ws'}://{host}"
 
 
 def _no_store(response: JSONResponse) -> JSONResponse:

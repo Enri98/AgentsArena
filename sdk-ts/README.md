@@ -33,9 +33,9 @@ unknown or ended match, 4429 when rate limited, and so on). For full control use
 `SeatSession`: `connect`, `recv`, `sendAction`, `close`, and `resumeToken` to resume a dropped
 seat.
 
-Keep `choose` asynchronous, or quick: a synchronous `choose` that holds the CPU longer than
-the server's heartbeat allows (40 s by default) stops pings being answered, and the server
-drops the seat.
+Keep `choose` asynchronous, or quick: a synchronous `choose` holds the event loop, so
+nothing answers the server's pings, and its keepalive drops a seat that goes quiet for about
+40 s (protocol sections 3 and 8.10). The turn deadline (30 s by default) still applies.
 
 ## Watch a match
 

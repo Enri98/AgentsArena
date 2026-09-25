@@ -371,3 +371,36 @@ def test_a_trusted_header_value_may_carry_a_port(value: str, expected: str) -> N
     from arena.server.rate_limits import client_address
 
     assert client_address(_Headers({"X-Real-IP": [value]}), "10.0.0.1", "X-Real-IP") == expected
+
+
+def test_a_seat_that_stops_reading_is_closed_not_silently_starved() -> None:
+    """A full seat outbox used to drop frames silently, leaving the seat to play
+    on a state it never saw. It is now closed 1013, so it can resume."""
+
+    import asyncio
+
+    from arena.server.runtime_bridge import (
+        OUTBOX_MAXSIZE,
+        WS_CLOSE_TRY_AGAIN,
+        SeatConnection,
+        _enqueue_text,
+    )
+
+    class _Socket:
+        def __init__(self) -> None:
+            self.closes: list[tuple[int, str]] = []
+
+        async def close(self, code: int, reason: str) -> None:
+            self.closes.append((code, reason))
+
+    async def run() -> list[tuple[int, str]]:
+        socket = _Socket()
+        conn = SeatConnection(websocket=socket, seat=1)  # type: ignore[arg-type]
+        for index in range(OUTBOX_MAXSIZE + 3):
+            _enqueue_text(conn, f"frame {index}")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert conn.outbox_overflowed
+        return socket.closes
+
+    assert asyncio.run(run()) == [(WS_CLOSE_TRY_AGAIN, "outbox_overflow")]

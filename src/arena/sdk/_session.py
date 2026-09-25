@@ -9,7 +9,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as _ws_connect
 from websockets.exceptions import ConnectionClosed
 
-from arena.adapters.websocket.codec import dumps, loads
+from arena.adapters.websocket.codec import WIRE_SCHEMA_VERSION, dumps, loads
 from arena.adapters.websocket.envelope import (
     ActionResponseEnvelope,
     HelloEnvelope,
@@ -78,7 +78,7 @@ class Session:
 
         # Send hello
         hello = HelloEnvelope(
-            schema_version=1,
+            schema_version=WIRE_SCHEMA_VERSION,
             seat=seat,
             payload=HelloBody(
                 client_name=CLIENT_NAME,
@@ -133,7 +133,7 @@ class Session:
 
             if env.type == "ping":
                 pong = PongEnvelope(
-                    schema_version=1,
+                    schema_version=WIRE_SCHEMA_VERSION,
                     match_id=env.match_id,
                     payload=PongBody(nonce=env.payload.nonce),  # type: ignore[union-attr]
                 )
@@ -164,7 +164,7 @@ class Session:
             }
         })
         env = ActionResponseEnvelope(
-            schema_version=1,
+            schema_version=WIRE_SCHEMA_VERSION,
             match_id=self._welcome.match_id,
             seat=self._welcome.seat,
             turn_id=tid,

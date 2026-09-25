@@ -127,9 +127,9 @@ export class SeatSession {
  * Chooses an action for an observation request; may be async (an LLM call).
  *
  * Pings are answered while an async `choose` awaits. A synchronous one that
- * keeps the CPU busy for longer than the server's heartbeat allows (40 s by
- * default) blocks them, and the server drops the seat: move heavy work off the
- * event loop (a worker) or make it async.
+ * keeps the CPU busy blocks them, and the server's keepalive drops a seat that
+ * goes quiet for about 40 s (protocol sections 3 and 8.10): move heavy work off
+ * the event loop (a worker) or make it async.
  */
 export type ChooseAction = (request: ObservationRequest) => JsonObject | Promise<JsonObject>;
 

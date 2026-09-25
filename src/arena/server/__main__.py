@@ -74,6 +74,15 @@ def build_parser() -> argparse.ArgumentParser:
         "Env: ARENA_TRANSCRIPT_MAX_RECORD_BYTES.",
     )
     parser.add_argument(
+        "--public-url",
+        default=_env("ARENA_PUBLIC_URL"),
+        help=(
+            "The server's public base URL, e.g. https://arena.example.com. The seat URLs "
+            "POST /matches returns are built on it (wss:// for https). Set it behind a "
+            "TLS-terminating proxy, or clients are handed ws:// URLs. Env: ARENA_PUBLIC_URL."
+        ),
+    )
+    parser.add_argument(
         "--client-ip-header",
         default=_env("ARENA_CLIENT_IP_HEADER"),
         help=(
@@ -164,6 +173,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         transcript_max_bytes=store.policy.max_bytes,
         transcript_max_record_bytes=store.policy.max_record_bytes,
         client_ip_header=args.client_ip_header,
+        public_url=args.public_url,
     )
 
     # The legacy websockets implementation corrupts its receive state when a
@@ -172,7 +182,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     # the moment the match starts, and every match aborts peer_disconnected. The
     # test servers always ran sansio, which is why only real deployments broke.
     uvicorn.run(
-        create_app(transcript_store=store, client_ip_header=args.client_ip_header),
+        create_app(
+            transcript_store=store,
+            client_ip_header=args.client_ip_header,
+            public_url=args.public_url,
+        ),
         host=args.host,
         port=args.port,
         ws=UVICORN_WS_IMPL,
