@@ -39,7 +39,7 @@ def test_post_matches_connect4_happy_path() -> None:
     assert "match_id" in data
     assert data["game_id"] == "connect4"
     assert data["lifecycle"] == "created"
-    assert data["schema_version"] == WIRE_SCHEMA_VERSION == 3
+    assert data["schema_version"] == WIRE_SCHEMA_VERSION == 4
     assert data["game_schema_version"] == 1
     assert "per_turn_deadline_ms" in data
     assert "per_action_retry_budget" in data
@@ -211,7 +211,7 @@ def test_get_schemas_payloads_contains_required_keys() -> None:
     resp = client.get("/schemas/payloads")
     assert resp.status_code == 200
     data = resp.json()
-    assert data["schema_version"] == WIRE_SCHEMA_VERSION == 3
+    assert data["schema_version"] == WIRE_SCHEMA_VERSION == 4
     missing = _REQUIRED_KEYS - set(data["schemas"].keys())
     assert missing == set(), f"Missing payload keys: {missing}"
 
@@ -226,13 +226,13 @@ def test_get_schemas_payloads_byte_stable() -> None:
 def test_post_matches_refuses_a_client_that_cannot_read_the_wire() -> None:
     with _client() as client:
         resp = client.post(
-            "/matches", json={"game_id": "connect4", "supported_schema_versions": [1, 2]}
+            "/matches", json={"game_id": "connect4", "supported_schema_versions": [1, 2, 3]}
         )
         assert resp.status_code == 400
         assert resp.json()["error"]["code"] == "schema_version_unsupported"
 
         ok = client.post(
-            "/matches", json={"game_id": "connect4", "supported_schema_versions": [2, 3]}
+            "/matches", json={"game_id": "connect4", "supported_schema_versions": [3, 4]}
         )
         assert ok.status_code == 201
 

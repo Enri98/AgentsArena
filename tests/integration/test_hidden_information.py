@@ -93,7 +93,7 @@ async def _play(server: RunningServer) -> dict[str, Any]:
             "game_id": "secrets-game",
             "players": [{"label": "a"}, {"label": "b"}],
             "game_config": {"max_turns": 4},
-            "supported_schema_versions": [3],
+            "supported_schema_versions": [4],
         },
     )
     assert resp.status_code == 201, resp.text
@@ -222,7 +222,7 @@ def _hello(seat: int, resume_token: str | None = None) -> Any:
         payload=HelloBody(
             client_name="test",
             client_version="0.1.0",
-            supported_schema_versions=[3],
+            supported_schema_versions=[4],
             requested_seat=seat,
             resume_token=resume_token,
         ),

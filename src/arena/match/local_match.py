@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import secrets
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any, Generic, TypeVar, cast
 
 from arena.core.actions import Action
 from arena.core.chance import ChanceRng, apply_chance, is_chance_node, sample_chance
 from arena.core.config import BaseGameConfig
 from arena.core.events import DomainEvent
-from arena.core.exceptions import ChanceResolutionError
+from arena.core.exceptions import ChanceResolutionError, WrongPlayer
 from arena.core.game_definition import GameDefinition
 from arena.core.observations import Observation
 from arena.core.public_view import Viewer, dump_config_for_viewer, dump_state_for_viewer
 from arena.core.results import RuleResult
 from arena.core.rules_engine import RulesEngine
 from arena.core.serializer import SnapshotEnvelope
+from arena.core.simultaneous import acting_seats, apply_joint_action, is_joint_node
 from arena.core.types import Seat
 
 ConfigT = TypeVar("ConfigT", bound=BaseGameConfig)
@@ -33,6 +35,8 @@ SNAPSHOT_SCHEMA_VERSION = 1
 TURN_KIND_ACTION = "action"
 #: A turn produced by resolving a chance node (Phase 37).
 TURN_KIND_CHANCE = "chance"
+#: A turn produced by several seats acting at once (Phase 41).
+TURN_KIND_JOINT = "joint"
 
 #: Guard against an engine whose chance node never settles. A legitimate game
 #: resolves a handful at most; anything beyond this is a bug in the engine, and
@@ -47,11 +51,14 @@ CHANCE_SEED_BITS = 128
 class TurnRecord(Generic[StateT, ActionT, ResultT]):
     """Immutable record of one local-match turn.
 
-    A turn is either a seat acting (``kind="action"``) or a chance node being
-    resolved (``kind="chance"``, Phase 37). A chance turn carries no seat and no
-    action — nobody chose it. It carries the ``outcome`` instead, which is what
-    replay applies; otherwise it is an ordinary step with events, a post-state,
-    and a snapshot, occupying its own position in the transcript.
+    A turn is a seat acting (``kind="action"``), a chance node being resolved
+    (``kind="chance"``, Phase 37), or several seats acting at once
+    (``kind="joint"``, Phase 41). A chance turn carries no seat and no action —
+    nobody chose it. It carries the ``outcome`` instead, which is what replay
+    applies. A joint turn carries no single seat or action either: ``actions``
+    maps every acting seat to its action. Otherwise each is an ordinary step with
+    events, a post-state, and a snapshot, occupying its own position in the
+    transcript.
     """
 
     seat: Seat | None
@@ -62,6 +69,7 @@ class TurnRecord(Generic[StateT, ActionT, ResultT]):
     post_snapshot: SnapshotEnvelope
     kind: str = TURN_KIND_ACTION
     outcome: Any = None
+    actions: Mapping[Seat, ActionT] | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +167,11 @@ def apply_match_action(
             "The match is awaiting a chance outcome, so no seat can act.",
             details={"game_id": match.definition.game_id, "seat": seat},
         )
+    if is_joint_node(match.rules_engine, match.state):
+        raise WrongPlayer(
+            "Several seats act at once here: use apply_match_joint_action.",
+            details={"game_id": match.definition.game_id, "seat": seat},
+        )
 
     transition = match.rules_engine.apply_action(match.state, seat, action)
     post_snapshot = _build_snapshot(match.definition, match.config, transition.state)
@@ -180,6 +193,45 @@ def apply_match_action(
         match.rng,
     )
 
+    return replace(match, state=state, turns=turns, rng=rng)
+
+
+def apply_match_joint_action(
+    match: LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    actions: Mapping[Seat, ActionT],
+) -> LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT]:
+    """Resolve a joint node (Phase 41) from one action per acting seat.
+
+    Everything is revalidated (see ``arena.core.simultaneous``). The round is
+    committed as one turn carrying every action, so no seat's choice is ever
+    recorded before the others have chosen.
+    """
+
+    transition = apply_joint_action(match.rules_engine, match.state, actions)
+    # Keyed by the validated acting seats: apply_joint_action accepted exactly
+    # these, so the record replays as it was played.
+    recorded = MappingProxyType(
+        {seat: actions[seat] for seat in acting_seats(match.rules_engine, match.state)}
+    )
+    post_snapshot = _build_snapshot(match.definition, match.config, transition.state)
+    turn_record = TurnRecord(
+        seat=None,
+        action=None,
+        events=transition.events,
+        result=cast(ResultT | None, transition.result),
+        post_state=transition.state,
+        post_snapshot=post_snapshot,
+        kind=TURN_KIND_JOINT,
+        actions=recorded,
+    )
+    state, turns, rng = _drain_chance_nodes(
+        match.definition,
+        match.rules_engine,
+        match.config,
+        transition.state,
+        match.turns + (turn_record,),
+        match.rng,
+    )
     return replace(match, state=state, turns=turns, rng=rng)
 
 
@@ -317,8 +369,12 @@ __all__: Sequence[str] = [
     "LocalMatch",
     "SNAPSHOT_SCHEMA_VERSION",
     "TurnRecord",
+    "TURN_KIND_ACTION",
+    "TURN_KIND_CHANCE",
+    "TURN_KIND_JOINT",
     "apply_match_action",
     "apply_match_chance",
+    "apply_match_joint_action",
     "build_snapshot_for_viewer",
     "start_match",
     "start_replay_match",

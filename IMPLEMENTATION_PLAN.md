@@ -4290,9 +4290,9 @@ and a closed store refuses writes. One contract suite runs against all three bac
 
 ---
 
-### Phase 41 - Generalized turn loop (simultaneous moves)
+### Phase 41 - Generalized turn loop (simultaneous moves) — ✅ COMPLETE (2026-09-25)
 
-Status: **deferred by owner decision until after Phase 39 ships.**
+Status: **complete** (2026-09-25).
 
 Objective:
 - support games where seats act simultaneously (rock-paper-scissors, sealed-bid auctions)
@@ -4313,6 +4313,94 @@ Acceptance criteria:
 - all sequential games are unaffected and their tests pass untouched
 - a seat that misses a simultaneous-round deadline produces the existing abort path
 - ruff + pytest green
+
+Design decisions (2026-09-25, owner delegated them: "finish all steps and phases"):
+- **A simultaneous round is one joint turn.** An engine exposes
+  `acting_seats(state)` and `apply_joint_action(state, actions)` (hooks detected,
+  as with chance). Each action is checked with the ordinary `validate_action` as it
+  arrives; nothing is applied until every acting seat has a valid action. No seat's
+  choice is ever in state or a transcript before the others', so joint turns need no
+  per-viewer action redaction.
+- **Transcript and wire go to 4.** A turn gains `kind: "joint"` with an `actions`
+  map (string seat keys) and no single seat/action. A sequential turn omits `actions`
+  and serializes exactly as in v3.
+- **Exemplar: Rock-Paper-Scissors** (`arena.games.rps`), first to `target_wins`
+  (1-10, default 3), capped at `max_rounds` (1-100, default 20; more wins takes it,
+  equal wins draws).
+- **Server semantics.** At a joint node every acting seat gets an
+  `observation_request` at once. Each seat has its own absolute deadline (the same
+  length), its own retry budget, and its own disconnect grace. The first seat to
+  miss its deadline aborts the match with the existing `turn_deadline_expired`
+  path. A seat's accepted action is held privately by the server, never echoed to
+  the other seat, until the round commits as one `turn_committed`.
+
+#### Slice 1 - Core primitive, match layer, transcript v4, RPS, local runtime — ✅ COMPLETE
+
+- **Core.** `arena.core.simultaneous` (`acting_seats`, `is_joint_node`,
+  `apply_joint_action`, `validate_simultaneous_support`),
+  `GameDefinition.has_simultaneous_moves`, and registration checks.
+- **Match.** `apply_match_joint_action`, `TurnRecord.actions`, and `kind="joint"`.
+  `apply_match_action` refuses a joint node. The policy loop asks every acting seat.
+- **Transcript v4.** `actions` on turns; strict shape checks (seat keys in order,
+  v4 only, never on other kinds); replay applies joint turns.
+- **Versions.** Runtime payload and wire versions go to 4, and a v4 golden file
+  pins `/schemas/payloads`.
+- **Runtime.** `apply_payload_policy_joint_turn`; the runtime session resolves joint
+  nodes with a `TurnRequested`/`TurnAccepted` per acting seat.
+- **The game.** `arena.games.rps`, with rules, serializer and tests.
+
+#### Slice 2 - Server joint rounds, SDK and MCP — ✅ COMPLETE
+
+- **Driver.** `run_match` handles joint nodes: concurrent observation requests,
+  per-seat deadline/retry/grace, and one broadcast of the committed round. Seats and
+  spectators never see a pending action.
+- **Clients.** The SDK needs no protocol change (each seat answers its own requests).
+  MCP recognises its own action inside a joint turn.
+- **Spec.** `NETWORK_PROTOCOL.md` gets the v4 row, §8.4/§8.7 joint semantics, and
+  the §18 matrix.
+
+#### Slice 3 - CLI, UI, Ollama, demo, docs — ✅ COMPLETE
+
+- **Adapters.** RPS CLI renderer and parser (hot-seat asks each human in turn), UI
+  adapter for joint turns, Ollama prompt builder, MCP action schema.
+- **Examples.** The remote demo accepts rps, and the spectator page renders joint
+  turns.
+- **Docs and acceptance.** `ADDING_A_GAME.md` covers simultaneous games, followed
+  by a real-stack run with local Ollama.
+
+#### Reviews and acceptance (2026-09-25)
+
+Each slice had an adversarial review; every confirmed finding was fixed with a test.
+
+- **Slice 1.**
+  - Joint-action keys of the wrong type (`True`/`False`) wrote unreplayable
+    transcripts.
+  - `Arena.request_turn` mishandled a joint node.
+  - The UI adapter crashed on any RPS transcript.
+  - Status reported seat 0 during a round.
+  - `RpsState` accepted unreachable states.
+  - The contract suite could not test a simultaneous game (it is now joint-aware,
+    and RPS passes it).
+- **Slice 2** (server).
+  - **High:** two seats' loops reaching an abort together (two deadlines, both
+    seats dropping) cancelled the first abort half-way, so nobody received
+    `match_aborted` and the public transcript could be lost. The abort now runs
+    once, as a shielded task that the round waits for.
+  - Turn ids were shared between seats, so one seat could block the other's
+    action.
+  - Timers and grace waiters leaked on cancellation.
+  - `match_state` listed acting seats after the match ended.
+- **Acceptance.**
+  - Integration tests over real TCP cover a full RPS match (joint turns to seats
+    and spectators), both seats asked at once with no throw leaking before the
+    round commits, a missed deadline aborting through the existing path, a
+    rejected throw costing only that seat a retry, a mid-round resume, the SDK
+    unchanged, and MCP clients.
+  - Every sequential game's tests pass unchanged. A normalised Connect 4 match
+    is frame-identical to `main` apart from `acting_seats`.
+  - On the real stack, `python -m arena.server` with a SQLite store ran a 20-round
+    match between two local qwen2.5 agents: a draw at the round cap, with both
+    transcripts validating.
 
 ---
 

@@ -26,6 +26,8 @@ def test_python_m_arena_server_runs_sansio(monkeypatch: pytest.MonkeyPatch) -> N
     # A dead reader (a spectator that stopped reading) is found and dropped.
     assert captured["ws_ping_interval"] > 0 and captured["ws_ping_timeout"] > 0
     assert captured["ws_max_size"] <= 1 << 20
+    # Node's WebSocket client (the TypeScript SDK) broke on compressed frames.
+    assert captured["ws_per_message_deflate"] is False
     assert captured["port"] == 9999
 
 

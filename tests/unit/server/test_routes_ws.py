@@ -29,7 +29,7 @@ HELLO_TEMPLATE: dict[str, Any] = {
     "payload": {
         "client_name": "test-client",
         "client_version": "0.1.0",
-        "supported_schema_versions": [1, 2, 3],
+        "supported_schema_versions": [1, 2, 3, 4],
         "auth": None,
         "requested_seat": 0,
         "resume_token": None,
@@ -116,7 +116,7 @@ def _spectator_hello() -> dict[str, Any]:
         "payload": {
             "client_name": "test-spectator",
             "client_version": "0.1.0",
-            "supported_schema_versions": [1, 2, 3],
+            "supported_schema_versions": [1, 2, 3, 4],
         },
     }
 

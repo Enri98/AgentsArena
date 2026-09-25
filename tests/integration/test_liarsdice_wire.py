@@ -68,7 +68,7 @@ def _create(server: RunningServer) -> dict:
         json={
             "game_id": "liarsdice",
             "game_config": {"dice_per_seat": DICE},
-            "supported_schema_versions": [3],
+            "supported_schema_versions": [4],
         },
     )
     assert resp.status_code == 201, resp.text

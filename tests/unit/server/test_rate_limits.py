@@ -228,7 +228,7 @@ def _hello(seat: int) -> dict[str, Any]:
         "payload": {
             "client_name": "test-client",
             "client_version": "0.1.0",
-            "supported_schema_versions": [1, 2, 3],
+            "supported_schema_versions": [1, 2, 3, 4],
             "auth": None,
             "requested_seat": seat,
             "resume_token": None,

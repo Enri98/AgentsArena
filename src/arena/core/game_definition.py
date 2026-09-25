@@ -48,5 +48,10 @@ class GameDefinition(Generic[ConfigModelT, StateT, ActionT, ObservationT, Result
     #: state: both are broadcast, so a seed in either is public.
     has_chance_nodes: bool = False
 
+    #: Whether the game has simultaneous rounds, where several seats act at
+    #: once (Phase 41). A game setting this must implement the hooks in
+    #: ``arena.core.simultaneous``; ``GameRegistry.register`` enforces that.
+    has_simultaneous_moves: bool = False
+
 
 __all__: Sequence[str] = ["GameDefinition"]

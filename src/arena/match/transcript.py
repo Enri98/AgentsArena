@@ -27,9 +27,11 @@ from arena.core.types import Seat
 from arena.match.local_match import (
     TURN_KIND_ACTION,
     TURN_KIND_CHANCE,
+    TURN_KIND_JOINT,
     LocalMatch,
     apply_match_action,
     apply_match_chance,
+    apply_match_joint_action,
     build_snapshot_for_viewer,
     start_replay_match,
 )
@@ -48,11 +50,15 @@ ResultT = TypeVar("ResultT", bound=RuleResult)
 #: or the public's) and events record their audience. A seat-view transcript of
 #: a hidden-information game omits what that seat may not see, so a reader must
 #: be able to tell which kind it holds.
-MATCH_TRANSCRIPT_SCHEMA_VERSION = 3
+#:
+#: Bumped to 4 in Phase 41: a joint turn (several seats acting at once) carries
+#: an ``actions`` map instead of one seat and one action.
+MATCH_TRANSCRIPT_SCHEMA_VERSION = 4
 
 #: Transcript versions this loader accepts. A v1 transcript predates chance
-#: nodes; v1 and v2 predate views, and are always full transcripts.
-SUPPORTED_MATCH_TRANSCRIPT_SCHEMA_VERSIONS = (1, 2, 3)
+#: nodes; v1 and v2 predate views, and are always full transcripts; v1-v3
+#: predate joint turns.
+SUPPORTED_MATCH_TRANSCRIPT_SCHEMA_VERSIONS = (1, 2, 3, 4)
 
 #: The unredacted transcript: everything, including every seat's private state.
 VIEW_FULL = "full"
@@ -101,8 +107,11 @@ class MatchTurnPayload(BaseModel):
 
     ``seat`` and ``action`` are null on a chance turn: no seat chose it. It
     carries ``outcome`` instead — the recorded result replay applies, so a
-    transcript validates without the seed. Every new field defaults so a v1
-    transcript, which predates chance nodes, still validates.
+    transcript validates without the seed. They are null on a joint turn too
+    (Phase 41), which carries ``actions``: each acting seat (as a string key, a
+    JSON object's keys being strings) mapped to its action. Every new field
+    defaults so older transcripts still validate, and ``actions`` is omitted
+    when absent, so a sequential turn serializes exactly as it did in v3.
     """
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -114,6 +123,14 @@ class MatchTurnPayload(BaseModel):
     post_snapshot: SnapshotEnvelope
     kind: str = TURN_KIND_ACTION
     outcome: JSONMapping | None = None
+    actions: dict[str, JSONMapping] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_actions(self, handler: Any) -> Any:
+        data = handler(self)
+        if self.actions is None:
+            data.pop("actions", None)
+        return data
 
 
 class MatchTranscriptPayload(BaseModel):
@@ -146,6 +163,7 @@ class LoadedMatchTurn(Generic[StateT, ActionT]):
     post_snapshot: SnapshotEnvelope
     kind: str = TURN_KIND_ACTION
     outcome: object = None
+    actions: dict[Seat, ActionT] | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +204,7 @@ def dump_match_transcript(
                     if turn.kind == TURN_KIND_CHANCE
                     else None
                 ),
+                actions=_dump_joint_actions(match.definition.serializer, turn.actions),
                 events=[
                     _dump_domain_event(event)
                     for event in turn.events
@@ -235,6 +254,14 @@ def load_match_transcript(
             action=(
                 cast(ActionT, definition.serializer.load_action(turn_payload.action))
                 if turn_payload.action is not None
+                else None
+            ),
+            actions=(
+                {
+                    int(seat): cast(ActionT, definition.serializer.load_action(action))
+                    for seat, action in turn_payload.actions.items()
+                }
+                if turn_payload.actions is not None
                 else None
             ),
             event_payloads=tuple(
@@ -311,8 +338,38 @@ def _ensure_turn_shapes(payload: MatchTranscriptPayload) -> None:
                 raise ValueError(f"Turn {index}: an action turn needs a seat and an action.")
             if turn.outcome is not None:
                 raise ValueError(f"Turn {index}: an action turn has no chance outcome.")
+        elif turn.kind == TURN_KIND_JOINT:
+            if payload.schema_version < 4:
+                raise ValueError(
+                    f"Turn {index}: transcripts before schema_version 4 have no joint turns."
+                )
+            if turn.seat is not None or turn.action is not None or turn.outcome is not None:
+                raise ValueError(
+                    f"Turn {index}: a joint turn has no single seat, action, or outcome."
+                )
+            keys = list((turn.actions or {}).keys())
+            if len(keys) < 2 or keys != sorted(keys, key=_seat_key) or any(
+                _seat_key(key) < 0 for key in keys
+            ):
+                raise ValueError(
+                    f"Turn {index}: a joint turn maps two or more seats, in order, to actions."
+                )
         else:
             raise ValueError(f"Turn {index}: unknown turn kind {turn.kind!r}.")
+        if turn.kind != TURN_KIND_JOINT and turn.actions is not None:
+            raise ValueError(f"Turn {index}: only a joint turn carries actions.")
+
+
+def _seat_key(key: str) -> int:
+    """A joint turn's seat key as an int; -1 for anything but a canonical one."""
+
+    return int(key) if key.isdigit() and str(int(key)) == key else -1
+
+
+def _dump_joint_actions(serializer: Any, actions: Any) -> dict[str, JSONMapping] | None:
+    if actions is None:
+        return None
+    return {str(seat): serializer.dump_action(actions[seat]) for seat in sorted(actions)}
 
 
 def validate_match_transcript(
@@ -384,6 +441,13 @@ def _validate_match_transcript(
                     "Transcript validation failed: a chance turn must carry its outcome."
                 )
             replay_match = apply_match_chance(replay_match, loaded_turn.outcome)
+            continue
+        if loaded_turn.kind == TURN_KIND_JOINT:
+            if not loaded_turn.actions:
+                raise ValueError(
+                    "Transcript validation failed: a joint turn must carry its actions."
+                )
+            replay_match = apply_match_joint_action(replay_match, loaded_turn.actions)
             continue
         if loaded_turn.kind != TURN_KIND_ACTION:
             raise ValueError(
@@ -502,10 +566,12 @@ def turn_payload_for_viewer(
     result: JSONMapping | None,
     post_state: Any,
     viewer: Viewer,
+    actions: dict[str, JSONMapping] | None = None,
 ) -> MatchTurnPayload:
     """One turn as ``viewer`` may see it.
 
-    Actions and results are public: a move is announced to the table.
+    Actions and results are public: a move is announced to the table, and a
+    joint turn's actions are revealed together, once every seat has chosen.
     Snapshots, chance outcomes, and events are redacted per viewer.
     """
 
@@ -513,6 +579,7 @@ def turn_payload_for_viewer(
     return MatchTurnPayload(
         seat=seat,
         action=action,
+        actions=actions,
         kind=kind,
         outcome=(
             dump_chance_outcome_for_viewer(serializer, outcome, viewer)
@@ -543,6 +610,7 @@ def _turn_record_for_viewer(
             definition.serializer.dump_action(turn.action) if turn.action is not None else None
         ),
         outcome=turn.outcome,
+        actions=_dump_joint_actions(definition.serializer, turn.actions),
         event_payloads=[dump_domain_event(event).model_dump(mode="json") for event in turn.events],
         result=(
             _dump_rule_result(turn.result).model_dump(mode="json")

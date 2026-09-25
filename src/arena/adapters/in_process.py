@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeVar, cast
 
@@ -15,7 +15,9 @@ from arena.core.game_definition import GameDefinition
 from arena.core.observations import Observation
 from arena.core.results import RuleResult
 from arena.core.serializer import JSONMapping
-from arena.match.local_match import LocalMatch, apply_match_action
+from arena.core.simultaneous import acting_seats
+from arena.core.types import Seat
+from arena.match.local_match import LocalMatch, apply_match_action, apply_match_joint_action
 
 ConfigT = TypeVar("ConfigT", bound=BaseGameConfig)
 StateT = TypeVar("StateT")
@@ -98,10 +100,17 @@ class TypedPayloadPolicyAdapter(Generic[ConfigT, StateT, ActionT, ObservationT, 
 
 def build_observation_request(
     match: LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    seat: Seat | None = None,
 ) -> ObservationRequestPayload:
-    """Serialize the active seat's observation for adapter-facing policy code."""
+    """Serialize a seat's observation for adapter-facing policy code.
 
-    seat = match.rules_engine.current_seat(match.state)
+    ``seat`` defaults to the acting seat. At a joint node (Phase 41) several
+    seats act, and each is asked with its own request.
+    """
+
+    if seat is None:
+        seats = acting_seats(match.rules_engine, match.state)
+        seat = seats[0] if seats else match.rules_engine.current_seat(match.state)
     observation = match.rules_engine.observation(match.state, seat)
     return ObservationRequestPayload(
         game_id=match.definition.game_id,
@@ -131,6 +140,27 @@ def apply_payload_policy_turn(
     response = policy.select_action(request)
     action = load_action_response(match.definition, response)
     return apply_match_action(match, response.seat, action)
+
+
+def apply_payload_policy_joint_turn(
+    match: LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT],
+    policies: Mapping[Seat, PayloadPolicy],
+) -> LocalMatch[ConfigT, StateT, ActionT, ObservationT, ResultT]:
+    """Resolve a joint node (Phase 41): ask every acting seat, then apply the round.
+
+    Each seat is asked from its own observation of the same state, so no seat's
+    choice can depend on another's.
+    """
+
+    actions: dict[Seat, ActionT] = {}
+    for seat in acting_seats(match.rules_engine, match.state):
+        response = policies[seat].select_action(build_observation_request(match, seat))
+        if response.seat != seat:
+            raise ValueError(
+                f"The policy for seat {seat} answered for seat {response.seat}."
+            )
+        actions[seat] = load_action_response(match.definition, response)
+    return apply_match_joint_action(match, actions)
 
 
 def dump_domain_error(error: ArenaCoreError) -> DomainErrorPayload:
@@ -194,6 +224,7 @@ __all__: Sequence[str] = [
     "ObservationRequestPayload",
     "PayloadPolicy",
     "TypedPayloadPolicyAdapter",
+    "apply_payload_policy_joint_turn",
     "apply_payload_policy_turn",
     "build_observation_request",
     "dump_domain_error",

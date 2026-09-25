@@ -153,6 +153,7 @@
   }
 
   function seatSpan(seat) {
+    if (seat === null || seat === undefined) return "";  // chance or joint round
     return seat === 0 ? "seat0" : "seat1";
   }
 
@@ -215,6 +216,13 @@
   function describeTurn(index, t) {
     if (t.kind === "chance") {
       return "turn " + index + " · chance · " + JSON.stringify(t.outcome);
+    }
+    if (t.kind === "joint") {
+      // A simultaneous round (wire v4): both seats' actions, revealed together.
+      var parts = Object.keys(t.actions || {}).sort().map(function (seat) {
+        return "seat " + seat + " " + JSON.stringify(t.actions[seat]);
+      });
+      return "turn " + index + " · round · " + parts.join(" vs ");
     }
     return "turn " + index + " · seat " + t.seat + " · " + JSON.stringify(t.action);
   }
@@ -300,8 +308,8 @@
         payload: {
           client_name: "browser-spectator",
           client_version: "0.1.0",
-          // The server speaks v3 and refuses a client that cannot read it.
-          supported_schema_versions: [3]
+          // The server speaks v4 and refuses a client that cannot read it.
+          supported_schema_versions: [4]
         }
       }));
     };

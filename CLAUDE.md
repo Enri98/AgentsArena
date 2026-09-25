@@ -11,7 +11,7 @@ Python 3.11 library powering an agent-vs-agent arena for sequential two-seat gam
 | Layer | Package | Responsibility |
 |-------|---------|---------------|
 | Simulation core | `arena.core` | Types, seats, exceptions, events, actions, observations, results, config, `GameDefinition`, `RulesEngine`, `Serializer`, `Registry`. Pure, immutable, no I/O. |
-| Games | `arena.games.connect4`, `arena.games.tictactoe`, `arena.games.nim`, `arena.games.pig`, `arena.games.liarsdice` | Concrete game vertical slices (config, state, action, observation, events, rules, serializer, definition). All registered via `build_default_registry()`. Pig (Phase 37) has chance nodes; Liar's Dice (Phase 39) has hidden information and chance. |
+| Games | `arena.games.connect4`, `arena.games.tictactoe`, `arena.games.nim`, `arena.games.pig`, `arena.games.liarsdice`, `arena.games.rps` | Concrete game vertical slices (config, state, action, observation, events, rules, serializer, definition). All registered via `build_default_registry()`. Pig (Phase 37) has chance nodes; Liar's Dice (Phase 39) has hidden information and chance; Rock-Paper-Scissors (Phase 41) has simultaneous moves. |
 | Local match | `arena.match` | `LocalMatch`, `TurnRecord`, `start_match` / `apply_match_action`, transcript dump/load/validate, in-process `Policy` protocol, `run_local_match`. Per-match isolated rules engine copy. |
 | In-process adapter | `arena.adapters.in_process` | Serialized payload contract: `ObservationRequestPayload`, `ActionResponsePayload`, domain-error payloads, `apply_payload_policy_turn`, `TypedPayloadPolicyAdapter` + `InProcessAgent` for typed local agents. |
 | WebSocket adapter | `arena.adapters.websocket` | Pure typed wire-envelope contract for WebSocket transport. Pydantic envelope models, message-type discriminated unions, JSON encode/decode helpers. No I/O. Reuses `arena.adapters.in_process` payload bodies verbatim. |
@@ -53,7 +53,8 @@ Open items: no v1 follow-ups remain. Future work is the v2 backlog (see "Deferre
 - `apply_action(...)` revalidates legality defensively; raises typed domain exceptions (`WrongPlayer`, `IllegalAction`, `GameFinished`, `InvalidConfig`, ...).
 - Serialize only at boundaries via dedicated `Serializer`; every accepted move yields a full post-move snapshot, and snapshots must rehydrate.
 - Runtime aborts wrap non-result failures while preserving the original `ArenaCoreError` as cause.
-- Runtime payload and wire `schema_version` is `3` since Phase 38 (decoders accept `1`-`3`); any incompatible change must bump it explicitly.
+- Runtime payload and wire `schema_version` is `4` since Phase 41 (decoders accept `1`-`4`); any incompatible change must bump it explicitly.
+- Simultaneous moves are joint turns (`arena.core.simultaneous`): engines expose `acting_seats` / `apply_joint_action`; `arena.match.apply_match_joint_action` commits one turn carrying every acting seat's action. **No seat's choice is ever in state, a transcript, or a frame before every acting seat has chosen**, so joint turns need no redaction. `current_seat` keeps its signature; callers that need the truth ask `acting_seats`.
 - **Everything sent to a viewer is built per viewer** (Phase 38): a viewer is a seat or `None` (the public). Only the server holds a full transcript of a hidden-information game; seats get `view: "seat"` payloads, spectators `"public"`. Use the `*_for_viewer` helpers in `arena.core.public_view` / `arena.match` / `arena.runtime`; never send `_build_snapshot` / `dump_match_transcript` output to a client directly.
 - **Per-turn deadlines and wall-clock timeouts live exclusively in `arena.server`. `arena.runtime` stays deadline-free.** Server-enforced expiry produces an existing-style runtime abort with reason `turn_deadline_expired`.
 - **Match identity is an unguessable opaque token** (`secrets.token_urlsafe(16)`, >=128 bits of entropy). In v1 there is no auth: possession of the `match_id` is the capability.
@@ -86,7 +87,13 @@ at `GET /matches/{id}/public-transcript`. Only the public view is ever stored. A
 adversarial review fixed a seat-hijack leak, MCP cross-client reads, unbounded turn deadlines,
 and a dozen robustness gaps (see the plan's Phase 40 Slice 0).
 
-**Active phase: 41**: the generalized turn loop (simultaneous moves, **wire bump to 4**).
+Phase 41 ✅ (2026-09-25, wire `schema_version=4`): simultaneous moves. A round where
+several seats act at once is one **joint turn** (`arena.core.simultaneous`:
+`acting_seats`, `apply_joint_action`; `kind: "joint"` with an `actions` map). The server
+asks every acting seat at once, each with its own deadline, retries, and grace. Exemplar:
+Rock-Paper-Scissors (`arena.games.rps`).
+
+**Active phase: 42**: docs reconciliation, scaffold templates, packaged TypeScript SDK.
 
 **Owner rule (2026-09-24): dispatch adversarial reviewer subagents between one feature and the
 next**, and fix confirmed findings before moving on.

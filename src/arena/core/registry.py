@@ -8,6 +8,7 @@ from arena.core.chance import validate_chance_support
 from arena.core.exceptions import DuplicateGameRegistration, UnknownGame
 from arena.core.game_definition import GameDefinition
 from arena.core.public_view import validate_public_view
+from arena.core.simultaneous import validate_simultaneous_support
 
 
 class GameRegistry:
@@ -21,6 +22,7 @@ class GameRegistry:
 
         validate_public_view(definition)
         validate_chance_support(definition)
+        validate_simultaneous_support(definition)
 
         if definition.game_id in self._definitions:
             raise DuplicateGameRegistration(

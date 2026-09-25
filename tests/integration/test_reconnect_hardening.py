@@ -37,7 +37,7 @@ def _hello(seat: int, token: str | None = None) -> HelloEnvelope:
         payload=HelloBody(
             client_name="t",
             client_version="0",
-            supported_schema_versions=[3],
+            supported_schema_versions=[4],
             requested_seat=seat,
             resume_token=token,
         ),

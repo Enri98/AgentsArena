@@ -103,8 +103,12 @@ class MatchStateBody(BaseModel):
     model_config = ConfigDict(extra="ignore", strict=True)
 
     lifecycle: str = Field(min_length=1)
+    #: The one seat to move; null when nobody or several seats act.
     current_seat: int | None = None
     turn_count: int = Field(ge=0)
+    #: v4 (Phase 41): every seat that acts now: one seat, or several in a
+    #: simultaneous round. Null once the match is over.
+    acting_seats: list[int] | None = None
     result: dict[str, Any] | None = None
     abort: dict[str, Any] | None = None
 

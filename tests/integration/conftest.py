@@ -55,6 +55,8 @@ def serve(app: Any) -> Iterator[RunningServer]:
         log_level="warning",
         ws="websockets-sansio",
         ws_ping_interval=None,
+        # As production does (arena.server.config.UVICORN_WS_PER_MESSAGE_DEFLATE).
+        ws_per_message_deflate=False,
     )
     server = uvicorn.Server(config)
 

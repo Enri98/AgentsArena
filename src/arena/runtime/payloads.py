@@ -21,6 +21,7 @@ from arena.core.public_view import (
 )
 from arena.core.results import RuleResult
 from arena.core.serializer import JSONMapping, SnapshotEnvelope
+from arena.core.simultaneous import acting_seats
 from arena.match.local_match import build_snapshot_for_viewer
 from arena.match.transcript import (
     VIEW_FULL,
@@ -58,19 +59,21 @@ ResultT = TypeVar("ResultT", bound=RuleResult)
 
 # Moves with RUNTIME_TRANSCRIPT_SCHEMA_VERSION: arena.ui cross-checks that a
 # status and a transcript come from the same runtime payload generation.
-RUNTIME_STATUS_SCHEMA_VERSION = 3
+RUNTIME_STATUS_SCHEMA_VERSION = 4
 
 #: Versions the status validator accepts.
-SUPPORTED_RUNTIME_STATUS_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3)
+SUPPORTED_RUNTIME_STATUS_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3, 4)
 # Bumped to 2 in Phase 37: the embedded match transcript's turns gained a
 # `kind`, and a chance turn carries no seat and no action.
 # Bumped to 3 in Phase 38: payloads declare their `view` (full, one seat's, or
 # the public's), and a redacted one omits hidden information.
-RUNTIME_TRANSCRIPT_SCHEMA_VERSION = 3
+# Bumped to 4 in Phase 41: the embedded match transcript can carry joint turns
+# (several seats acting at once), with an `actions` map and no single seat.
+RUNTIME_TRANSCRIPT_SCHEMA_VERSION = 4
 
 #: Versions the transcript validator accepts. v1 predates chance nodes; v1 and
 #: v2 predate views and are always full.
-SUPPORTED_RUNTIME_TRANSCRIPT_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3)
+SUPPORTED_RUNTIME_TRANSCRIPT_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3, 4)
 
 #: Runtime events that carry an agent's own reasoning. In a hidden-information
 #: game a "thought" can reveal a hand, so a viewer sees only its own seat's.
@@ -153,7 +156,7 @@ class RuntimeSessionStatusPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    schema_version: Literal[1, 2, 3]
+    schema_version: Literal[1, 2, 3, 4]
     match_id: str = Field(min_length=1)
     game_id: str = Field(min_length=1)
     lifecycle: str = Field(min_length=1)
@@ -187,7 +190,7 @@ class RuntimeTranscriptPayload(BaseModel):
     match_id: str = Field(min_length=1)
     game_id: str = Field(min_length=1)
     # Accepts every version this build reads; older ones stay readable.
-    schema_version: Literal[1, 2, 3]
+    schema_version: Literal[1, 2, 3, 4]
     lifecycle: str = Field(min_length=1)
     players: list[RuntimePlayerPayload]
     events: list[RuntimeEventPayload]
@@ -251,7 +254,9 @@ def dump_session_status(
                 local_match.definition, local_match.config, local_match.state, viewer
             )
         if not local_match.rules_engine.is_terminal(local_match.state):
-            current_seat = local_match.rules_engine.current_seat(local_match.state)
+            seats = acting_seats(local_match.rules_engine, local_match.state)
+            # Several seats acting at once (Phase 41) have no single current seat.
+            current_seat = seats[0] if len(seats) == 1 else None
         result = _dump_rule_result(local_match.rules_engine.result(local_match.state))
 
     payload = RuntimeSessionStatusPayload(

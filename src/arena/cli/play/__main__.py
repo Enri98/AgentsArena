@@ -287,6 +287,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--liarsdice-dice", type=_bounded(1, 6), default=3, dest="liarsdice_dice"
     )
+    parser.add_argument("--rps-target", type=_bounded(1, 10), default=3, dest="rps_target")
+    parser.add_argument(
+        "--rps-max-rounds", type=_bounded(1, 100), default=20, dest="rps_max_rounds"
+    )
     parser.add_argument(
         "--liarsdice-faces", type=_bounded(2, 9), default=6, dest="liarsdice_faces"
     )
@@ -384,7 +388,13 @@ def main(argv: list[str] | None = None) -> int:
 
     def _wrap(raw: Any, seat: int) -> Any:
         if raw is None:
-            policy = HumanPolicy(parser_fn, stdin=sys.stdin, stdout=sys.stdout)
+            policy = HumanPolicy(
+                parser_fn,
+                stdin=sys.stdin,
+                stdout=sys.stdout,
+                # Named: in a simultaneous round two humans are asked in turn.
+                prompt=f"Seat {seat}, your move: ",
+            )
             return TypedPayloadPolicyAdapter(definition, policy)
         return TypedPayloadPolicyAdapter(definition, raw)
 

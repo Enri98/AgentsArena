@@ -229,3 +229,50 @@ def test_scripted_policy_exhaustion_abort_has_informative_cause_message(
     cause_message = status["abort"].get("cause_message", "")
     assert cause_message is not None
     assert "ran out of actions" in cause_message
+
+
+def test_a_simultaneous_round_plays_and_hides_agent_notes_from_the_human(tmp_path) -> None:
+    """Phase 41: the loop resolves joint rounds; a human never sees an agent's
+    reasoning (which may name its next throw) before the match ends."""
+
+    import io
+
+    from arena.adapters.in_process import TypedPayloadPolicyAdapter
+    from arena.cli.play import play_match
+    from arena.cli.policies import HumanPolicy
+    from arena.games import build_default_registry
+    from arena.games.rps import Throw
+    from arena.runtime import PlayerRecord
+
+    rps = build_default_registry().get("rps")
+
+    class Agent:
+        def select_action(self, observation):  # type: ignore[no-untyped-def]
+            decisions[0].append((1, "SECRET-PLAN: rock again"))
+            return Throw("rock")
+
+    decisions: dict[int, list[tuple[int, str]]] = {0: []}
+    stdin = io.StringIO("paper\n" * 3)
+    stdout = io.StringIO()
+    human = HumanPolicy(
+        lambda line, obs: Throw(line.strip()) if line.strip() else None,
+        stdin=stdin,
+        stdout=stdout,
+        prompt="Seat 1, your move: ",
+    )
+    code = play_match(
+        rps,
+        rps.config_type(target_wins=3),
+        (PlayerRecord("a", 0), PlayerRecord("h", 1)),
+        {0: TypedPayloadPolicyAdapter(rps, Agent()), 1: TypedPayloadPolicyAdapter(rps, human)},
+        out_dir=tmp_path,
+        stdin=stdin,
+        stdout=stdout,
+        decision_sink=decisions,
+        human_seats=(1,),
+    )
+    assert code == 0
+    output = stdout.getvalue()
+    final = output.rfind("Seat 1, your move: ")
+    assert "SECRET-PLAN" not in output[:final]  # never shown while the human plays
+    assert "joint" in output  # the turn history shows the rounds

@@ -66,8 +66,10 @@ async def _run_happy(args: argparse.Namespace) -> int:
     )
 
     results = await asyncio.gather(
-        run_remote_seat(server_url=seat_0_url, seat=0, model=args.model_seat_0, **kw),
-        run_remote_seat(server_url=seat_1_url, seat=1, model=args.model_seat_1, **kw),
+        # Distinct seeds: the same model with the same seed plays identically,
+        # which makes a Rock-Paper-Scissors match all ties.
+        run_remote_seat(server_url=seat_0_url, seat=0, model=args.model_seat_0, seed=0, **kw),
+        run_remote_seat(server_url=seat_1_url, seat=1, model=args.model_seat_1, seed=1, **kw),
     )
 
     out_dir = Path(args.out_dir)
@@ -221,7 +223,9 @@ def main(argv: list[str] | None = None) -> int:
         description="Demo: two Ollama agents play a game on a remote arena.server."
     )
     parser.add_argument("--server-url", required=True, help="WebSocket base URL, e.g. ws://127.0.0.1:8080")
-    parser.add_argument("--game", required=True, choices=["connect4", "tictactoe", "nim", "pig"])
+    parser.add_argument(
+        "--game", required=True, choices=["connect4", "tictactoe", "nim", "pig", "rps"]
+    )
     parser.add_argument("--model-seat-0", default="llama3.2")
     parser.add_argument("--model-seat-1", default="llama3.2")
     parser.add_argument("--out-dir", default="./runs/remote")

@@ -38,8 +38,8 @@ from arena.sdk.errors import HandshakeError, close_code_to_error
 CLIENT_NAME = "arena-sdk-python"
 CLIENT_VERSION = "0.1.0"
 # Phase 37 bumped the wire to 2 (transcripts carry chance turns), Phase 38 to 3
-# (per-seat views). The SDK reads all three, so it advertises all three.
-SUPPORTED_SCHEMA_VERSIONS = [1, 2, 3]
+# (per-seat views), Phase 41 to 4 (joint turns). The SDK reads them all.
+SUPPORTED_SCHEMA_VERSIONS = [1, 2, 3, 4]
 
 #: Largest frame the SDK accepts (protocol section 3). The websockets default of
 #: 1 MiB is below what the server sends for a long match: the transcript in

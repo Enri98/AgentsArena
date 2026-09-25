@@ -32,7 +32,7 @@ def test_unknown_body_field_on_hello_is_dropped() -> None:
             "payload": {
                 "client_name": "test",
                 "client_version": "0.0.1",
-                "supported_schema_versions": [1, 2, 3],
+                "supported_schema_versions": [1, 2, 3, 4],
                 "requested_seat": 0,
                 "future_hello_field": "ignored",
             },

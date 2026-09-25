@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from arena.core.simultaneous import acting_seats
 from arena.server.config import (
     DEFAULT_DISCONNECT_GRACE_MS,
     DEFAULT_PER_ACTION_RETRY_BUDGET,
@@ -258,11 +259,14 @@ def get_match(match_id: str, request: Request) -> JSONResponse:
     local_match = session.local_match
 
     current_seat = None
+    seats: list[int] | None = None
     turn_count = 0
     if local_match is not None:
         turn_count = len(local_match.turns)
-        if not local_match.rules_engine.is_terminal(local_match.state):
-            current_seat = local_match.rules_engine.current_seat(local_match.state)
+        running = session.lifecycle.value == "running"
+        if running and not local_match.rules_engine.is_terminal(local_match.state):
+            seats = list(acting_seats(local_match.rules_engine, local_match.state))
+            current_seat = seats[0] if len(seats) == 1 else None
 
     players_out = [
         {"player_id": p.player_id, "label": p.label, "seat": p.seat}
@@ -284,6 +288,7 @@ def get_match(match_id: str, request: Request) -> JSONResponse:
             "lifecycle": session.lifecycle.value,
             "schema_version": WIRE_SCHEMA_VERSION,
             "current_seat": current_seat,
+            "acting_seats": seats,
             "turn_count": turn_count,
             "players": players_out,
             "result": None,

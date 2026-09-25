@@ -47,6 +47,16 @@ class IncompleteChanceSupport(ConfigError):
     default_code = "incomplete_chance_support"
 
 
+class IncompleteSimultaneousSupport(ConfigError):
+    """Raised when a game's simultaneous-move flag and hooks disagree (Phase 41).
+
+    A game declaring simultaneous moves without the hooks would stall at its
+    first joint node, so the inconsistency is rejected at registration.
+    """
+
+    default_code = "incomplete_simultaneous_support"
+
+
 class IncompletePublicView(ConfigError):
     """Raised when a game declares hidden information but does not redact it.
 

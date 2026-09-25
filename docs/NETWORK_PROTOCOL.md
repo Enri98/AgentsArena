@@ -122,7 +122,7 @@ Success response (`HTTP 201 Created`):
   "match_id": "abc123...",
   "game_id": "connect4",
   "game_schema_version": 1,
-  "schema_version": 3,
+  "schema_version": 4,
   "lifecycle": "created",
   "per_turn_deadline_ms": 30000,
   "per_action_retry_budget": 3,
@@ -155,8 +155,9 @@ Success (`HTTP 200`):
   "match_id": "...",
   "game_id": "connect4",
   "lifecycle": "running",
-  "schema_version": 3,
+  "schema_version": 4,
   "current_seat": 0,
+  "acting_seats": [0],
   "turn_count": 4,
   "players": [
     {"player_id": "p0", "label": "alice", "seat": 0},
@@ -287,6 +288,7 @@ inside known message types are also ignored.
 | Version | Shipped in | What changed |
 |---------|-----------|--------------|
 | 1 | v1 (Phases 0-35) | Initial protocol. |
+| 4 | Phase 41 | **Simultaneous moves.** In a simultaneous round several seats act at once (Rock-Paper-Scissors): each gets its own `observation_request`, concurrently, with its own deadline, retry budget and disconnect grace. The round commits as one **joint turn**: `turn_record.kind` is `"joint"`, `seat` and `action` are null, and `actions` maps each acting seat (a string key, `"0"`, `"1"`) to its action, in seat order. Transcripts carry the same shape. No seat's action is sent to anyone, or recorded, before every acting seat has chosen. `match_state` gains `acting_seats`, and its `current_seat` is null when several seats act. A sequential turn has no `actions` key, so sequential games' payloads are unchanged apart from `schema_version`. |
 | 3 | Phase 38 | **Per-recipient payloads**, so hidden-information games can be served. `turn_committed` carries the recipient's own `post_snapshot`, a new `public_snapshot`, and only the events and chance-outcome parts the recipient may see. Events record `is_public`/`audience` when private. Transcripts (runtime and match) declare `view` (`"full"`, `"seat"`, `"public"`) and `viewer_seat`. Seats get `"seat"` transcripts and spectators `"public"` ones, and only a `"full"` transcript can be replayed. `welcome.match_config` is the seat's view, and `welcome.transcript` replays the seat's history on reconnect (§11). `POST /matches` accepts `supported_schema_versions`. New abort reason `turn_limit_exceeded`: the server caps every match's length. For a perfect-information game every view is the full one, so payloads differ from v2 only by the added fields. |
 | 2 | Phase 37 | Transcript turns gained a `kind`. A **chance turn** has no seat and no action — nobody chose it — so `turns[].seat` and `turns[].action` became nullable in `match_finished.transcript` and `match_aborted.transcript`. `turn_committed.events` became load-bearing: it used to be an empty list, harmless while every game was deterministic because a client could recompute anything it missed, but a chance outcome cannot be recomputed. A chance turn carries the recorded `outcome` (game-specific JSON; null on action turns). Replay applies it and never re-rolls, so a transcript validates without the seed. **The seed is never sent**: the server's match object holds it, and it appears in no config, state, snapshot, event, or transcript. |
 
@@ -300,7 +302,7 @@ cannot migrate without a flag day.
 client that cannot read the current version is refused rather than served an older shape. For a
 hidden-information game an older shape could not even be produced without leaking, since v1 and v2
 have no per-recipient payloads. A client should advertise every version it reads; the reference
-SDK sends `[1, 2, 3]`. `POST /matches` accepts the same list (optional), so a creator learns of a
+SDK sends `[1, 2, 3, 4]`. `POST /matches` accepts the same list (optional), so a creator learns of a
 mismatch before handing out seat URLs.
 - This policy is **independent** of game-config schema evolution. Each registered game carries its
   own `game_schema_version` (integer) returned by `GET /games` and echoed in `welcome.match_config`.
@@ -380,11 +382,15 @@ If the seat is already occupied by a live connection, the server closes with cod
 {
   "lifecycle": "running",
   "current_seat": 0,
+  "acting_seats": [0],
   "turn_count": 0,
   "result": null,
   "abort": null
 }
 ```
+
+`acting_seats` (v4) lists every seat that acts now: one seat in a sequential game, several in a
+simultaneous round (then `current_seat` is null). Both are null once the match is over.
 
 Sent when:
 - both seats have joined (`created` → `running`)
@@ -392,7 +398,7 @@ Sent when:
 - the match reaches a terminal result (`running` → `finished`)
 - the match is aborted (`running`/`created` → `aborted`)
 
-### 8.4 `observation_request` (Server → Client, only to the active seat)
+### 8.4 `observation_request` (Server → Client, only to an acting seat)
 
 ```json
 {
@@ -405,6 +411,19 @@ Where `<ObservationRequestPayload>` is exactly the payload defined by
 `arena.adapters.in_process.ObservationRequestPayload`. The `deadline_ms` is the wall-clock budget
 the server will wait for the action; on expiry the server aborts the match with reason
 `turn_deadline_expired`.
+
+**One action per request.** A client sends exactly one `action_response` per
+`observation_request` (plus retries after `action_rejected`). The server reads a seat's frames
+only while it is waiting for that seat, so an extra action is not discarded: it is read as the
+answer to the seat's next request.
+
+**Simultaneous rounds (v4).** When several seats act at once, each acting seat receives its own
+`observation_request` at the same time, and none depends on another's choice. Each seat has
+its own deadline (the match's `per_turn_deadline_ms`, from when its request was sent), its own
+retry budget and its own disconnect grace. The first seat to run out of any of them ends the
+match through the usual abort. A seat whose action is accepted hears nothing until the round
+commits. It is not told the other seat's action, or even whether the other seat has acted, until
+then.
 
 ### 8.5 `action_response` (Client → Server)
 
@@ -474,6 +493,10 @@ Since v2 one step can commit several turns. An accepted action is followed by on
 for each chance node it leads to (for example the die roll after a Pig `roll`). A game that opens at
 a chance node sends those turns before the first `match_state`. Each carries its own `turn_index`.
 
+A simultaneous round (v4) commits as **one** `turn_committed` whose `turn_record` has
+`kind: "joint"`, null `seat` and `action`, and `actions`: every acting seat's action, keyed by the
+seat as a string. It is sent once the last acting seat's action is accepted, and not before.
+
 ### 8.8 `match_finished` (Server → Client, broadcast)
 
 ```json
@@ -503,7 +526,8 @@ the failure reason.
 { "nonce": "<echoed>" }
 ```
 
-Sent every 20 seconds by the server to the **active seat** while its turn is open. An off-turn
+Sent every 20 seconds by the server to the **active seat** while its turn is open (in a
+simultaneous round, to each acting seat until its action is accepted). An off-turn
 seat is not pinged: the server does not read from it, and it is checked when its turn comes
 (the protocol-level keepalive of §3 covers every connection meanwhile). Clients must reply with
 `pong` echoing the same `nonce` within 20 seconds. Two consecutive missed `pong` responses close
@@ -663,7 +687,9 @@ negotiation in v1.
   rides inside the welcome rather than as separate frames. The client reaches **logically
   equivalent state** to one that never disconnected. Framing is not byte-identical; the resulting
   state is. The server then sends `match_state` and, if the reconnecting seat is the active seat,
-  re-sends the in-flight `observation_request`, so the client always knows what to act on.
+  re-sends the in-flight `observation_request`, so the client always knows what to act on. In a
+  simultaneous round (v4) a seat whose action was already accepted is not asked again: its action
+  stands, and it waits for the round's `turn_committed`.
 - **A resume is only for a running match.** Before both seats have joined there is nothing to
   resume: a `hello` with a `resume_token` closes with `4409 match_not_started`, and the client
   should send a fresh `hello`.
@@ -748,6 +774,8 @@ information.
   checked before the request body is read. A create body is at most 64 KiB (`413
   request_too_large`); `players` has at most two entries, and a label at most 64 characters.
 - Max `action_response` messages per match per second: **10**, enforced by throttling (see above).
+  The window is per match, so in a simultaneous round (v4) both seats share it: one seat's flood
+  slows both. It adds delay only and is never charged to either seat's deadline.
 - Max concurrent seat connections per match: **4**. A connection claims its per-match slot only
   once its fresh `hello` is valid; a resume with a valid token claims none and is never refused
   for this cap: sockets that never said hello used to hold the slots and lock a
@@ -911,8 +939,8 @@ Who receives each Server → Client message. Spectators are live as of Phase 36.
 | `welcome`           | recipient only (response to that seat's `hello`) | recipient only | n/a — spectators get `spectator_welcome` |
 | `spectator_welcome` | n/a         | n/a           | recipient only (response to `spectator_hello`) |
 | `match_state`       | yes         | yes           | yes                      |
-| `observation_request` | **yes (only)** | no         | **never** |
-| `action_rejected`   | **yes (only)** | no          | no                       |
+| `observation_request` | **yes (only)**, each acting seat its own (v4) | no | **never** |
+| `action_rejected`   | **yes (only)**, the seat whose action it was | no | no |
 | `turn_committed`    | yes         | yes           | yes                      |
 | `match_finished`    | yes         | yes           | yes                      |
 | `match_aborted`     | yes         | yes           | yes                      |
@@ -940,5 +968,8 @@ Notes:
 - The server caps every match's length (default 5000 turns). A game that can loop forever
   (two Pig seats that only ever roll) aborts with `turn_limit_exceeded` rather than pinning
   server memory.
+- In a simultaneous round (v4) every acting seat is an "active seat" for the rows above. A seat
+  that has acted and is waiting for the others receives nothing about their choices until the
+  joint `turn_committed`.
 - `match_state` is the **only** lifecycle-transition signal; SDKs should drive their internal
   state machine off it rather than off `welcome.lifecycle` after the initial handshake.

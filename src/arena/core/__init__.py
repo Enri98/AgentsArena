@@ -11,6 +11,7 @@ from arena.core.exceptions import (
     IllegalAction,
     IncompleteChanceSupport,
     IncompletePublicView,
+    IncompleteSimultaneousSupport,
     InvalidGameConfig,
     RehydrationError,
     RulesError,
@@ -28,6 +29,7 @@ from arena.core.public_view import (
 )
 from arena.core.registry import GameRegistry
 from arena.core.rules_engine import RulesEngine, TransitionResult
+from arena.core.simultaneous import acting_seats, apply_joint_action, is_joint_node
 
 __all__ = [
     "Action",
@@ -47,6 +49,10 @@ __all__ = [
     "Observation",
     "IncompletePublicView",
     "IncompleteChanceSupport",
+    "IncompleteSimultaneousSupport",
+    "acting_seats",
+    "apply_joint_action",
+    "is_joint_node",
     "ChanceResolutionError",
     "ChanceRng",
     "apply_chance",

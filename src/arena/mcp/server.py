@@ -113,7 +113,9 @@ def build_server(registry: SessionRegistry | None = None) -> Server:
                 name="make_move",
                 description=(
                     "Send an action and wait for a TurnCommittedEvent or ErrorEvent. "
-                    "Returns the event body dict."
+                    "Returns the event body dict. In a simultaneous round (both seats "
+                    "act at once, e.g. rps) the turn commits only once the other seat "
+                    "has chosen too, so this waits for it as well."
                 ),
                 inputSchema={
                     "type": "object",
@@ -129,6 +131,10 @@ def build_server(registry: SessionRegistry | None = None) -> Server:
                             ),
                         },
                         "turn_id": {"type": "string", "description": "Optional turn UUID."},
+                        "timeout": {
+                            "type": "number",
+                            "description": "Seconds to wait for the commit (default 30).",
+                        },
                     },
                     "required": ["match_id", "seat", "action"],
                 },
@@ -321,7 +327,12 @@ def _is_own_action(event: TurnCommittedEvent, seat: int) -> bool:
     """
 
     record = event.body.turn_record
-    return record.get("kind", "action") == "action" and record.get("seat") == seat
+    kind = record.get("kind", "action")
+    if kind == "joint":
+        # A simultaneous round (wire v4): every acting seat's action, committed
+        # together once the last seat has chosen.
+        return str(seat) in (record.get("actions") or {})
+    return kind == "action" and record.get("seat") == seat
 
 
 async def _make_move(
@@ -332,6 +343,10 @@ async def _make_move(
     seat = args.get("seat")
     action = args.get("action")
     turn_id = args.get("turn_id")
+    try:
+        timeout = float(args.get("timeout", _DEFAULT_OBS_TIMEOUT))
+    except (TypeError, ValueError):
+        return _error_result("invalid_args", "timeout must be a number")
 
     if not isinstance(match_id, str):
         return _error_result("invalid_args", "match_id must be a string")
@@ -353,7 +368,7 @@ async def _make_move(
     # Wait for TurnCommittedEvent, ErrorEvent, or terminal event
     deferred: list[Any] = []
     try:
-        deadline = asyncio.get_event_loop().time() + _DEFAULT_OBS_TIMEOUT
+        deadline = asyncio.get_event_loop().time() + timeout
         while True:
             remaining = deadline - asyncio.get_event_loop().time()
             if remaining <= 0:
