@@ -36,6 +36,12 @@ UVICORN_WS_PING_INTERVAL_S: float = 20.0
 UVICORN_WS_PING_TIMEOUT_S: float = 20.0
 #: Largest inbound frame. Clients send hellos, actions, and pongs: all small.
 UVICORN_WS_MAX_SIZE: int = 1 << 20
+#: permessage-deflate off. With it on, Node's built-in WebSocket client (undici,
+#: which the TypeScript SDK uses) failed mid-match with 1006 after a few frames,
+#: while the server believed everything was sent. Frames are bounded (a long
+#: match's transcript is a few MB), so compression is not worth a client that
+#: cannot talk to us. Tests serve the same way.
+UVICORN_WS_PER_MESSAGE_DEFLATE: bool = False
 
 #: Seconds a new WebSocket has to send its hello. Without a bound, a socket that
 #: never spoke held its connection slots for as long as it stayed open.

@@ -151,6 +151,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     from arena.server.config import (
         UVICORN_WS_IMPL,
         UVICORN_WS_MAX_SIZE,
+        UVICORN_WS_PER_MESSAGE_DEFLATE,
         UVICORN_WS_PING_INTERVAL_S,
         UVICORN_WS_PING_TIMEOUT_S,
     )
@@ -178,6 +179,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         ws_ping_interval=UVICORN_WS_PING_INTERVAL_S,
         ws_ping_timeout=UVICORN_WS_PING_TIMEOUT_S,
         ws_max_size=UVICORN_WS_MAX_SIZE,
+        ws_per_message_deflate=UVICORN_WS_PER_MESSAGE_DEFLATE,
     )
 
 
