@@ -4,10 +4,12 @@ from __future__ import annotations
 import argparse
 import sys
 
+from arena._entry import program_name
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="python -m arena.mcp",
+        prog=program_name("python -m arena.mcp"),
         description="Arena MCP server — exposes arena.sdk tools to MCP clients.",
     )
     mode = parser.add_mutually_exclusive_group()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
+from arena._entry import program_name
 from arena.cli.app import render_all_frames, render_session_from_files
 
 
@@ -20,7 +21,7 @@ def _seat(text: str) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m arena.cli",
+        prog=program_name("python -m arena.cli"),
         description="Render a saved arena session from status + transcript JSON files.",
     )
     parser.add_argument(

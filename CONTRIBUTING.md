@@ -69,7 +69,8 @@ follow `docs/ADDING_A_GAME.md`. A game is done when its contract test (the share
 ## Releasing
 
 1. Move the `[Unreleased]` entries in `CHANGELOG.md` under a new version heading.
-2. Bump `version` in `pyproject.toml` (and in `sdk-ts/package.json` if the TypeScript SDK
-   changed).
-3. Tag `vX.Y.Z` on `main` and push the tag. The release workflow builds and checks the
+2. Bump the version in `pyproject.toml`, `sdk-ts/package.json` and `CLIENT_VERSION` in
+   `sdk-ts/src/protocol.ts` together: both packages release under the same version, and the
+   release workflow refuses a tag that does not match all of them.
+3. Tag `vX.Y.Z` on a commit of `main` and push the tag. The release workflow builds and checks the
    distributions and attaches them to a GitHub release.

@@ -8,6 +8,7 @@ import sys
 import urllib.request
 from typing import Any
 
+from arena._entry import program_name
 from arena.cli.games import CLI_GAME_ADAPTERS, cli_game_ids, get_cli_adapter
 from arena.cli.play import play_match
 from arena.cli.policies import HumanPolicy
@@ -164,6 +165,15 @@ def _run_remote(
     player1: PlayerRecord,
 ) -> int:
     """Create a match on arena.server and connect all seats remotely."""
+    import importlib.util
+
+    if importlib.util.find_spec("websockets") is None:
+        # Checked before the match is created, so none is left waiting.
+        sys.stderr.write(
+            "Error: --server-url needs the 'websockets' package.\n"
+            "Install the 'client' extra: pip install 'agents-arena[client]'\n"
+        )
+        return 2
     for seat, spec, policy in [(0, args.seat_0, raw_policy0), (1, args.seat_1, raw_policy1)]:
         if spec == "human":
             sys.stderr.write(
@@ -271,7 +281,7 @@ def _tolerate_unencodable_output() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _tolerate_unencodable_output()
-    parser = argparse.ArgumentParser(prog="python -m arena.cli.play")
+    parser = argparse.ArgumentParser(prog=program_name("python -m arena.cli.play"))
     parser.add_argument("--game", choices=sorted(cli_game_ids()), required=True)
     parser.add_argument("--seat-0", required=True, dest="seat_0")
     parser.add_argument("--seat-1", required=True, dest="seat_1")

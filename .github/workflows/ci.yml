@@ -79,11 +79,30 @@ jobs:
           python -m build
           twine check --strict dist/*
 
+      # Each extra on its own, as a user installs it: every command either works
+      # or names the extra it needs.
       - name: Install the wheel and smoke-test it
         run: |
-          python -m venv /tmp/wheel-check
-          /tmp/wheel-check/bin/pip install "$(ls dist/*.whl)[server]"
+          wheel="$(ls dist/*.whl)"
           cd /tmp
-          /tmp/wheel-check/bin/python -c "import arena, arena.server.app; from arena.games import build_default_registry; print(arena.__version__, [d.game_id for d in build_default_registry().list()])"
-          /tmp/wheel-check/bin/python -c "import importlib.resources as r; t = r.files('arena.games.scaffold') / 'templates' / 'hidden' / 'rules.py.tmpl'; assert t.is_file(); assert (r.files('arena') / 'py.typed').is_file()"
-          /tmp/wheel-check/bin/arena-server --help > /dev/null
+
+          python -m venv base && base/bin/pip install -q "$wheel"
+          base/bin/python -c "import arena; from arena.games import build_default_registry; print(arena.__version__, [d.game_id for d in build_default_registry().list()])"
+          base/bin/python -c "import importlib.resources as r; assert (r.files('arena.games.scaffold') / 'templates' / 'hidden' / 'rules.py.tmpl').is_file(); assert (r.files('arena') / 'py.typed').is_file()"
+          base/bin/arena-play --help > /dev/null
+          base/bin/arena-replay --help > /dev/null
+          base/bin/arena-scaffold --help > /dev/null
+          for cmd in arena-server arena-mcp; do
+            if base/bin/$cmd --help 2> err.txt; then echo "$cmd ran without its extra"; exit 1; fi
+            grep -q "pip install 'agents-arena\[" err.txt || { cat err.txt; exit 1; }
+          done
+
+          python -m venv client && client/bin/pip install -q "${wheel}[client]"
+          client/bin/python -c "import arena.sdk"
+
+          python -m venv server && server/bin/pip install -q "${wheel}[server]"
+          server/bin/python -c "import arena.server.app"
+          server/bin/arena-server --help > /dev/null
+
+          python -m venv mcpenv && mcpenv/bin/pip install -q "${wheel}[mcp]"
+          mcpenv/bin/arena-mcp --help > /dev/null

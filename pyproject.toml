@@ -37,13 +37,17 @@ Changelog = "https://github.com/Enri98/AgentsArena/blob/main/CHANGELOG.md"
 Protocol = "https://github.com/Enri98/AgentsArena/blob/main/docs/NETWORK_PROTOCOL.md"
 
 [project.scripts]
-arena-server = "arena.server.__main__:main"
-arena-play = "arena.cli.play.__main__:main"
-arena-replay = "arena.cli.__main__:main"
-arena-mcp = "arena.mcp.__main__:main"
-arena-scaffold = "arena.games.scaffold:main"
+arena-server = "arena._entry:server"
+arena-play = "arena._entry:play"
+arena-replay = "arena._entry:replay"
+arena-mcp = "arena._entry:mcp"
+arena-scaffold = "arena._entry:scaffold"
 
 [project.optional-dependencies]
+# The Python SDK (arena.sdk) and remote play (arena-play --server-url).
+client = [
+    "websockets>=13",
+]
 server = [
     "fastapi>=0.110",
     "uvicorn>=0.35",
@@ -53,17 +57,21 @@ server = [
 mcp = [
     # mcp 2 removed Server.list_tools and friends; arena.mcp targets the 1.x API.
     "mcp>=1.0,<2",
+    # arena.mcp drives matches through the SDK.
+    "websockets>=13",
 ]
 dev = [
     "build>=1",
-    "mypy>=1.10",
+    # Pinned: a new release can turn CI red with no code change (mypy warns on
+    # unused ignores). Bump them deliberately, with .pre-commit-config.yaml.
+    "mypy==2.3.1",
     "pytest>=8",
     "pytest-timeout>=2.3",
-    "ruff>=0.11",
+    "ruff==0.15.7",
     "fastapi>=0.110",
     "uvicorn>=0.35",
     "httpx>=0.27",
-    "websockets>=12",
+    "websockets>=13",
     "structlog>=24",
 ]
 

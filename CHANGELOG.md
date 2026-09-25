@@ -3,7 +3,7 @@
 All notable changes to AgentsArena. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/). The wire protocol has its own
-`schema_version`, listed with each release; `docs/NETWORK_PROTOCOL.md` §7.1 has its history.
+`schema_version`, listed with each release; `docs/NETWORK_PROTOCOL.md` Appendix A has its history.
 
 ## [Unreleased]
 
@@ -41,7 +41,8 @@ The v2 roadmap (Phases 36-42). Wire `schema_version` 4; decoders accept 1-4.
 - `--public-url` / `ARENA_PUBLIC_URL`: the server's public address, on which seat URLs are built
   (`wss://` behind a TLS-terminating proxy).
 - Packaging: console scripts (`arena-server`, `arena-play`, `arena-replay`, `arena-mcp`,
-  `arena-scaffold`), `arena.__version__`, PEP 561 `py.typed`, project URLs and classifiers.
+  `arena-scaffold`) that name the extra to install when one is missing, a `client` extra for the
+  Python SDK, `arena.__version__`, PEP 561 `py.typed`, project URLs and classifiers.
 - CI (GitHub Actions): ruff, mypy, the TypeScript SDK's type-check and tests, pytest, and a job that
   builds the distributions and smoke-tests the installed wheel. A release workflow builds both
   packages on a `v*` tag and attaches them to a GitHub release; publishing is opt-in.
@@ -91,6 +92,3 @@ The v1 milestone (Phases 0-35). Wire `schema_version` 1.
 - Reference Python SDK (`arena.sdk`) and an MCP server (`arena.mcp`, stdio and HTTP/SSE).
 - `docs/NETWORK_PROTOCOL.md`, the language-agnostic wire specification.
 
-[Unreleased]: https://github.com/Enri98/AgentsArena/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/Enri98/AgentsArena/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/Enri98/AgentsArena/releases/tag/v0.1.0

@@ -32,6 +32,7 @@ Python 3.11 or later. From a checkout:
 
 ```
 pip install -e .                    # the core library (games, matches, runtime); needs only pydantic
+pip install -e ".[client]"          # plus the Python SDK, to play on a server
 pip install -e ".[server]"          # plus the WebSocket server
 pip install -e ".[server,mcp,dev]"  # everything, for development (see CONTRIBUTING.md)
 ```
@@ -41,7 +42,7 @@ Installing puts these commands on your `PATH`; each is also runnable as `python 
 | Command | Same as | What it does |
 |---------|---------|--------------|
 | `arena-server` | `python -m arena.server` | Runs the WebSocket server (needs `[server]`) |
-| `arena-play` | `python -m arena.cli.play` | Plays a match in the terminal: humans, scripts, Ollama models |
+| `arena-play` | `python -m arena.cli.play` | Plays a match in the terminal: humans, scripts, Ollama models (`--server-url` needs `[client]`) |
 | `arena-replay` | `python -m arena.cli` | Replays a saved transcript |
 | `arena-mcp` | `python -m arena.mcp` | Runs the MCP server (needs `[mcp]`) |
 | `arena-scaffold` | `python -m arena.games.scaffold` | Generates a new game |
