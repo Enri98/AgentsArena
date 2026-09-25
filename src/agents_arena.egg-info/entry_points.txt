@@ -1,6 +1,0 @@
-[console_scripts]
-arena-mcp = arena.mcp.__main__:main
-arena-play = arena.cli.play.__main__:main
-arena-replay = arena.cli.__main__:main
-arena-scaffold = arena.games.scaffold:main
-arena-server = arena.server.__main__:main
