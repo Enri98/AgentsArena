@@ -28,7 +28,8 @@ class _Socket:
 
 
 def _with_writer(conn):
-    conn.writer_task = SimpleNamespace(cancel=lambda: None)  # a stand-in "running writer"
+    # A stand-in "running writer".
+    conn.writer_task = SimpleNamespace(cancel=lambda: None, done=lambda: False)
     return conn
 
 
@@ -108,7 +109,9 @@ def test_a_reconnected_seat_gets_its_own_writer() -> None:
         seat1 = _with_writer(SeatConnection(websocket=_Socket(), seat=1))
         conns = MatchConnections(seat0, seat1)
         cancelled: list[bool] = []
-        seat1.writer_task = SimpleNamespace(cancel=lambda: cancelled.append(True))
+        seat1.writer_task = SimpleNamespace(
+            cancel=lambda: cancelled.append(True), done=lambda: False
+        )
         fresh = SeatConnection(websocket=_Socket(), seat=1)
         conns.replace_seat(1, fresh)
         running = fresh.writer_task is not None

@@ -47,6 +47,12 @@ UVICORN_WS_PER_MESSAGE_DEFLATE: bool = False
 #: never spoke held its connection slots for as long as it stayed open.
 HELLO_TIMEOUT_S: float = 10.0
 
+#: Seconds a connection refused before its hello (unknown match, bad seat, rate
+#: limited) waits for that hello before the close. A client sends hello as soon
+#: as the socket opens; a close racing that send reached Node clients as a bare
+#: 1006, hiding the code. Short, because a refused socket holds no slot.
+REJECT_LINGER_S: float = 1.0
+
 # Heartbeat defaults (Phase 32).  arena.server owns all deadline/heartbeat logic.
 HEARTBEAT_INTERVAL_MS: int = 20_000
 HEARTBEAT_MAX_MISSES: int = 2

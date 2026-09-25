@@ -1,0 +1,16 @@
+"""${Name} chance outcomes: what nature decides."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+
+@dataclass(frozen=True)
+class ${Name}Flip:
+    """One coin flip. Transcripts record it, so a replay needs no seed."""
+
+    heads: bool
+
+
+__all__: Sequence[str] = ["${Name}Flip"]

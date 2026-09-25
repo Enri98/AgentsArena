@@ -1,10 +1,11 @@
 # Adding a New Game
 
-AgentsArena supports perfect-information, sequential, 2-seat games. Since
-Phase 37 a game may be **stochastic** — dice, draws, deals — through chance
-nodes; see "Games with chance nodes" below, with Pig (`src/arena/games/pig/`)
-as the reference. Imperfect information (Phase 38), simultaneous moves
-(Phase 41), and more than two seats are still out of scope.
+AgentsArena supports two-seat games. A game may be **stochastic** — dice,
+draws, deals — through chance nodes (Pig, `src/arena/games/pig/`); keep
+**hidden information** private to a seat (Liar's Dice,
+`src/arena/games/liarsdice/`); and have **simultaneous moves**
+(Rock-Paper-Scissors, `src/arena/games/rps/`). The sections at the end of this
+guide cover each. More than two seats is still out of scope.
 
 The work splits cleanly across one core game package and three per-layer
 adapter modules. Each adapter layer maintains its own self-registering registry
@@ -13,9 +14,34 @@ adapter modules. Each adapter layer maintains its own self-registering registry
 Nim (`src/arena/games/nim/`) is the cleanest exemplar and is referenced
 throughout — read it alongside this guide.
 
+## Start from the scaffold
+
+```bash
+python -m arena.games.scaffold --name mygame --kind hidden --dry-run   # preview
+python -m arena.games.scaffold --name mygame --kind hidden
+```
+
+`--kind` picks the starting point:
+
+| Kind | Generates |
+|------|-----------|
+| `basic` (default) | the files below as TODO stubs to fill in |
+| `chance` | a working coin-flip race: perfect information with chance nodes |
+| `hidden` | a working keep-or-fold game on a private deal: hidden information and chance |
+| `simultaneous` | working matching pennies: both seats choose at once |
+
+The three working kinds also generate working CLI, Ollama and MCP adapters and
+`tests/contract/test_<name>_contract.py`, which runs the shared contract suite on
+the generated game (the hidden kind's bundle includes the private variants that
+prove each seat's number stays hidden). Every kind registers the game in
+`src/arena/games/__init__.py` and prints the three adapter `__init__.py` edits to
+make by hand. Then reshape the rules into your game, keeping the contract test
+passing as you go.
+
 ## Checklist
 
-Create these files, in order:
+Create these files, in order (the scaffold writes all but the last three; the
+working kinds write the contract test too):
 
 - [ ] `src/arena/games/<name>/__init__.py`
 - [ ] `src/arena/games/<name>/config.py`
@@ -327,14 +353,16 @@ The PostToolUse hook handles this automatically on Claude Code sessions. Per
 - **Mutating events with non-JSON-native fields.** Use `list[int]`, not
   `tuple[int, ...]`, for event fields that are dumped verbatim; transcripts
   validate strictly. See `NimObjectsTaken.remaining`.
-- **`schema_version` drift.** Runtime payloads are at `schema_version=3`. New
-  games inherit this; bumping it is an explicit, separate change.
+- **`schema_version` drift.** Runtime payloads and the wire are at
+  `schema_version=4`. New games inherit this; bumping it is an explicit,
+  separate change.
 
 ## Games with chance nodes
 
 A chance node is a state where no seat acts and a random outcome resolves
 instead. Pig (`src/arena/games/pig/`) is the reference: every `roll` action
-leads to a chance node, and the die face is the outcome.
+leads to a chance node, and the die face is the outcome. The scaffold's
+`--kind chance` generates a smaller working example.
 
 1. Set `has_chance_nodes=True` on the `GameDefinition`. Registration rejects the
    game unless all five hooks below exist.
@@ -366,10 +394,11 @@ Pig's does.
 
 ## Games with hidden information
 
-Since Phase 38 a game may keep information private to a seat (a hand of cards,
-dice under a cup). `arena.testing.hidden_factory` (the secrets game) is the
-minimal reference; Liar's Dice (`src/arena/games/liarsdice/`, with
-`tests/contract/test_liarsdice_contract.py`) is the full one.
+A game may keep information private to a seat (a hand of cards, dice under a
+cup). `python -m arena.games.scaffold --kind hidden` generates a small working
+one; `arena.testing.hidden_factory` (the secrets game) is the minimal test
+fixture; Liar's Dice (`src/arena/games/liarsdice/`, with
+`tests/contract/test_liarsdice_contract.py`) is the full reference.
 
 1. Set `has_hidden_information=True`. Registration then requires:
    - `rules_engine.public_state(state)`
@@ -402,7 +431,8 @@ chance node also supplies `opening_outcomes`. See
 
 In a simultaneous round several seats act at once, each without seeing the
 others' choice. Rock-Paper-Scissors (`src/arena/games/rps/`, with
-`tests/contract/test_rps_contract.py`) is the reference.
+`tests/contract/test_rps_contract.py`) is the reference; the scaffold's
+`--kind simultaneous` generates matching pennies.
 
 1. Set `has_simultaneous_moves=True` on the `GameDefinition`. Registration
    rejects the game unless both hooks below exist (and rejects the hooks

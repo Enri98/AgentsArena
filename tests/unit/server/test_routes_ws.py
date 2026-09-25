@@ -225,3 +225,59 @@ def test_welcome_envelope_fields() -> None:
         assert p["resume_token"] is not None
 
 
+
+
+
+def test_a_non_integer_seat_is_refused_by_the_handler_not_the_framework() -> None:
+    """FastAPI used to refuse ?seat=abc with HTTP 403 before the handler, outside
+    every rate limit; it is now an ordinary 4422 invalid_seat."""
+
+    from starlette.websockets import WebSocketDisconnect
+
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+    app.state.reject_linger_s = 0.05
+    with TestClient(app) as client:
+        match_id = client.post("/matches", json={"game_id": "tictactoe"}).json()["match_id"]
+        with client.websocket_connect(f"/matches/{match_id}/play?seat=abc") as ws:
+            try:
+                ws.receive_text()
+                raise AssertionError("expected a close")
+            except WebSocketDisconnect as exc:
+                assert (exc.code, exc.reason) == (4422, "invalid_seat")
+
+
+def test_the_unknown_endpoint_counts_against_the_per_ip_caps() -> None:
+    from starlette.websockets import WebSocketDisconnect
+
+    limiter = RateLimiter(max_ws_opens_per_ip_per_min=1)
+    app = create_app(rate_limiter=limiter)
+    app.state.reject_linger_s = 0.05
+    closes = []
+    with TestClient(app) as client:
+        for _ in range(2):
+            with client.websocket_connect("/nowhere") as ws:
+                try:
+                    ws.receive_text()
+                except WebSocketDisconnect as exc:
+                    closes.append((exc.code, exc.reason))
+    assert closes == [(4404, "unsupported_endpoint"), (4429, "connection_opens_per_ip")]
+
+
+def test_refusals_stop_lingering_past_the_server_wide_bound() -> None:
+    import time
+
+    from starlette.websockets import WebSocketDisconnect
+
+    from arena.server.routes_ws import MAX_LINGERING_REFUSALS
+
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+    app.state.reject_linger_s = 5.0
+    app.state._lingering_refusals = MAX_LINGERING_REFUSALS  # the bound is reached
+    with TestClient(app) as client:
+        started = time.monotonic()
+        with client.websocket_connect("/matches/nope/play?seat=0") as ws:
+            try:
+                ws.receive_text()
+            except WebSocketDisconnect as exc:
+                assert exc.code == 4410
+        assert time.monotonic() - started < 2.0

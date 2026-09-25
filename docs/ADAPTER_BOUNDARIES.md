@@ -1,113 +1,99 @@
-# Adapter Boundary Design
+# Adapter Boundaries
 
-This document defines the intended boundary between the pure simulation/local match code and future
-adapter infrastructure. It is a design checkpoint only; it does not introduce adapter code.
+How the layers above the simulation core talk to it, and what each may import. The import
+rules below are enforced by the architecture tests in `tests/unit/architecture/`; when this
+document and those tests disagree, the tests win and this document is wrong.
 
-## Current Stable Core
+## The layers
 
-The current reusable surface is:
-- `arena.core`: pure game abstractions, typed domain exceptions, serializers, results, and registry
-- `arena.games`: built-in deterministic perfect-information games
-- `arena.match`: pure local match execution, transcript dump/load/validation, and in-process policies
+| Layer | Package | May import (within `arena`) |
+|-------|---------|------------------------------|
+| Simulation core | `arena.core` | nothing above it |
+| Games | `arena.games.*` | `arena.core` |
+| Local match | `arena.match` | `arena.core`, `arena.games` |
+| In-process adapter | `arena.adapters.in_process` | `arena.core`, `arena.match` (not `arena.runtime`) |
+| WebSocket adapter | `arena.adapters.websocket` | `arena.core`, `arena.adapters.in_process` (payload bodies), `arena.runtime.payloads` |
+| Runtime | `arena.runtime` | `arena.core`, `arena.match`, `arena.adapters.in_process` (not `arena.adapters.websocket`) |
+| UI adapter | `arena.ui` | `arena.runtime` only |
+| CLI | `arena.cli` | `arena.core`, `arena.games`, `arena.adapters.in_process`, `arena.runtime`, `arena.ui`, `arena.agents`, and `arena.sdk` for `--server-url` |
+| Local agents | `arena.agents.ollama` | `arena.core`, `arena.games`, `arena.cli` (board renderers, the remote-seat helper); not `match`, `adapters`, `runtime`, `ui` |
+| Server | `arena.server` | everything below it except `arena.sdk` and `arena.cli` |
+| Python SDK | `arena.sdk` | `arena.core`, `arena.games`, `arena.adapters.websocket` (not `match`, `adapters.in_process`, `runtime`, `ui`, `cli`, `server`) |
+| MCP server | `arena.mcp` | `arena.sdk`, `arena.core`, `arena.games` |
+| Contract suite | `arena.testing` | `arena.core`, `arena.match` |
 
-These packages must stay free of transport, persistence, process management, UI, auth, deadlines, and
-matchmaking concerns.
+No layer imports a layer above it: nothing below `arena.server` imports it, nothing below
+`arena.sdk` imports the SDK, and nothing imports `arena.mcp`. Only `arena.server` creates
+loggers at module scope. The TypeScript SDK (`sdk-ts/`) shares no code with the Python
+packages: it speaks the wire protocol in `docs/NETWORK_PROTOCOL.md` and nothing else.
 
-## Future Adapter Direction
+## What crosses a boundary
 
-Future adapters should live outside `arena.core` and `arena.games`. A likely package boundary is:
-- `arena.adapters`: optional adapter contracts and implementations
-- `arena.adapters.local`: local process/in-memory adapters, if needed
-- `arena.adapters.transport`: future protocol-specific adapters, if introduced later
+Adapters consume boundary-safe objects, never game internals:
 
-Adapters may depend on `arena.core`, `arena.games`, and `arena.match`. The reverse dependency is not
-allowed.
+- registered `GameDefinition` objects, looked up through a `GameRegistry`;
+- configs, actions, observations, states and chance outcomes, loaded and dumped only through
+  the game's `Serializer`;
+- local match transcripts from `dump_match_transcript` (the full view) or
+  `dump_match_transcript_for_viewer` (a seat's or the public's);
+- domain exceptions (`ArenaCoreError` subclasses), whose `code`, `message` and `details` are
+  preserved as `DomainErrorPayload`.
 
-## Adapter Inputs
+Adapters never mutate domain state or build game-specific state dictionaries by hand.
 
-Adapters should consume existing boundary-safe objects instead of reaching into game internals:
-- registered `GameDefinition` objects
-- game config payloads validated by game serializers
-- observations produced by `rules_engine.observation(...)`
-- actions loaded through game serializers
-- local match transcripts produced by `dump_match_transcript(...)`
-- domain exceptions raised by rules engines and serializers
+**Everything sent to a viewer is built for that viewer** (Phase 38). A viewer is a seat or
+`None`, the public. For a hidden-information game only the server holds the full transcript;
+a seat receives `view: "seat"` payloads and a spectator `view: "public"`. Use the
+`*_for_viewer` helpers in `arena.core.public_view`, `arena.match` and `arena.runtime`; never
+send `dump_state`, `_build_snapshot` or `dump_match_transcript` output to a client directly.
 
-Adapters should not mutate domain state or construct game-specific state dictionaries by hand.
+Adapter-specific outcomes stay at the adapter layer, never in `arena.core` result types:
+disconnected agents, missed deadlines, rejected credentials and rate limits are runtime aborts
+or wire close codes.
 
-## Adapter Outputs
+## `arena.adapters.in_process`
 
-Adapters should return or emit explicit boundary payloads:
-- serialized observations, actions, configs, snapshots, or transcripts
-- domain exception metadata, preserving `code`, `message`, and `details`
-- adapter-specific status only at the adapter boundary
+The serialized payload contract for agents that run in the same process:
 
-Adapter-specific statuses must not be added to `arena.core` result types. Examples that belong only at
-the adapter layer include disconnected agents, stale submitted state, timed-out moves, and rejected
-credentials.
+- `ObservationRequestPayload`, `ActionResponsePayload`, `DomainErrorPayload`;
+- `build_observation_request(match, seat=None)` and `load_action_response(...)`;
+- `apply_payload_policy_turn(...)` for a sequential turn and
+  `apply_payload_policy_joint_turn(...)` for a simultaneous round (Phase 41), which asks every
+  acting seat from its own observation before applying the round;
+- `dump_domain_error(...)`;
+- `TypedPayloadPolicyAdapter` and `InProcessAgent`, which load typed observations and dump
+  typed actions through the game serializer.
 
-## Deferred Concerns
+It adds no networking, subprocesses, persistence, deadlines, auth or UI payloads.
 
-The following remain out of scope until an implementation plan section explicitly introduces them:
-- HTTP or WebSocket APIs
-- remote agent protocols
-- subprocess management
-- persistent transcript storage
-- clocks, deadlines, and timeout outcomes
-- authentication and authorization
-- matchmaking and tournament scheduling
-- UI render payloads
+## `arena.adapters.websocket`
 
-## First Safe Implementation Slice
+The typed wire-envelope contract: Pydantic v2 envelope models per message type, a
+discriminated union over message types, and pure `dumps` / `loads` helpers. The bodies of
+`observation_request`, `action_response` and `action_rejected` are the in-process payloads,
+reused verbatim, and transcripts ride inside `welcome`, `spectator_welcome`,
+`match_finished` and `match_aborted` as `arena.runtime.payloads` models.
 
-When adapter work begins, the first implementation should be narrow and reversible:
-- define adapter-facing payload models without adding network or storage code
-- keep payload conversion at the boundary by delegating to existing serializers
-- add contract tests proving adapters do not import from or modify `arena.core` and `arena.games`
-- preserve domain exceptions instead of translating them into transport errors inside simulation code
+It performs no I/O, holds no connection state, and imports no networking library. Deadlines,
+heartbeats and rate limits live in `arena.server`. The server and the Python SDK both depend
+on it, so the wire shape has one source.
 
-Do not add a server, database, remote process runner, timeout system, or matchmaking layer in the first
-adapter slice.
+## `arena.runtime` and `arena.ui`
 
-## Phase 28 Slice: `arena.adapters.websocket`
+`arena.runtime` coordinates matches in memory (`Arena`, `MatchSession`, lifecycle, runtime
+events, aborts) and produces the JSON-safe `dump_session_status` / `dump_runtime_transcript`
+payloads, each with an optional `viewer`. It stays deadline-free: wall-clock timeouts exist
+only in the server, which turns an expired deadline into an ordinary runtime abort
+(`turn_deadline_expired`).
 
-A second adapter, `arena.adapters.websocket`, is planned as a sibling of `arena.adapters.in_process`. It owns the typed wire-envelope contract documented in `docs/NETWORK_PROTOCOL.md`.
+`arena.ui` reshapes runtime payloads into screen-level payloads (`build_match_status`,
+`build_match_transcript`, `build_match_screen`). It exposes `state_payload` from snapshots
+and never recomputes rules.
 
-Allowed:
-- Pydantic v2 envelope models per protocol message type
-- discriminated-union message-type validation
-- pure JSON encode/decode helpers (`dumps`, `loads`)
-- re-export of `arena.adapters.in_process.ObservationRequestPayload`, `ActionResponsePayload`, and `DomainErrorPayload` as the bodies of `observation_request`, `action_response`, and `action_rejected`
+## Per-game adapter registries
 
-Not allowed:
-- importing `websockets`, `aiohttp`, `httpx`, FastAPI, or stdlib networking
-- performing any I/O (sending or receiving frames)
-- holding mutable connection state
-- enforcing timeouts, heartbeats, or rate limits (those live in `arena.server`)
-- any reference to `arena.server`, `arena.sdk`, `arena.runtime`, `arena.ui`, `arena.cli`
-
-`arena.adapters.websocket` may import `arena.core` (for serializer-derived types) and `arena.adapters.in_process` (for the payload bodies). Nothing in `arena.core`, `arena.games`, `arena.match`, `arena.runtime`, or `arena.ui` may import it.
-
-The server (`arena.server`) and SDK (`arena.sdk`) both depend on `arena.adapters.websocket` so the wire shape stays single-sourced.
-
-## Implemented Phase 18 Slice
-
-The first adapter slice is `arena.adapters.in_process`.
-
-It provides:
-- `ObservationRequestPayload`
-- `ActionResponsePayload`
-- `DomainErrorPayload`
-- `InProcessAgent`
-- `TypedPayloadPolicyAdapter`
-- `build_observation_request(...)`
-- `load_action_response(...)`
-- `apply_payload_policy_turn(...)`
-- `dump_domain_error(...)`
-
-This adapter boundary remains in-process and payload-oriented. It does not add networking,
-subprocesses, persistence, timeouts, auth, matchmaking, or UI payloads.
-
-`TypedPayloadPolicyAdapter` is a convenience wrapper over the same payload contract. It loads typed
-observations and dumps typed actions through the game serializer, but it still plugs into
-`apply_payload_policy_turn(...)` rather than introducing a second match runner.
+The CLI (`arena.cli.games`), the Ollama agents (`arena.agents.ollama._adapters`) and MCP
+(`arena.mcp.games`) each keep a registry that per-game modules register into at import time.
+A new game registers with each layer's registry; no layer grows an `if game_id == ...`
+branch. `docs/ADDING_A_GAME.md` walks through it, and
+`python -m arena.games.scaffold --kind ...` generates all three adapters.

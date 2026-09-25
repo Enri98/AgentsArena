@@ -243,3 +243,34 @@ def test_get_match_does_not_expose_match_config() -> None:
         data = client.get(f"/matches/{created['match_id']}").json()
         assert "match_config" not in data
         assert "game_config" not in data
+
+
+# ---------------------------------------------------------------------------
+# Seat URLs follow the scheme clients must use (Phase 42 audit)
+# ---------------------------------------------------------------------------
+
+
+def _seat_url(app_kwargs: dict, base_url: str = "http://testserver") -> str:
+    app = create_app(rate_limiter=RateLimiter.unlimited(), **app_kwargs)
+    with TestClient(app, base_url=base_url) as client:
+        return client.post("/matches", json={"game_id": "tictactoe"}).json()["seat_0_url"]
+
+
+def test_seat_urls_use_wss_for_a_request_over_https() -> None:
+    assert _seat_url({}, "https://arena.test").startswith("wss://arena.test/matches/")
+    assert _seat_url({}).startswith("ws://testserver/matches/")
+
+
+def test_seat_urls_follow_the_configured_public_url() -> None:
+    # Behind a TLS-terminating proxy the request arrives as plain http.
+    url = _seat_url({"public_url": "https://arena.example.com/"})
+    assert url.startswith("wss://arena.example.com/matches/")
+    assert url.endswith("/play?seat=0")
+    assert _seat_url({"public_url": "http://10.0.0.5:8080"}).startswith("ws://10.0.0.5:8080/")
+
+
+def test_a_public_url_without_a_scheme_is_refused() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        create_app(public_url="arena.example.com")

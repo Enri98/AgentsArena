@@ -1,0 +1,42 @@
+"""${Name} domain events.
+
+A chance outcome reaches clients through its events (Phase 37): a client
+cannot recompute a flip, so the event must say what happened.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+from arena.core.events import DomainEvent
+from arena.core.types import Seat
+
+
+@dataclass(frozen=True)
+class ${Name}Chose(DomainEvent):
+    """A seat chose safe or risky."""
+
+    seat: Seat
+    choice: str
+
+
+@dataclass(frozen=True)
+class ${Name}CoinFlipped(DomainEvent):
+    """The coin for ``seat``'s risky choice landed."""
+
+    seat: Seat
+    heads: bool
+
+
+@dataclass(frozen=True)
+class ${Name}Scored(DomainEvent):
+    seat: Seat
+    points: int
+
+
+__all__: Sequence[str] = [
+    "${Name}Chose",
+    "${Name}CoinFlipped",
+    "${Name}Scored",
+]

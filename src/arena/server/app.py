@@ -55,6 +55,19 @@ async def _close_quietly(ws: object, code: int, reason: str) -> None:
         pass
 
 
+def check_public_url(url: str) -> None:
+    """Raise ``ValueError`` unless ``url`` is an http(s) URL with a host and no
+    query or fragment (seat URLs are built by appending a path to it)."""
+
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError(f"public URL {url!r} must be http:// or https:// with a host")
+    if parts.query or parts.fragment:
+        raise ValueError(f"public URL {url!r} must have no query or fragment")
+
+
 def create_app(
     game_registry=None,
     *,
@@ -64,6 +77,7 @@ def create_app(
     max_turns_per_match: int | None = None,
     transcript_store: TranscriptStore | None = None,
     client_ip_header: str | None = None,
+    public_url: str | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -89,7 +103,16 @@ def create_app(
         A request header carrying the client address, set by a trusted reverse
         proxy (``Fly-Client-IP``). Rate limits bucket by it instead of the TCP
         peer. Leave unset unless the proxy is the only way in.
+    public_url:
+        The server's public base URL (``https://arena.example.com``). The seat
+        URLs ``POST /matches`` returns are built on it (``wss://`` for https).
+        Without it they follow the request (``Host`` header, and ``wss://`` when
+        the request came over https), which is wrong behind a TLS-terminating
+        proxy that forwards plain http.
     """
+
+    if public_url is not None:
+        check_public_url(public_url)
 
     if game_registry is None:
         from arena.games import build_default_registry
@@ -113,6 +136,7 @@ def create_app(
     app = FastAPI(title="AgentsArena", version="0.1.0", lifespan=lifespan)
     app.state.transcript_store = store
     app.state.client_ip_header = client_ip_header or None
+    app.state.public_url = public_url.rstrip("/") if public_url else None
 
     limiter = rate_limiter if rate_limiter is not None else RateLimiter()
 

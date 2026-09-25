@@ -1,0 +1,67 @@
+"""Terminal adapter for ${Name}: renders the viewer's state, parses a choice."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from arena.cli.games._registry import CliGameAdapter, register_cli_adapter
+from arena.games.${name}.actions import ${Name}Action
+from arena.games.${name}.config import ${Name}Config
+from arena.games.${name}.definition import ${NAME}_GAME_ID
+
+
+def render_state_plain(state_payload: Mapping[str, Any]) -> str:
+    """One line per field of the state view this viewer was sent."""
+
+    lines = ["${Name}:"]
+    lines += [f"  {key}: {value}" for key, value in state_payload.items()]
+    return "\n".join(lines)
+
+
+def render_state(state_payload: Mapping[str, Any]) -> str:
+    """The coloured renderer; plain until the game draws something better."""
+
+    return render_state_plain(state_payload)
+
+
+def parse_input(line: str, observation: Any) -> ${Name}Action | None:
+    """A legal choice typed in full or by an unambiguous prefix, else None."""
+
+    typed = line.strip().lower()
+    if not typed:
+        return None
+    legal: tuple[${Name}Action, ...] = observation.legal_actions
+    for action in legal:
+        if action.choice == typed:
+            return action
+    matches = [action for action in legal if action.choice.startswith(typed)]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _parse_scripted(spec: str) -> list[${Name}Action]:
+    """Comma-separated choices, e.g. ``"${first_choice},${first_choice}"``."""
+
+    parts = [part.strip() for part in spec.split(",")]
+    return [${Name}Action(choice=part) for part in parts if part]
+
+
+def _config_from_args(args: Any) -> ${Name}Config:
+    # The defaults. To make the game configurable from the command line, add
+    # flags to arena.cli.play.__main__ and read them here.
+    return ${Name}Config()
+
+
+register_cli_adapter(
+    CliGameAdapter(
+        game_id=${NAME}_GAME_ID,
+        renderer=render_state,
+        plain_renderer=render_state_plain,
+        human_parser=parse_input,
+        scripted_parser=_parse_scripted,
+        config_factory=_config_from_args,
+    )
+)
+
+
+__all__: tuple[str, ...] = ("parse_input", "render_state", "render_state_plain")

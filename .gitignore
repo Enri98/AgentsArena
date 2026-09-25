@@ -9,3 +9,7 @@ out/
 .claude/
 .codex/
 ignored/
+# Python packaging
+build/
+dist/
+*.egg-info/

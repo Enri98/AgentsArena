@@ -1,0 +1,26 @@
+"""Validated configuration for ${Name}."""
+
+from __future__ import annotations
+
+from typing import Sequence
+
+from pydantic import Field
+
+from arena.core.config import BaseGameConfig
+
+DEFAULT_TARGET = 6
+MAX_TARGET = 50
+
+
+class ${Name}Config(BaseGameConfig):
+    """The first seat to score ``target`` points wins.
+
+    Never put a random seed here: the config is sent to both seats and embedded
+    in every snapshot, so a seat could predict every flip. Chance comes from the
+    match's generator (Phase 37).
+    """
+
+    target: int = Field(default=DEFAULT_TARGET, ge=1, le=MAX_TARGET)
+
+
+__all__: Sequence[str] = ["DEFAULT_TARGET", "MAX_TARGET", "${Name}Config"]

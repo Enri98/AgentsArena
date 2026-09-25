@@ -698,6 +698,17 @@ def redact_match_transcript(
 _dump_domain_event = dump_domain_event
 
 
+def dump_rule_result(result: RuleResult | None) -> JSONMapping | None:
+    """A rule result as JSON: ``{"result_type": "Win", "payload": {"seat": 0}}``.
+
+    The shape a transcript turn's ``result`` has; the server sends the same in
+    ``match_finished.result`` and ``match_state.result``.
+    """
+
+    payload = _dump_rule_result(result)
+    return None if payload is None else payload.model_dump(mode="json")
+
+
 def _dump_rule_result(result: RuleResult | None) -> MatchResultPayload | None:
     if result is None:
         return None

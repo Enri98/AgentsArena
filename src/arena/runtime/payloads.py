@@ -149,6 +149,10 @@ def _check_envelope(
             raise ValueError("a seat view names the seat it was built for")
     elif viewer_seat is not None:
         raise ValueError(f"a {view!r} view has no viewer_seat")
+    if view != VIEW_FULL and abort is not None and abort.cause_message is not None:
+        # The text of an exception can carry anything, an agent's reasoning
+        # about its own hand included: only the full view keeps it.
+        raise ValueError(f"a {view!r} view carries no abort cause_message")
 
 
 class RuntimeSessionStatusPayload(BaseModel):

@@ -1,0 +1,42 @@
+"""Immutable ${Name} game state."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+from arena.core.types import Seat
+
+VALID_SEATS = (0, 1)
+
+
+@dataclass(frozen=True)
+class ${Name}State:
+    """The minimum authoritative state.
+
+    ``flip_pending`` is True between a risky choice and its coin flip: the
+    state is then a chance node, and no seat may act until the flip resolves.
+    Never keep a random generator here: state is broadcast in every snapshot.
+    """
+
+    scores: tuple[int, int]
+    target: int
+    seat: Seat = 0
+    flip_pending: bool = False
+
+    def __post_init__(self) -> None:
+        if len(self.scores) != 2 or any(
+            type(score) is not int or score < 0 for score in self.scores
+        ):
+            raise ValueError("scores must be two non-negative ints")
+        if type(self.target) is not int or self.target < 1:
+            raise ValueError("target must be a positive int")
+        if type(self.seat) is not int or self.seat not in VALID_SEATS:
+            raise ValueError("seat must be 0 or 1")
+        if type(self.flip_pending) is not bool:
+            raise ValueError("flip_pending must be a bool")
+        if self.flip_pending and max(self.scores) >= self.target:
+            raise ValueError("no coin is flipped once the game is over")
+
+
+__all__: Sequence[str] = ["VALID_SEATS", "${Name}State"]

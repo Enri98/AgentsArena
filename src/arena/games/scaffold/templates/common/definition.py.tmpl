@@ -1,0 +1,57 @@
+"""Registry-facing ${Name} definition and registration helpers."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+
+from arena.core.game_definition import GameDefinition
+from arena.core.registry import GameRegistry
+from arena.core.results import RuleResult
+from arena.games.${name}.actions import ${Name}Action
+from arena.games.${name}.config import ${Name}Config
+from arena.games.${name}.observation import ${Name}Observation
+from arena.games.${name}.rules import ${Name}RulesEngine
+from arena.games.${name}.serializer import ${Name}Serializer
+from arena.games.${name}.state import ${Name}State
+
+${NAME}_GAME_ID = "${name}"
+
+
+def build_${name}_game_definition() -> GameDefinition[
+    ${Name}Config,
+    ${Name}State,
+    ${Name}Action,
+    ${Name}Observation,
+    RuleResult,
+]:
+    """Build the concrete registry-facing ${Name} definition."""
+
+    return GameDefinition(
+        game_id=${NAME}_GAME_ID,
+        display_name="${Name}",
+        config_type=${Name}Config,
+        state_type=${Name}State,
+        action_type=${Name}Action,
+        observation_type=${Name}Observation,
+        rules_engine=${Name}RulesEngine(),
+        serializer=${Name}Serializer(),
+        result_type=RuleResult,
+${flags}
+    )
+
+
+${Name}GameDefinition = build_${name}_game_definition()
+
+
+def register_${name}(registry: GameRegistry) -> None:
+    """Register ${Name} in a supplied game registry."""
+
+    registry.register(${Name}GameDefinition)
+
+
+__all__: Sequence[str] = [
+    "${NAME}_GAME_ID",
+    "${Name}GameDefinition",
+    "build_${name}_game_definition",
+    "register_${name}",
+]

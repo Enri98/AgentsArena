@@ -1,65 +1,56 @@
 # Match / Arena Handoff
 
-Cross-session handoff note. **Last updated 2026-09-22** — rewritten from an append-only log into a
-current-state document. Historical phase decisions are preserved in the appendix.
+Cross-session handoff note. **Last updated 2026-09-25**: a current-state document. Historical
+phase decisions are kept in the appendix.
 
 ## 1. Current state
 
-**v1 is complete and green.** Verified 2026-09-22 on `main` (clean tree, `55ada5a`):
-
-- `ruff check .` — all checks passed
-- `pytest -q` — **675 passed**
-- ~12.8k LOC in `src/`, ~13.3k in `tests/` across 86 test files
-
-Eleven layers ship, with import direction enforced by architecture tests:
+**v1 (Phases 0-35) and the v2 roadmap (Phases 36-42) are complete.** Wire `schema_version` 4;
+decoders accept 1-4. Every layer's import direction is enforced by architecture tests
+(`docs/ADAPTER_BOUNDARIES.md` has the table).
 
 | Layer | State |
 |-------|-------|
-| `arena.core` | Pure simulation abstractions, typed domain exceptions, serializers, registry, results, observations, events |
-| `arena.games.{connect4,tictactoe,nim}` | Three complete deterministic perfect-information vertical slices |
-| `arena.games.scaffold` | `python -m arena.games.scaffold` generates a new game package skeleton |
-| `arena.match` | Immutable local match execution, turn records, snapshots, transcript dump/load/validate |
-| `arena.adapters.in_process` | Serialized in-process payload contract + typed convenience adapter |
-| `arena.adapters.websocket` | Pure typed wire envelopes, no I/O |
-| `arena.runtime` | In-memory arena/session coordination, lifecycle, runtime events, abort metadata, JSON-safe payloads. Deadline-free |
-| `arena.ui` | Pure adapter producing deterministic screen-level payloads |
-| `arena.cli` | Terminal renderer, replay viewer, interactive driver (`human` / `scripted:` / `ollama:<model>`), `--server-url` remote play |
-| `arena.agents.ollama` | Stdlib HTTP client, `OllamaAgent` with retry-with-feedback, per-game prompt builders, `probe_models` |
-| `arena.server` | FastAPI + WebSocket, `MatchRegistry`, per-turn deadlines, heartbeats, disconnect grace, resume tokens, structured JSON logging |
-| `arena.sdk` | Reference Python client (callback + loop forms), `LocalSession` helper, reconnect helper. Silent by default |
-| `arena.mcp` | MCP wrapper over the SDK. Five tools, stdio + HTTP/SSE transports, per-game action JSON schemas |
+| `arena.core` | Pure simulation abstractions: chance nodes, per-seat views, joint (simultaneous) turns |
+| `arena.games.*` | Connect 4, Tic-Tac-Toe, Nim, Pig (chance), Liar's Dice (hidden information and chance), Rock-Paper-Scissors (simultaneous) |
+| `arena.games.scaffold` | `--kind basic\|chance\|hidden\|simultaneous`; the working kinds generate a playable game, adapters and a contract test |
+| `arena.match` | Immutable matches, turn records (action, chance, joint), per-viewer transcripts |
+| `arena.adapters.*` | In-process payload contract; pure wire envelopes |
+| `arena.runtime`, `arena.ui` | Deadline-free coordination and screen payloads, per viewer |
+| `arena.cli`, `arena.agents.ollama` | Terminal play and replay; local Ollama agents for every game |
+| `arena.server` | FastAPI + WebSocket: spectators, rate limits, deadlines, heartbeats, resume, per-viewer frames, public transcripts in memory / files / SQLite |
+| `arena.sdk`, `sdk-ts/` | Python and TypeScript clients, both tested against the real server |
+| `arena.mcp` | MCP wrapper over the SDK (stdio, HTTP/SSE) |
 
-Deployment artifacts exist but have never been used against a real host: `Dockerfile`, `fly.toml`,
-`.dockerignore`, `docs/DEPLOYMENT.md`.
+`docs/NETWORK_PROTOCOL.md` was consolidated at v4 in Phase 42, every claim checked against the
+code; superseded v1-v3 shapes are in its appendices.
 
 ## 2. Known gaps
 
-These do not invalidate the v1 claim. They all block a public launch.
-
-1. **Protocol §13 rate limits are specified but not implemented.** No per-IP connection cap, no
-   match-creation throttle, no per-match connection cap; close code `4429` appears nowhere in
-   `src/`. With no auth in v1, this is the top pre-deployment item.
-2. **No CI.** No `.github/` workflow exists.
-3. **Never deployed.** `fly.toml` still carries the placeholder `app = "arena-server"`.
-4. **SDK not on PyPI.** Joining a match requires cloning the repo — the largest gap between the
-   shipped code and the goal of an open arena.
+1. **Never deployed.** `fly.toml` still carries the placeholder `app = "arena-server"`; set
+   `ARENA_PUBLIC_URL` when it gets a hostname.
+2. **Not published.** Neither `agents-arena` (PyPI) nor `@agents-arena/sdk` (npm) is released, so
+   joining a match still needs the repository.
+3. **No type checker in CI.** `mypy` reports annotation-precision findings across the codebase;
+   a follow-up branch (`library-basics`) is working through them.
 
 ## 3. Locked decisions (still binding)
 
 - WebSocket only; JSON wire format; not configurable.
-- Per-turn deadlines live in `arena.server`; `arena.runtime` stays deadline-free.
-- Match identity is `secrets.token_urlsafe(16)`; possession of the id is the only v1 capability.
-- Creator becomes seat 0; joiner becomes seat 1.
-- `MatchRegistry` from day one; no single-hardcoded-match intermediate.
-- SDK ships both `connect(...)` callback form and `Session` loop form.
-- SDK ships game schemas directly; no handshake-time fetching.
-- Structured JSON logging only in `arena.server`; lower layers stay quiet.
-- Runtime payload `schema_version` is pinned at `1`; incompatible changes must bump it explicitly.
-- `docs/NETWORK_PROTOCOL.md` is the language-agnostic source of truth; the Python SDK is a
-  reference implementation, not the spec.
-- **New games register with each layer's adapter registry** (`arena.cli.games`, `arena.mcp.games`,
-  `arena.agents.ollama._adapters`) rather than adding dispatch branches. See
-  `docs/ADDING_A_GAME.md`.
+- Per-turn deadlines, heartbeats and rate limits live in `arena.server`; `arena.runtime` stays
+  deadline-free.
+- Match identity is `secrets.token_urlsafe(16)`; possession of the id is the only capability.
+- Seats are assigned by URL; a running match's seat is reachable only with its resume token.
+- Everything sent to a viewer is built for that viewer; only the server holds a
+  hidden-information game's full transcript.
+- A random seed never goes in config or state; the match owns the generator.
+- Structured JSON logging only in `arena.server`; lower layers and the SDKs stay quiet.
+- Wire and runtime payloads are at `schema_version` 4; an incompatible change bumps it, and
+  `GET /schemas/payloads` is pinned per version by a golden file.
+- `docs/NETWORK_PROTOCOL.md` is the language-agnostic source of truth; the SDKs are reference
+  implementations.
+- **New games register with each layer's adapter registry** rather than adding dispatch
+  branches (`docs/ADDING_A_GAME.md`).
 
 ## 4. Open decisions blocking the next phase
 
@@ -130,8 +121,15 @@ each with its own deadline, retries and grace; the round commits as one `turn_co
 no throw is visible to anyone before both are in. Adversarial review found a double-abort race
 (fixed: one shielded abort) and cross-seat turn-id blocking (fixed: per-seat turn ids).
 
-Active phase: **42**: docs reconciliation, scaffold templates for hidden-information,
-stochastic and simultaneous games, and a packaged TypeScript SDK.
+**Phase 42 is complete** (2026-09-25): a packaged TypeScript SDK (`sdk-ts/`), scaffold kinds that
+generate working chance, hidden-information and simultaneous games, and the docs reconciled with
+the shipped v4 contract. An audit of the protocol doc against the code found about 30 wrong
+claims, and four places where the code, not the doc, was wrong: `result` was always empty, a seat
+that stopped reading silently lost frames, malformed frames were answered without limit, and seat
+URLs were always `ws://` behind TLS. All four were fixed in code. Review also found that a Node
+client saw `1006` instead of close codes sent before `hello` (the server now reads the first frame
+before closing), and that the hidden scaffold's contract never checked seat 0's `keep` (the suite
+now accepts `reveals(state, action)`).
 
 The Phase 36-38 specs were revised on 2026-09-22 after an adversarial review that checked every
 claim against the code. Three findings are worth carrying forward, because each is easy to

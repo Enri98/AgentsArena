@@ -21,7 +21,7 @@ from arena.adapters.websocket import (
 )
 from arena.adapters.websocket.errors import SchemaVersionMismatch, WireProtocolError
 from arena.adapters.websocket.messages import ErrorBody
-from arena.server.config import HEARTBEAT_MAX_MISSES, HELLO_TIMEOUT_S
+from arena.server.config import HEARTBEAT_MAX_MISSES, HELLO_TIMEOUT_S, REJECT_LINGER_S
 from arena.server.errors import MatchNotFound
 from arena.server.rate_limits import (
     CLOSE_RATE_LIMITED,
@@ -106,6 +106,36 @@ async def _close(ws: WebSocket, code: int, reason: str) -> None:
         pass
 
 
+#: Refused connections that may linger for their first frame at once, server
+#: wide. A refusal holds no connection slot, so without a bound one client could
+#: hold any number of sockets open for REJECT_LINGER_S; past it, refusals close
+#: at once (a client may then see 1006 rather than the code).
+MAX_LINGERING_REFUSALS = 64
+
+
+async def _refuse(ws: WebSocket, code: int, reason: str) -> None:
+    """Accept, read the client's first frame, then close with ``code``.
+
+    Used before a hello has been read. Closing at once raced the hello the
+    client sends on open: the frame then arrived at a closed socket, and Node's
+    WebSocket reported 1006 instead of the code. The wait is short and bounded.
+    """
+
+    await ws.accept()
+    state = ws.app.state
+    lingering = getattr(state, "_lingering_refusals", 0)
+    if lingering < MAX_LINGERING_REFUSALS:
+        state._lingering_refusals = lingering + 1
+        linger = getattr(state, "reject_linger_s", REJECT_LINGER_S)
+        try:
+            await asyncio.wait_for(ws.receive(), linger)
+        except Exception:
+            pass  # timed out, disconnected, or anything else: close regardless
+        finally:
+            state._lingering_refusals -= 1
+    await _close(ws, code, reason)
+
+
 def _client_ip(ws: WebSocket) -> str:
     """Source address for rate-limit bucketing (protocol §13); see ``client_address``."""
 
@@ -170,7 +200,7 @@ def _still_registered(ws: WebSocket, match_id: str) -> bool:
 
 
 @router.websocket("/matches/{match_id}/play")
-async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
+async def play_handler(ws: WebSocket, match_id: str, seat: str = "") -> None:
     """Primary play channel (protocol §5/§8/§10).
 
     Thin wrapper holding the protocol §13 per-IP slot for the lifetime of the
@@ -178,10 +208,13 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
     The per-match slot is claimed inside, once the hello is valid.
     """
 
+    # Parsed here rather than typed as int: FastAPI would refuse a bad value
+    # with HTTP 403 before this handler ran, outside every rate limit.
+    seat_index = int(seat) if seat in ("0", "1") else -1
     limiter: RateLimiter | None = getattr(ws.app.state, "rate_limiter", None)
     slot = _MatchSlot(limiter, match_id, spectator=False)
     if limiter is None:
-        await _play_session(ws, match_id, seat, slot)
+        await _play_session(ws, match_id, seat_index, slot)
         return
 
     ip = _client_ip(ws)
@@ -191,17 +224,16 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
         logger.warning(
             "rate_limited",
             match_id=match_id,
-            seat=seat,
+            seat=seat_index,
             schema_version=1,
             scope=exc.scope,
             detail=exc.message,
         )
-        await ws.accept()
-        await _close(ws, _CLOSE_RATE_LIMITED, exc.scope)
+        await _refuse(ws, _CLOSE_RATE_LIMITED, exc.scope)
         return
 
     try:
-        await _play_session(ws, match_id, seat, slot)
+        await _play_session(ws, match_id, seat_index, slot)
     finally:
         slot.release()
         limiter.release_ip(ip=ip)
@@ -217,14 +249,12 @@ async def _play_session(
     try:
         match: Match = registry.get(match_id)
     except MatchNotFound:
-        await ws.accept()
-        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_not_found")
+        await _refuse(ws, _CLOSE_MATCH_NOT_FOUND, "match_not_found")
         return
 
     # 2. Validate seat param.
     if seat not in (0, 1):
-        await ws.accept()
-        await _close(ws, _CLOSE_MALFORMED, "invalid_seat")
+        await _refuse(ws, _CLOSE_MALFORMED, "invalid_seat")
         return
 
     # 3. Accept the WebSocket.
@@ -662,8 +692,7 @@ async def spectate_handler(ws: WebSocket, match_id: str) -> None:
             scope=exc.scope,
             detail=exc.message,
         )
-        await ws.accept()
-        await _close(ws, _CLOSE_RATE_LIMITED, exc.scope)
+        await _refuse(ws, _CLOSE_RATE_LIMITED, exc.scope)
         return
 
     try:
@@ -680,8 +709,7 @@ async def _spectate_session(ws: WebSocket, match_id: str, slot: _MatchSlot) -> N
     try:
         match: Match = registry.get(match_id)
     except MatchNotFound:
-        await ws.accept()
-        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_not_found")
+        await _refuse(ws, _CLOSE_MATCH_NOT_FOUND, "match_not_found")
         return
 
     await ws.accept()
@@ -853,5 +881,19 @@ async def unknown_endpoint_handler(ws: WebSocket, path: str) -> None:
     tell apart from a proxy rejecting it.
     """
 
-    await ws.accept()
-    await _close(ws, _CLOSE_UNSUPPORTED_ENDPOINT, "unsupported_endpoint")
+    # Counted like any other connection: an unlimited endpoint would let a
+    # client open sockets past every per-IP cap.
+    limiter: RateLimiter | None = getattr(ws.app.state, "rate_limiter", None)
+    if limiter is not None:
+        ip = _client_ip(ws)
+        try:
+            limiter.acquire_ip(ip=ip)
+        except RateLimitExceeded as exc:
+            await _refuse(ws, _CLOSE_RATE_LIMITED, exc.scope)
+            return
+        try:
+            await _refuse(ws, _CLOSE_UNSUPPORTED_ENDPOINT, "unsupported_endpoint")
+        finally:
+            limiter.release_ip(ip=ip)
+        return
+    await _refuse(ws, _CLOSE_UNSUPPORTED_ENDPOINT, "unsupported_endpoint")

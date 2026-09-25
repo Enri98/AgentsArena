@@ -1,0 +1,170 @@
+"""${Name} rules engine: perfect information with chance nodes.
+
+Seats take turns. On its turn a seat chooses ``safe`` (score 1 point) or
+``risky`` (a coin is flipped: heads scores 3, tails nothing). The first seat
+to reach the target wins.
+
+A risky choice leaves the state at a **chance node** (``is_chance_node``).
+The match layer resolves it at once: ``sample_chance`` draws the outcome from
+the match's generator, ``apply_chance`` applies it, and the transcript records
+the outcome so a replay never re-rolls. Replace the rules with your game's;
+keep the structure.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Sequence
+
+from arena.core.actions import Action
+from arena.core.chance import ChanceRng
+from arena.core.events import DomainEvent
+from arena.core.exceptions import (
+    ChanceResolutionError,
+    GameFinished,
+    IllegalAction,
+    WrongPlayer,
+)
+from arena.core.results import RuleResult, Win
+from arena.core.rules_engine import TransitionResult
+from arena.core.types import Seat
+from arena.games.${name}.actions import CHOICES, ${Name}Action
+from arena.games.${name}.config import ${Name}Config
+from arena.games.${name}.events import (
+    ${Name}Chose,
+    ${Name}CoinFlipped,
+    ${Name}Scored,
+)
+from arena.games.${name}.observation import ${Name}Observation
+from arena.games.${name}.outcomes import ${Name}Flip
+from arena.games.${name}.state import VALID_SEATS, ${Name}State
+
+SAFE_POINTS = 1
+HEADS_POINTS = 3
+
+#: The rules in a few sentences, for agents (see arena.agents.ollama.${name}).
+RULES_SUMMARY = (
+    "You are playing ${Name}, a two-player race to a target score.\n"
+    f"On your turn choose 'safe' (score {SAFE_POINTS}) or 'risky' (a coin is flipped: "
+    f"heads scores {HEADS_POINTS}, tails scores nothing).\n"
+    "The first player to reach the target wins. Take risks when you are behind."
+)
+
+_ALL_ACTIONS = tuple(${Name}Action(choice=choice) for choice in CHOICES)
+
+
+class ${Name}RulesEngine:
+    """Rules engine for ${Name}."""
+
+    def initial_state(self, config: ${Name}Config) -> ${Name}State:
+        return ${Name}State(scores=(0, 0), target=config.target)
+
+    def current_seat(self, state: ${Name}State) -> Seat:
+        # At a finished state: the winner.
+        return state.seat
+
+    # -- actions -----------------------------------------------------------
+
+    def legal_actions(
+        self, state: ${Name}State, seat: Seat
+    ) -> tuple[${Name}Action, ...]:
+        if self.is_terminal(state) or self.is_chance_node(state):
+            return ()
+        return _ALL_ACTIONS if seat == state.seat else ()
+
+    def validate_action(self, state: ${Name}State, seat: Seat, action: Action) -> None:
+        if self.is_terminal(state):
+            raise GameFinished("The game is already over.")
+        if self.is_chance_node(state):
+            raise IllegalAction("The coin is in the air.")
+        if type(seat) is not int or seat != state.seat:
+            raise WrongPlayer("It is not this seat's turn.", details={"seat": seat})
+        if not isinstance(action, ${Name}Action):
+            raise IllegalAction(
+                "${Name} takes ${Name}Action moves.",
+                details={"action_type": type(action).__name__},
+            )
+
+    def apply_action(
+        self, state: ${Name}State, seat: Seat, action: Action
+    ) -> TransitionResult[${Name}State, DomainEvent, RuleResult | None]:
+        # Revalidate: callers are not trusted to have checked.
+        self.validate_action(state, seat, action)
+        assert isinstance(action, ${Name}Action)
+        chose = ${Name}Chose(seat=seat, choice=action.choice)
+        if action.choice == "risky":
+            # Nature moves next: the state is now a chance node.
+            next_state = replace(state, flip_pending=True)
+            return TransitionResult(state=next_state, events=(chose,), result=None)
+        next_state, scored = self._score(state, SAFE_POINTS)
+        return TransitionResult(
+            state=next_state, events=(chose, scored), result=self.result(next_state)
+        )
+
+    # -- chance (Phase 37) -------------------------------------------------
+
+    def is_chance_node(self, state: ${Name}State) -> bool:
+        return state.flip_pending
+
+    def sample_chance(
+        self, state: ${Name}State, rng: ChanceRng
+    ) -> tuple[${Name}Flip, ChanceRng]:
+        bit, rng = rng.draw(2)
+        return ${Name}Flip(heads=bit == 1), rng
+
+    def apply_chance(
+        self, state: ${Name}State, outcome: object
+    ) -> TransitionResult[${Name}State, DomainEvent, RuleResult | None]:
+        # Revalidate: a replayed transcript supplies the outcome.
+        if not self.is_chance_node(state):
+            raise ChanceResolutionError("No coin is in the air.")
+        if not isinstance(outcome, ${Name}Flip) or type(outcome.heads) is not bool:
+            raise ChanceResolutionError("A flip is heads or tails.")
+        flipped = ${Name}CoinFlipped(seat=state.seat, heads=outcome.heads)
+        next_state, scored = self._score(
+            replace(state, flip_pending=False), HEADS_POINTS if outcome.heads else 0
+        )
+        return TransitionResult(
+            state=next_state, events=(flipped, scored), result=self.result(next_state)
+        )
+
+    def _score(
+        self, state: ${Name}State, points: int
+    ) -> tuple[${Name}State, ${Name}Scored]:
+        """Add ``points`` for the seat to move, then pass the turn unless it won."""
+        scores = list(state.scores)
+        scores[state.seat] += points
+        next_state = replace(state, scores=(scores[0], scores[1]))
+        if not self.is_terminal(next_state):
+            next_state = replace(next_state, seat=1 - state.seat)
+        return next_state, ${Name}Scored(seat=state.seat, points=points)
+
+    # -- outcome -----------------------------------------------------------
+
+    def is_terminal(self, state: ${Name}State) -> bool:
+        return max(state.scores) >= state.target
+
+    def result(self, state: ${Name}State) -> RuleResult | None:
+        if not self.is_terminal(state):
+            return None
+        return Win(seat=0 if state.scores[0] >= state.target else 1)
+
+    def observation(
+        self, state: ${Name}State, seat: Seat
+    ) -> ${Name}Observation:
+        if type(seat) is not int or seat not in VALID_SEATS:
+            raise WrongPlayer("Only seats 0 and 1 play.", details={"seat": seat})
+        return ${Name}Observation(
+            seat=seat,
+            scores=state.scores,
+            target=state.target,
+            legal_actions=self.legal_actions(state, seat),
+        )
+
+
+__all__: Sequence[str] = [
+    "HEADS_POINTS",
+    "RULES_SUMMARY",
+    "SAFE_POINTS",
+    "${Name}RulesEngine",
+]

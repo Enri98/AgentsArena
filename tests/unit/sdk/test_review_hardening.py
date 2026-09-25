@@ -107,3 +107,29 @@ def test_unknown_and_unhandled_message_types_are_skipped() -> None:
     session = Session(ws, WelcomeEnvelope.model_validate(json.loads(_welcome())).payload)  # type: ignore[arg-type]
     event = asyncio.run(session.recv())
     assert isinstance(event, ErrorEvent)
+
+
+def test_hello_is_readable_by_every_server_version_the_sdk_supports(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A v3 server refuses an envelope stamped 4 before it reads the supported
+    list, so the hello carries the lowest listed version; later frames carry the
+    negotiated one."""
+
+    fake = _FakeWs([_welcome()])
+
+    async def fake_connect(url: str, **kwargs: Any) -> _FakeWs:
+        return fake
+
+    monkeypatch.setattr(session_module, "_ws_connect", fake_connect)
+
+    async def run() -> None:
+        session = await Session.connect("ws://x/matches/m/play?seat=0", 0)
+        await session.send_action({"cell": 0})
+
+    asyncio.run(run())
+    hello, action = (json.loads(frame) for frame in fake.sent)
+    assert hello["type"] == "hello"
+    assert hello["schema_version"] == min(session_module.SUPPORTED_SCHEMA_VERSIONS) == 1
+    assert action["type"] == "action_response"
+    assert action["schema_version"] == WIRE_SCHEMA_VERSION

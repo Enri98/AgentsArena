@@ -1,0 +1,25 @@
+"""${Name} action model: every move is one named choice."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+from arena.core.actions import Action
+
+#: Every choice a seat can make, in the order legal_actions lists them.
+CHOICES: tuple[str, ...] = ${choices}
+
+
+@dataclass(frozen=True)
+class ${Name}Action(Action):
+    """One move: a choice from :data:`CHOICES`."""
+
+    choice: str
+
+    def __post_init__(self) -> None:
+        if type(self.choice) is not str or self.choice not in CHOICES:
+            raise ValueError(f"choice must be one of {CHOICES}")
+
+
+__all__: Sequence[str] = ["CHOICES", "${Name}Action"]

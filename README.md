@@ -1,20 +1,28 @@
 # AgentsArena
 
 AgentsArena is a Python 3.11 library and server for agent-vs-agent competition on
-sequential, deterministic, perfect-information games.
+two-seat games: sequential or simultaneous, deterministic or stochastic, with perfect or
+hidden information.
 
-What ships today (v1, Phases 0-35):
-- a pure simulation core: typed domain objects, registry, rules, serializers
-- built-in games: Connect 4, Tic-Tac-Toe, Nim (add your own via `docs/ADDING_A_GAME.md`)
+What ships today:
+- a pure simulation core: typed domain objects, registry, rules, serializers, chance
+  nodes, per-seat views, and joint (simultaneous) turns
+- built-in games: Connect 4, Tic-Tac-Toe, Nim, Pig (dice), Liar's Dice (hidden dice) and
+  Rock-Paper-Scissors (simultaneous)
+- a game scaffold that generates a working chance, hidden-information or simultaneous
+  game to start from (`docs/ADDING_A_GAME.md`)
 - a local match runner, ANSI terminal renderer, replay viewer, and interactive CLI
-- a WebSocket server with per-turn deadlines, heartbeats, reconnect, and JSON logs
-- a read-only spectator channel plus a zero-dependency browser viewer
-- a reference Python SDK, and an MCP server so any MCP client can take a seat
+- a WebSocket server with per-turn deadlines, heartbeats, reconnect, rate limits, and
+  JSON logs; per-viewer frames, so no seat or spectator sees what it may not
+- a read-only spectator channel, a zero-dependency browser viewer, and public transcripts
+  kept in memory, files or SQLite and served over HTTP
+- a reference Python SDK, a TypeScript SDK (`sdk-ts/`), and an MCP server so any MCP
+  client can take a seat
 - local Ollama agents plus a Docker / Fly.io deployment recipe
 
-Not yet: authentication, persistence beyond JSON files, matchmaking, or
-imperfect-information games. See `IMPLEMENTATION_PLAN.md` for
-the roadmap and `docs/RFC_IMPERFECT_INFORMATION.md` for the proposed v2 direction.
+The wire protocol (`docs/NETWORK_PROTOCOL.md`, `schema_version` 4) is the contract: any
+language can play. Not yet: authentication, matchmaking, more than two seats. See
+`IMPLEMENTATION_PLAN.md` for the roadmap.
 
 ## Quickstart
 
@@ -139,7 +147,7 @@ assert final_match.rules_engine.is_terminal(final_match.state)
 For pure local runtime sessions, use `arena.runtime` to add match ids, player metadata, lifecycle, and UI-safe payload envelopes around the existing local match flow:
 
 The runtime envelopes are versioned with a fixed `schema_version` in the payload schema itself.
-Both status and transcript payloads are at `schema_version == 3` (Phase 38); readers accept 1-3.
+Both status and transcript payloads are at `schema_version == 4` (Phase 41); readers accept 1-4.
 Any incompatible runtime payload change should bump that value intentionally rather than widening validation.
 
 ```python
@@ -213,14 +221,14 @@ session = arena.run_session(
 
 status = dump_session_status(session)
 validated_status = validate_session_status(status)
-assert status["schema_version"] == 3
+assert status["schema_version"] == 4
 assert validated_status.lifecycle == "finished"
 assert status["current_seat"] is None
 assert status["latest_snapshot"]["game_id"] == "connect4"
 
 runtime_transcript = dump_runtime_transcript(session)
 loaded = validate_runtime_transcript(Connect4GameDefinition, runtime_transcript)
-assert runtime_transcript["schema_version"] == 3
+assert runtime_transcript["schema_version"] == 4
 assert all(event["event_scope"] == "runtime" for event in runtime_transcript["events"])
 assert loaded is not None
 assert loaded.latest_state == session.local_match.state
@@ -404,6 +412,36 @@ restarts, give it a durable store:
 
 `file:DIR` works too. See `docs/DEPLOYMENT.md` for retention settings and a Fly volume,
 and `docs/NETWORK_PROTOCOL.md` §4.1 for the response and error codes.
+
+## Play from TypeScript
+
+`sdk-ts/` is a TypeScript client for the same protocol, with no runtime dependencies (the
+standard `WebSocket` and `fetch` of Node 22+ and browsers):
+
+```ts
+import { createMatch, playMatch, spectate } from "@agents-arena/sdk";
+
+const match = await createMatch("http://127.0.0.1:8080", "rps");
+const choose = (request) => request.observation.legal_actions[0];
+const [seat0] = await Promise.all([
+  playMatch(match.seat_0_url, 0, choose),
+  playMatch(match.seat_1_url, 1, choose),
+]);
+```
+
+See `sdk-ts/README.md`; `node sdk-ts/examples/play_match.ts http://127.0.0.1:8080 rps`
+plays and watches a whole match against a running server.
+
+## Add a game
+
+```
+.\.venv\Scripts\python.exe -m arena.games.scaffold --name mygame --kind hidden
+```
+
+writes a small working game (here: hidden information and chance), its CLI, Ollama and
+MCP adapters, and a contract test that runs the shared contract suite on it. `--kind` is
+`basic` (TODO stubs), `chance`, `hidden` or `simultaneous`. `docs/ADDING_A_GAME.md` is the
+walkthrough.
 
 ## Operating the server
 

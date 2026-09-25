@@ -1,0 +1,20 @@
+"""${Name} domain events."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+from arena.core.events import DomainEvent
+from arena.core.types import Seat
+
+
+@dataclass(frozen=True)
+class ${Name}RoundPlayed(DomainEvent):
+    """A round resolved: both choices, now public, and who scored."""
+
+    choices: list[str]
+    scorer: Seat
+
+
+__all__: Sequence[str] = ["${Name}RoundPlayed"]

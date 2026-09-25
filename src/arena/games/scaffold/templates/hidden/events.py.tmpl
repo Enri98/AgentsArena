@@ -1,0 +1,53 @@
+"""${Name} domain events.
+
+Events are public unless they override ``visible_to``: the server delivers an
+event only to the viewers it is visible to, and a transcript records its
+audience so a redacted copy can be produced later.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+from arena.core.events import DomainEvent
+from arena.core.types import Seat
+
+
+@dataclass(frozen=True)
+class ${Name}Dealt(DomainEvent):
+    """Public: the deal happened. Which number each seat holds is not in it."""
+
+
+@dataclass(frozen=True)
+class ${Name}SecretReceived(DomainEvent):
+    """Private to ``seat``: the number it was dealt."""
+
+    seat: Seat
+    secret: int
+
+    def visible_to(self, viewer: Seat | None) -> bool:
+        return viewer == self.seat
+
+
+@dataclass(frozen=True)
+class ${Name}Chose(DomainEvent):
+    """Public: a seat kept or folded."""
+
+    seat: Seat
+    choice: str
+
+
+@dataclass(frozen=True)
+class ${Name}Showdown(DomainEvent):
+    """Public: both seats kept, so both numbers are shown."""
+
+    secrets: list[int]
+
+
+__all__: Sequence[str] = [
+    "${Name}Chose",
+    "${Name}Dealt",
+    "${Name}SecretReceived",
+    "${Name}Showdown",
+]

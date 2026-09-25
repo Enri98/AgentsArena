@@ -1,121 +1,129 @@
 # AgentsArena Network Protocol
 
-Current wire `schema_version`: **3** (Phase 38). Versions 1-3 are all accepted on decode, but a
-client must list 3 in `supported_schema_versions` to be served; see §7.1 for what changed.
+**Current wire `schema_version`: 4.** A server decodes versions 1-4, but serves only clients
+that list 4 in `supported_schema_versions` (§7). Appendix A has the version history;
+Appendix B the shapes and behaviour that earlier versions had.
 
-This document is the language-agnostic source of truth for the wire protocol that connects remote
-agents to an `arena.server` instance. Every implementation — the reference Python SDK, future
-TypeScript SDK, MCP wrapper, and the server itself — must conform to it.
+This document is the language-agnostic source of truth for the wire protocol between agents and
+an `arena.server` instance. Every implementation conforms to it: the server, the Python SDK
+(`arena.sdk`), the TypeScript SDK (`sdk-ts/`), and the MCP wrapper. Where this document and an
+implementation disagree, the implementation has a bug.
 
-## 1. Goals and non-goals
+## 1. Scope
 
-### 1.1 Goals
-- Let two remote agents play one match of a deterministic perfect-information game over a single
-  WebSocket connection per agent.
-- Reuse the existing `arena.core` payload shapes (`ObservationRequestPayload`,
-  `ActionResponsePayload`, `DomainErrorPayload`) verbatim — the wire only adds an envelope.
-- Be debuggable with `wscat`, browser devtools, and plain JSON.
-- Tolerate the failure modes that appear the moment you cross the network: hung peers, malformed
-  payloads, duplicate sends, dead TCP sessions, server restarts.
+The protocol lets two agents play one match of a two-seat game, each over its own WebSocket,
+while any number of spectators watch. A game may be sequential or simultaneous, deterministic or
+stochastic (chance nodes), and have perfect or hidden information.
 
-### 1.2 Non-goals (v1)
-- Multiple simultaneous agents per connection
-- ~~Spectator streams~~ — shipped in Phase 36; see §4 and §8.13
-- Authentication beyond capability-by-match-id
-- Persistence across server restarts
-- Lobby / matchmaking / tournaments
-- Reconnection with state-versioning conflict resolution beyond resume-from-turn-N
+It reuses the simulation's payload shapes (`ObservationRequestPayload`, `ActionResponsePayload`,
+`DomainErrorPayload`, runtime transcripts) verbatim; the wire adds an envelope. It is plain JSON,
+so it can be debugged with `wscat` or browser devtools, and it is built to survive the network:
+hung peers, malformed frames, duplicate sends, dead TCP sessions.
+
+Out of scope: authentication beyond capability-by-`match_id`, lobby and matchmaking, more than
+two seats, and running matches surviving a server restart (ended matches' public transcripts
+can, §4.1).
 
 ## 2. Glossary
 
 | Term | Definition |
 |------|------------|
-| **Player** | The human or organization that owns a seat. Identity-level concept. |
+| **Player** | The human or organization that owns a seat. |
 | **Agent** | The code that decides actions for a player (LLM, script, human via UI). |
-| **Client** | The SDK instance + transport that connects an Agent to the server. |
+| **Client** | The SDK instance and transport that connect an agent, or a spectator, to the server. |
 | **Server** | An instance of `arena.server`. Authoritative for match state. |
 | **Match** | One run of one game between two seats. Has an opaque `match_id`. |
-| **Seat** | Integer identifier (`0` or `1` for two-player games) within a Match. |
-| **Envelope** | The outer JSON object framing every WS message: `{type, schema_version, ...}`. |
-
-The term **Peer** is reserved for protocol-internal documentation and must not appear in user-facing
-SDK or server APIs.
+| **Seat** | Integer identifier within a match: `0` or `1`. |
+| **Viewer** | Whoever a payload is built for: a seat, or the public (a spectator). |
+| **Turn** | One committed step: an **action** turn (one seat acted), a **chance** turn (a random outcome resolved; no seat), or a **joint** turn (several seats acted at once). |
+| **Envelope** | The outer JSON object framing every WebSocket message: `{type, schema_version, ...}`. |
 
 ## 3. Transport
 
-- WebSocket only. Plain `ws://` permitted on localhost; `wss://` required for non-loopback hosts.
-- TLS termination is the deployer's responsibility (typically a reverse proxy such as Caddy or
-  nginx in front of `arena.server`). The server itself speaks plain WebSocket.
-- Each Client opens exactly one WebSocket connection per match-seat binding.
-- Wire format: UTF-8 JSON text frames. Binary frames must be rejected with close code `1003`
-  (unsupported data). On a play channel this is a disconnect like any other: the grace period
-  of §11 applies and the seat may resume.
-- One JSON message per WebSocket frame. No newline framing inside a frame.
+- **WebSocket, UTF-8 JSON text frames, one message per frame.** A binary frame closes the
+  connection with `1003`; on a play channel that is a disconnect like any other, and the seat may
+  resume (§11).
+- **TLS.** The server speaks plain HTTP and WebSocket; a reverse proxy terminates TLS. Use
+  `wss://` for anything but localhost. The seat URLs that `POST /matches` returns are built on
+  the server's public URL when the operator configured one (`--public-url`,
+  `docs/DEPLOYMENT.md`): `wss://` for an https URL. Otherwise they are built on the request's
+  `Host`, and are `wss://` only if the server saw the request as https (it terminates TLS itself,
+  or a proxy on the same host sets `X-Forwarded-Proto`). Behind any other TLS proxy, configure
+  the public URL.
+- **One connection per seat.** A client opens one play connection per seat it holds, and one
+  spectate connection per match it watches.
 - **Frame sizes.** The server accepts inbound frames of at most 1 MiB; every client message is
-  small. Server frames carrying a transcript (`match_finished`, `match_aborted`, a reconnect
-  `welcome`, `spectator_welcome`) grow with the match, to about 2 MB at the server's 5000-turn
-  cap. Clients must accept frames of at least 16 MiB; the Python SDK accepts 64 MiB.
-- **Keepalive.** The server sends protocol-level WebSocket pings every 20 s to every
-  connection, spectators included, and closes one that does not answer within 20 s. This is
-  separate from the application `ping` of §8.10, and WebSocket libraries answer it
-  automatically.
+  small. Frames carrying a transcript (`match_finished`, `match_aborted`, a reconnect `welcome`,
+  `spectator_welcome`) grow with the match: about 2 MB at the 5000-turn cap for a small game,
+  more for a game with large states. Clients must accept frames of at least 16 MiB; the Python
+  SDK accepts 64 MiB.
+- **Compression.** The server does not negotiate permessage-deflate.
+- **Keepalive.** The server sends protocol-level WebSocket pings every 20 s to every connection,
+  spectators included, and closes one that does not answer within 20 s. This is separate from the
+  application `ping` of §8.10, and WebSocket libraries answer it automatically, as long as their
+  event loop is free.
 
-## 4. URL shape
+## 4. Endpoints
 
-- `POST /matches` — create a match (HTTP).
-- `GET /matches/{match_id}` — match status (HTTP, JSON, no auth).
-- `GET /matches/{match_id}/public-transcript` — the public transcript of an ended match (HTTP,
-  JSON, no auth; Phase 40).
-- `GET /games` — list of supported game ids and their config schemas (HTTP, JSON).
-- `WS /matches/{match_id}/play?seat={0|1}` — primary play channel (WebSocket).
-- `WS /matches/{match_id}/spectate` — read-only spectator channel (WebSocket). Live as of
-  Phase 36. The client opens it, sends `spectator_hello`, and receives `spectator_welcome`
-  followed by the same broadcasts the seats receive, minus `observation_request` and
-  `action_rejected`. No seat, no `resume_token`, and no disconnect grace: a reconnecting
-  spectator simply says hello again and gets fresh history.
+| Method and path | Purpose |
+|-----------------|---------|
+| `POST /matches` | Create a match. |
+| `GET /matches/{match_id}` | Match status. |
+| `GET /matches/{match_id}/public-transcript` | The public transcript of an ended match. |
+| `GET /games` | The games this server runs, with their config schemas. |
+| `GET /schemas/payloads` | JSON Schemas of the payloads (§17). |
+| `WS /matches/{match_id}/play?seat={0\|1}` | A seat's play channel. |
+| `WS /matches/{match_id}/spectate` | A read-only spectator channel. |
 
-The unguessable `match_id` (>=128 bits of entropy via `secrets.token_urlsafe(16)`) is the
-capability. Possession of the URL grants the right to join the match.
+Any other WebSocket path is accepted and closed `4404 unsupported_endpoint` (§9).
 
-> **Information exposed by `GET /matches/{match_id}`:** player labels, lifecycle, whose turn it is,
-> and the turn count, to any holder of the `match_id`. It does **not** expose `match_config` or any
-> game state. For the capability-by-id trust model this is by design.
+**The `match_id` is the capability.** It is unguessable (`secrets.token_urlsafe(16)`, at least
+128 bits of entropy); whoever holds it can spectate, read the status and, once the match ends, the
+public transcript, and, until both seats are claimed, take a seat. `GET /matches/{id}` exposes
+player labels, lifecycle, whose turn it is, the turn count and the result: never the config or
+game state.
 
 ### 4.1 HTTP request and response shapes
 
+Every error response has the body `{"error": {"code": "...", "message": "..."}}`, plus
+`"details"` where noted.
+
 #### `POST /matches`
 
-Request body (JSON):
+Request body (JSON; unknown keys are ignored):
 
 ```json
 {
   "game_id": "connect4",
-  "game_config": { ... },
-  "players": [
-    {"label": "alice"},
-    {"label": "bob"}
-  ],
+  "game_config": {"rows": 6, "columns": 7},
+  "players": [{"label": "alice"}, {"label": "bob"}],
   "per_turn_deadline_ms": 30000,
   "per_action_retry_budget": 3,
   "disconnect_grace_ms": 30000,
-  "supported_schema_versions": [3]
+  "supported_schema_versions": [4]
 }
 ```
 
-- `game_id` must appear in `GET /games`.
-- `supported_schema_versions` (optional, v3) lists the wire versions the creating client reads. If
-  it is given and does not include the server's version, creation fails with `400`
-  `schema_version_unsupported`. Without it the mismatch surfaces later, at `hello`, as `4400`.
-- `game_config` must validate against the registered serializer's config schema.
-- `players` length must equal the seat count for the game (currently always 2).
-- `per_turn_deadline_ms` is the wall-clock budget per `observation_request`. Default 30000.
-  Must be a positive integer; servers may impose an upper bound (default 600000).
-- `per_action_retry_budget` is the number of `action_rejected` cycles allowed per turn before
-  the match aborts with `adapter_error`. Default 3. Range: 0..10.
-- `disconnect_grace_ms` is how long the server keeps the match alive after a peer's WS closes.
-  Default 30000.
+- `game_id` (required) must appear in `GET /games`.
+- `game_config` (optional) must validate against the game's `config_schema`; omitted keys take
+  their defaults.
+- `players` (optional): at most 2 entries. Entry *i* labels seat *i* (its `player_id` is `p<i>`);
+  a missing entry means that seat has no player record. A label is at most 64 characters; empty
+  or null means no label.
+- `per_turn_deadline_ms`: the wall-clock budget for answering an `observation_request`.
+  1..600000, default 30000.
+- `per_action_retry_budget`: rejected actions allowed per turn beyond the first. With budget *N*,
+  a seat may be rejected *N* + 1 times; the last rejection carries `retries_remaining: 0` and
+  aborts the match with `adapter_error` (§8.6). 0..10, default 3.
+- `disconnect_grace_ms`: how long a dropped seat may take to resume (§11). 1..600000, default
+  30000.
+- `supported_schema_versions` (optional): the wire versions the creating client reads. If given
+  without the server's version, creation fails with `400 schema_version_unsupported`; without it,
+  a mismatch surfaces at `hello` as `4400`.
 
-Success response (`HTTP 201 Created`):
+The per-IP creation cap (§13) is checked before the body is read.
+
+Success, `201 Created`:
 
 ```json
 {
@@ -127,83 +135,82 @@ Success response (`HTTP 201 Created`):
   "per_turn_deadline_ms": 30000,
   "per_action_retry_budget": 3,
   "disconnect_grace_ms": 30000,
-  "seat_0_url": "ws://host/matches/abc123.../play?seat=0",
-  "seat_1_url": "ws://host/matches/abc123.../play?seat=1"
+  "seat_0_url": "wss://arena.example.com/matches/abc123.../play?seat=0",
+  "seat_1_url": "wss://arena.example.com/matches/abc123.../play?seat=1"
 }
 ```
 
-Error responses:
+Errors:
 
-- `HTTP 400` `{"error": {"code": "unknown_game", "message": "..."}}` — unknown `game_id`.
-- `HTTP 400` `{"error": {"code": "invalid_config", "message": "...", "details": {...}}}` — config
-  validation failed; `details` carries the originating `DomainErrorPayload`.
-- `HTTP 400` `{"error": {"code": "invalid_request", "message": "..."}}` — malformed body.
-- `HTTP 400` `{"error": {"code": "schema_version_unsupported", "message": "..."}}` — the client's
-  `supported_schema_versions` does not include the server's wire version (v3).
-- `HTTP 413` `{"error": {"code": "request_too_large", "message": "..."}}` — body over 64 KiB.
-- `HTTP 429` `{"error": {"code": "rate_limited", "message": "..."}}` — match-creation cap hit.
-- `HTTP 503` `{"error": {"code": "server_busy", "message": "..."}}` — the server is at its
-  match capacity and every tracked match is running (§13).
-- `HTTP 500` `{"error": {"code": "server_error", "message": "..."}}` — internal failure.
+| Status | `code` | When |
+|--------|--------|------|
+| 400 | `unknown_game` | `game_id` is not registered. |
+| 400 | `invalid_config` | `game_config` does not validate. `details` is the domain error's `details` object (often `{}`). |
+| 400 | `invalid_request` | Not JSON, no `game_id`, a field of the wrong type, or a value out of range. |
+| 400 | `schema_version_unsupported` | `supported_schema_versions` lacks the server's version. |
+| 413 | `request_too_large` | Body over 64 KiB. |
+| 429 | `rate_limited` | Per-IP creation cap (§13). |
+| 503 | `server_busy` | The match registry is full of running matches (§13). |
+| 500 | `server_error` | Internal failure. |
 
 #### `GET /matches/{match_id}`
 
-Success (`HTTP 200`):
+Success, `200`:
 
 ```json
 {
   "match_id": "...",
   "game_id": "connect4",
-  "lifecycle": "running",
+  "lifecycle": "finished",
   "schema_version": 4,
-  "current_seat": 0,
-  "acting_seats": [0],
-  "turn_count": 4,
+  "current_seat": null,
+  "acting_seats": null,
+  "turn_count": 17,
   "players": [
     {"player_id": "p0", "label": "alice", "seat": 0},
     {"player_id": "p1", "label": "bob", "seat": 1}
   ],
-  "result": null,
+  "result": {"result_type": "Win", "payload": {"seat": 0}},
   "abort": null
 }
 ```
 
-Errors:
+- `acting_seats` lists the seats that act now, and `current_seat` is that seat when exactly one
+  acts; both are null unless the match is running.
+- `result` is the result of a finished match (§17), null otherwise.
+- `abort` is `{"reason": "...", "message": "..."}` for an aborted match, null otherwise.
 
-- `HTTP 404` `{"error": {"code": "match_not_found", "message": "..."}}`.
+Errors: `404 match_not_found`.
 
-#### `GET /matches/{match_id}/public-transcript` (Phase 40)
+#### `GET /matches/{match_id}/public-transcript`
 
-Success (`HTTP 200`): the `RuntimeTranscriptPayload` (§17) of an ended match, **exactly the
-transcript a spectator received** in `match_finished` or `match_aborted`. For a
-hidden-information game that is the public view (`view: "public"`): no hand, no private event,
-and the chance outcomes as the public saw them. A perfect-information game has nothing to hide,
-so its transcript is the full one (`view: "full"`). Finished and aborted matches are both
-served. The response carries `Cache-Control: private, no-store`: the URL is a capability.
+Success, `200`: the `RuntimeTranscriptPayload` (§17) of an ended match, **exactly the transcript
+a spectator received** in `match_finished` or `match_aborted`. For a hidden-information game that
+is the public view (`view: "public"`): no private state, no private event, and chance outcomes as
+the public saw them. A perfect-information game's transcript is the full one (`view: "full"`).
+Finished and aborted matches are both served.
+
+Every response on this path, errors included, carries `Cache-Control: private, no-store`: the
+URL is a capability.
 
 The server keeps these transcripts in a store that outlives the WebSocket connections and the
-registry's own retention. With a durable store configured (see `docs/DEPLOYMENT.md`), it also
-outlives a restart. Only the public transcript is ever stored or served: holding the `match_id`
-is not holding a seat, and seat-scoped transcripts are not available over HTTP.
-
-Retention is a server setting: by default a transcript is kept for 7 days from the end of the
-match, and at most 10,000 transcripts (plus a byte cap) are kept, oldest dropped first. A
-single transcript over the per-record cap (8 MiB with a durable store, 4 MiB in memory) is not
-stored. The caps are global, so many long matches from one client can push out older
-transcripts sooner than their TTL; size the byte cap for the deployment (docs/DEPLOYMENT.md).
+registry. With a durable store (`docs/DEPLOYMENT.md`) they also outlive a restart. Only the public
+transcript is stored or served; seat views are never available over HTTP. By default a transcript
+is kept 7 days from the end of the match, at most 10,000 of them plus a byte cap, oldest dropped
+first; one larger than the per-record cap (8 MiB durable, 4 MiB in memory) is not stored. At most
+4 reads are served at once server-wide; further reads wait their turn.
 
 Errors:
 
-- `HTTP 404` `{"error": {"code": "match_not_found", ...}}`: unknown or malformed id, expired,
-  or never stored (the store refused or failed; the match itself ended normally).
-- `HTTP 409` `{"error": {"code": "transcript_not_ready", ...}}`: the match is still running, or
-  has just ended and its transcript is being stored. It is available by the time
-  `match_finished` / `match_aborted` has been sent; retry.
-- `HTTP 429` `{"error": {"code": "rate_limited", ...}}`: per-IP read cap (§13).
+| Status | `code` | When |
+|--------|--------|------|
+| 404 | `match_not_found` | Unknown or malformed id, expired, or never stored (the store refused or failed). |
+| 409 | `transcript_not_ready` | The match has not ended (including one that never started), or has just ended and its transcript is being stored. It is available once `match_finished` / `match_aborted` has been sent. |
+| 429 | `rate_limited` | Per-IP read cap (§13). |
 
 #### `GET /games`
 
-Success (`HTTP 200`):
+Success, `200`:
 
 ```json
 {
@@ -211,14 +218,7 @@ Success (`HTTP 200`):
     {
       "game_id": "connect4",
       "game_schema_version": 1,
-      "config_schema": { /* JSON Schema emitted by the game serializer */ },
-      "min_seats": 2,
-      "max_seats": 2
-    },
-    {
-      "game_id": "tictactoe",
-      "game_schema_version": 1,
-      "config_schema": { ... },
+      "config_schema": {"type": "object", "properties": {"rows": {"type": "integer"}}},
       "min_seats": 2,
       "max_seats": 2
     }
@@ -226,119 +226,117 @@ Success (`HTTP 200`):
 }
 ```
 
-The `config_schema` field is a JSON Schema document derived from the game's existing Pydantic
-config model via `Serializer.config_schema()`. Clients use it to validate user-supplied configs
-before calling `POST /matches`.
+One entry per registered game (the reference server runs `connect4`, `tictactoe`, `nim`, `pig`,
+`liarsdice` and `rps`). `config_schema` is the JSON Schema of the game's config model; clients
+may validate a config against it before `POST /matches`.
 
 ## 5. Lifecycle
 
-A match progresses through a finite set of states, server-authoritative:
-
 ```
-created  ─── both seats joined ───►  running  ─── result reached ───►  finished
-   │                                    │
-   │                                    └── timeout / disconnect / abort ──►  aborted
-   └── creator gives up before joiner arrives ──────────────────────────────►  aborted
+created ── both seats joined ──► running ── result reached ──► finished
+   │                               │
+   │                               └── deadline / disconnect / budget / cap / crash ──► aborted
+   └── never started: evicted after an hour idle; waiting clients closed 4410 match_expired
 ```
 
-States match `arena.runtime.SessionLifecycle` (`created`, `running`, `finished`, `aborted`). The
-server never invents new lifecycle states; this preserves transcript replay determinism.
+The lifecycle values are `created`, `running`, `finished` and `aborted`, as in the runtime
+(`arena.runtime`). `match_state` (§8.3) is the only signal of a transition.
 
 ## 6. Envelope
 
-Every WebSocket message is a single JSON object with this shape:
+Every WebSocket message is one JSON object:
 
 ```json
 {
-  "type": "<message_type>",
-  "schema_version": 1,
-  "match_id": "<match_id>",
+  "type": "action_response",
+  "schema_version": 4,
+  "match_id": "...",
   "seat": 0,
-  "turn_id": "<client-generated UUID, optional>",
-  "payload": { ... }
+  "turn_id": "5f0c...",
+  "payload": {
+    "action_response": {"game_id": "connect4", "schema_version": 1, "seat": 0, "action": {"column": 3}}
+  }
 }
 ```
 
-Field rules:
+| Field | Rules |
+|-------|-------|
+| `type` | Always. One of the message types in §8. |
+| `schema_version` | Always. The server stamps 4, and accepts 1-4 from a client. A client stamps its `hello` with a version every server it supports can decode (the lowest it lists: a server refuses an envelope version it cannot decode before reading the list), and later frames with `welcome.negotiated_schema_version`. |
+| `match_id` | Set on every server frame. Optional and ignored on client frames. |
+| `seat` | Set on `welcome`, `observation_request` and `action_rejected`; null on other server frames. Ignored on client frames (but must be an integer or null). |
+| `turn_id` | Set by the client on `action_response` (§12); echoed on `action_rejected`; null elsewhere. |
+| `payload` | Always. A message-specific object; every message type has required fields. |
 
-| Field | Required | Notes |
-|-------|----------|-------|
-| `type` | Always | One of the message types in §8. |
-| `schema_version` | Always | Currently `3` (§7.1). Servers and Clients reject unknown major versions. |
-| `match_id` | Always | Echoed back on every message after the handshake completes. |
-| `seat` | Sometimes | Required on Client→Server messages once joined; optional on broadcasts. |
-| `turn_id` | Required on `action_response` | Client-generated UUID4; idempotency key. |
-| `payload` | Always | Message-specific JSON. May be empty `{}`. |
+Server frames always carry all six keys, with null where a field does not apply. Envelope
+fields are strictly typed: a `seat`, `match_id` or `turn_id` of the wrong type (`"0"` for `0`)
+makes the frame malformed (§8.11).
 
-Unknown envelope fields are ignored by both sides (forward compatibility). Unknown payload fields
-inside known message types are also ignored.
+**Unknown fields.** Unknown envelope keys, and unknown keys in a §8 message body, are ignored.
+The payloads nested inside bodies, which are reused from the simulation (the `observation_request`
+and `action_response` payloads, `DomainErrorPayload`, runtime and match transcripts, snapshots and
+abort metadata), **reject unknown keys**: an `action_response` whose inner payload has an extra key
+fails to decode. Adding a field there is therefore a version bump.
 
-## 7. Schema versioning policy
+## 7. Versioning
 
-- The integer `schema_version` covers the **envelope and message payload shapes**, not game configs.
-- Bumped **only** for: removed fields, renamed fields, type changes, semantic changes to existing
-  fields, new required fields.
-- **Not** bumped for: new optional fields with safe defaults, new message types that older clients
-  can ignore, additive enum values.
-- "Unknown fields ignored" applies only to **optional** unknowns. A future version that promotes a
-  field from optional to required must bump `schema_version`. SDKs must not silently ignore a field
-  whose absence would change protocol semantics; the version bump is the signal.
-### 7.1 Version history
+- The wire `schema_version` covers the envelope and every payload shape, not game configs.
+- It is bumped for removed, renamed or retyped fields, semantic changes, new required fields, and
+  new fields in the nested payloads of §6 (they reject unknown keys).
+- It is not bumped for new optional fields in §8 bodies, new message types that older clients can
+  ignore, or additive enum values.
 
-| Version | Shipped in | What changed |
-|---------|-----------|--------------|
-| 1 | v1 (Phases 0-35) | Initial protocol. |
-| 4 | Phase 41 | **Simultaneous moves.** In a simultaneous round several seats act at once (Rock-Paper-Scissors): each gets its own `observation_request`, concurrently, with its own deadline, retry budget and disconnect grace. The round commits as one **joint turn**: `turn_record.kind` is `"joint"`, `seat` and `action` are null, and `actions` maps each acting seat (a string key, `"0"`, `"1"`) to its action, in seat order. Transcripts carry the same shape. No seat's action is sent to anyone, or recorded, before every acting seat has chosen. `match_state` gains `acting_seats`, and its `current_seat` is null when several seats act. A sequential turn has no `actions` key, so sequential games' payloads are unchanged apart from `schema_version`. |
-| 3 | Phase 38 | **Per-recipient payloads**, so hidden-information games can be served. `turn_committed` carries the recipient's own `post_snapshot`, a new `public_snapshot`, and only the events and chance-outcome parts the recipient may see. Events record `is_public`/`audience` when private. Transcripts (runtime and match) declare `view` (`"full"`, `"seat"`, `"public"`) and `viewer_seat`. Seats get `"seat"` transcripts and spectators `"public"` ones, and only a `"full"` transcript can be replayed. `welcome.match_config` is the seat's view, and `welcome.transcript` replays the seat's history on reconnect (§11). `POST /matches` accepts `supported_schema_versions`. New abort reason `turn_limit_exceeded`: the server caps every match's length. For a perfect-information game every view is the full one, so payloads differ from v2 only by the added fields. |
-| 2 | Phase 37 | Transcript turns gained a `kind`. A **chance turn** has no seat and no action — nobody chose it — so `turns[].seat` and `turns[].action` became nullable in `match_finished.transcript` and `match_aborted.transcript`. `turn_committed.events` became load-bearing: it used to be an empty list, harmless while every game was deterministic because a client could recompute anything it missed, but a chance outcome cannot be recomputed. A chance turn carries the recorded `outcome` (game-specific JSON; null on action turns). Replay applies it and never re-rolls, so a transcript validates without the seed. **The seed is never sent**: the server's match object holds it, and it appears in no config, state, snapshot, event, or transcript. |
+**Three version numbers ride the wire.** Only the first is negotiated:
 
-**Decode and emit are separate.** A server emits its own `schema_version` but accepts every version
-it can still read — see `SUPPORTED_WIRE_SCHEMA_VERSIONS`. A build that can only read what it writes
-cannot migrate without a flag day.
+| Number | Where | Current value |
+|--------|-------|---------------|
+| Wire `schema_version` | envelopes, `welcome`, runtime transcripts, `GET /schemas/payloads` | 4 |
+| Adapter payload `schema_version` | inside `observation_request.observation_request` and `action_response.action_response` | 1 (a client sends 1) |
+| Snapshot `schema_version` | inside every snapshot | 1 |
 
-**Negotiation is strict: a server serves only its own version.** It accepts a connection
-(`hello`, a reconnect `hello`, or `spectator_hello`) **iff its emitted version is in
-`supported_schema_versions`**, and otherwise closes with `4400` (`schema_version_mismatch`). A
-client that cannot read the current version is refused rather than served an older shape. For a
-hidden-information game an older shape could not even be produced without leaking, since v1 and v2
-have no per-recipient payloads. A client should advertise every version it reads; the reference
-SDK sends `[1, 2, 3, 4]`. `POST /matches` accepts the same list (optional), so a creator learns of a
-mismatch before handing out seat URLs.
-- This policy is **independent** of game-config schema evolution. Each registered game carries its
-  own `game_schema_version` (integer) returned by `GET /games` and echoed in `welcome.match_config`.
-  Adding an optional Connect 4 config field is a Connect 4 schema bump, not an envelope schema
-  bump. v1 servers reject `POST /matches` with an unknown `game_schema_version` via
-  `HTTP 400 invalid_config`. SDKs must validate user-supplied configs against the
-  `game_schema_version` declared in `GET /games` before sending `POST /matches`.
+Each game also has a `game_schema_version` (currently always 1), returned by `GET /games`,
+`POST /matches`, `welcome` and `spectator_welcome`. It versions that game's config and state
+shapes, independently of the wire. Clients do not send it.
+
+**Decode and emit are separate.** A server emits its own version but decodes every version it
+can still read (1-4), so a fleet can migrate without a flag day.
+
+**Negotiation is strict: a server serves only its own version.** It accepts a `hello`, a
+reconnect `hello` or a `spectator_hello` **only if its version is in
+`supported_schema_versions`**, and otherwise closes `4400 schema_version_mismatch`. A client
+that cannot read the current version is refused rather than served an older shape; for a
+hidden-information game an older shape could not be produced without leaking. A client should
+list every version it reads: the Python SDK sends `[1, 2, 3, 4]`, the TypeScript SDK `[4]`.
 
 ## 8. Message types
 
-Every message uses the envelope above. The tables below define `payload` shapes only.
+Every message uses the envelope of §6. The sections below give `payload` shapes.
 
-### 8.1 `hello` (Client → Server, first frame after WS open)
+### 8.1 `hello` (client → server, the first frame on a play channel)
 
 ```json
 {
   "client_name": "arena-sdk-python",
   "client_version": "0.1.0",
-  "supported_schema_versions": [1],
+  "supported_schema_versions": [1, 2, 3, 4],
   "auth": null,
   "requested_seat": 0,
   "resume_token": null
 }
 ```
 
-- `auth`: reserved field, currently always `null`. Servers must accept `null`; non-null values are
-  ignored in v1 but reserved for future token-based auth.
-- `requested_seat`: integer; server validates against the URL's seat query param. Mismatch closes
-  with code `4422` (`malformed_envelope`).
-- `resume_token`: string returned by the server in `welcome.resume_token`, used to resume a
-  dropped connection (§11). `null` means "fresh join".
+- A client has 10 s from opening the socket to send it (`4422 hello_timeout`).
+- `auth` is reserved; send `null`. Non-null values are ignored.
+- `client_name`, `client_version`, a non-empty `supported_schema_versions` and `requested_seat`
+  are required.
+- `requested_seat` must equal the URL's `?seat=` on a fresh join (`4422 seat_mismatch`). A resume
+  still sends it but its value is ignored: the URL's seat decides.
+- `resume_token`: `null` for a fresh join, or the token from this seat's latest `welcome` to
+  resume (§11).
 
-If the seat is already occupied by a live connection, the server closes with code `4409`
-(`seat_taken`).
+The server checks a `hello` in a fixed order; §9 gives it.
 
-### 8.2 `welcome` (Server → Client, response to `hello`)
+### 8.2 `welcome` (server → client, the answer to `hello`)
 
 ```json
 {
@@ -347,8 +345,8 @@ If the seat is already occupied by a live connection, the server closes with cod
   "game_schema_version": 1,
   "seat": 0,
   "lifecycle": "created",
-  "schema_version": 1,
-  "negotiated_schema_version": 1,
+  "schema_version": 4,
+  "negotiated_schema_version": 4,
   "resume_token": "<opaque>",
   "per_turn_deadline_ms": 30000,
   "per_action_retry_budget": 3,
@@ -357,26 +355,21 @@ If the seat is already occupied by a live connection, the server closes with cod
     {"player_id": "p0", "label": "alice", "seat": 0},
     {"player_id": "p1", "label": "bob", "seat": 1}
   ],
-  "match_config": { /* this seat's view of the validated game config */ },
+  "match_config": {"rows": 6, "columns": 7},
   "transcript": null
 }
 ```
 
-- `negotiated_schema_version` is the integer chosen by the server from §7's negotiation rule. v1
-  servers always set this to `1`.
-- `resume_token` is opaque to the Client. **It is bound server-side to the (match_id, seat) pair**
-  and is rotated on every successful resume. A token presented for a different seat or match is
-  rejected and the connection closes with `4401` (`unauthorized`).
-- `match_config` is the validated game config that was sent to `POST /matches`, normalized by the
-  game's serializer, **as this seat may see it** (v3). Games keep secrets out of config (a seed
-  there would be public), so in practice this is the whole config.
-- `transcript` (v3) is null on a first connect. On a **reconnect** it is this seat's runtime
-  transcript so far (`view: "seat"`), the replay §11 promises. It holds exactly the turns the seat
-  was sent live, so reconnecting recovers what was missed and adds no information.
-- `per_turn_deadline_ms`, `per_action_retry_budget`, and `disconnect_grace_ms` echo the values
-  locked at match creation; SDKs use them to size internal state.
+- `negotiated_schema_version` is the server's version (§7).
+- `resume_token` is opaque, bound server-side to this match and seat, and **rotated on every
+  `welcome`**, fresh or resumed: only the latest one works.
+- `match_config` is the validated config **as this seat may see it**. Games keep secrets out of
+  config (a seed there would be public), so in practice it is the whole config.
+- `transcript` is null on a first join. On a resume it is this seat's runtime transcript so far
+  (`view: "seat"`), holding exactly the turns the seat was sent live (§11).
+- The deadline, budget and grace echo the values fixed at creation.
 
-### 8.3 `match_state` (Server → Client, broadcast on lifecycle change)
+### 8.3 `match_state` (server → every seat and spectator)
 
 ```json
 {
@@ -389,587 +382,618 @@ If the seat is already occupied by a live connection, the server closes with cod
 }
 ```
 
-`acting_seats` (v4) lists every seat that acts now: one seat in a sequential game, several in a
-simultaneous round (then `current_seat` is null). Both are null once the match is over.
+- `acting_seats` lists every seat that acts now: one in a sequential game, several in a
+  simultaneous round (then `current_seat` is null). Both are null unless the match is running.
+- `turn_count` counts committed turns, chance turns included.
+- `result` is the result of a finished match (§17), null otherwise.
+- `abort` is the full `AbortMetadataPayload` (§17) of an aborted match, null otherwise.
 
-Sent when:
-- both seats have joined (`created` → `running`)
-- a turn has been committed
-- the match reaches a terminal result (`running` → `finished`)
-- the match is aborted (`running`/`created` → `aborted`)
+Sent when the match starts, after each step (one step can commit several turns: an action and
+the chance turns it leads to; all their `turn_committed` frames come first), when the match
+finishes, and when it aborts. A resuming seat is also sent one right after its `welcome`.
 
-### 8.4 `observation_request` (Server → Client, only to an acting seat)
+### 8.4 `observation_request` (server → an acting seat)
 
 ```json
 {
-  "observation_request": <ObservationRequestPayload>,
+  "observation_request": {
+    "game_id": "connect4",
+    "schema_version": 1,
+    "seat": 0,
+    "observation": {"seat": 0, "board": [[null, null]], "legal_actions": [{"column": 0}]}
+  },
   "deadline_ms": 30000
 }
 ```
 
-Where `<ObservationRequestPayload>` is exactly the payload defined by
-`arena.adapters.in_process.ObservationRequestPayload`. The `deadline_ms` is the wall-clock budget
-the server will wait for the action; on expiry the server aborts the match with reason
-`turn_deadline_expired`.
+- `observation_request` is the `ObservationRequestPayload` (§17): `observation` is the game's
+  serialized observation for this seat, built for this seat only. The legal moves are inside it,
+  in a game-specific shape.
+- `deadline_ms` is the time left to answer. The deadline runs from when the request is sent; it
+  is absolute: rejections and reconnects do not extend it. On expiry the match aborts with
+  `turn_deadline_expired`. A re-sent request after a resume carries the remaining time (at least
+  1).
+- **One action per request.** A client sends one `action_response` per request, plus one per
+  `action_rejected` while retries remain. The server reads a seat's frames only while it waits for
+  that seat, so an extra action is not discarded: it is read as the answer to the next request.
 
-**One action per request.** A client sends exactly one `action_response` per
-`observation_request` (plus retries after `action_rejected`). The server reads a seat's frames
-only while it is waiting for that seat, so an extra action is not discarded: it is read as the
-answer to the seat's next request.
+**Simultaneous rounds.** When several seats act at once, each gets its own request at the same
+time, none depending on another's choice, each with its own deadline, retry budget and
+disconnect grace. The first seat to run out of any of them ends the match. A seat whose action is
+accepted hears nothing more until the round commits; it is not told the other seat's action, or
+whether it has acted.
 
-**Simultaneous rounds (v4).** When several seats act at once, each acting seat receives its own
-`observation_request` at the same time, and none depends on another's choice. Each seat has
-its own deadline (the match's `per_turn_deadline_ms`, from when its request was sent), its own
-retry budget and its own disconnect grace. The first seat to run out of any of them ends the
-match through the usual abort. A seat whose action is accepted hears nothing until the round
-commits. It is not told the other seat's action, or even whether the other seat has acted, until
-then.
-
-### 8.5 `action_response` (Client → Server)
+### 8.5 `action_response` (client → server)
 
 ```json
 {
-  "action_response": <ActionResponsePayload>
+  "action_response": {
+    "game_id": "connect4",
+    "schema_version": 1,
+    "seat": 0,
+    "action": {"column": 3}
+  }
 }
 ```
 
-The envelope's `turn_id` is required and must be a fresh UUID4 per turn. If the server has already
-committed a turn for this `turn_id`, it ignores the message (idempotent). If the action is
-illegal, the server replies with `action_rejected` (§8.6) and waits for another `action_response`
-from the same seat against the same observation.
+- The envelope's `turn_id` should be set, unique per attempt (a retry after `action_rejected`
+  needs a new one). Without one the server assigns its own, and a duplicate cannot be detected.
+- `action_response` is the `ActionResponsePayload` (§17). Its `schema_version` must be 1 and its
+  `game_id` the match's game; another positive integer, or another game, is rejected with
+  `adapter_error` and costs a retry. A `schema_version` below 1 or not an integer, or an extra key,
+  makes the whole frame malformed (§8.11), which costs no retry. Its `seat` is informational: an action is always attributed to the connection's seat.
+  `action` is a game-specific object.
+- A legal action is committed. An illegal one is answered with `action_rejected`.
 
-### 8.6 `action_rejected` (Server → Client)
+### 8.6 `action_rejected` (server → the seat whose action it was)
 
 ```json
 {
-  "turn_id": "...",
-  "error": <DomainErrorPayload>,
+  "turn_id": "5f0c...",
+  "error": {"code": "illegal_action", "message": "Column 3 is full.", "details": {"column": 3}},
   "retries_remaining": 2
 }
 ```
 
-Where `<DomainErrorPayload>` is exactly `arena.adapters.in_process.DomainErrorPayload`. The
-initial value of `retries_remaining` equals `welcome.per_action_retry_budget` (default 3). The
-server decrements the counter exactly **once per unique `turn_id`** that was rejected; duplicate
-`action_response` frames carrying an already-rejected `turn_id` are silently dropped (§12) and do
-**not** decrement.
+- `error` is a `DomainErrorPayload`: a domain code from the rules (`illegal_action`,
+  `wrong_player`, `game_finished`, `serialization_error`, ...) with its `message` and `details`, or
+  `adapter_error` when the action could not be loaded at all (wrong `game_id`, adapter
+  `schema_version` other than 1, an action of the wrong shape).
+- `retries_remaining` counts the further attempts allowed, reported **before** this rejection
+  spends one: with budget 3 the rejections carry 3, 2, 1 and finally 0. The turn stays open and
+  the deadline keeps running; no new `observation_request` is sent, so the client answers the same
+  request again.
+- A rejected `turn_id` is burned: resending it is silently dropped (§12).
 
-**Termination ordering on retry-budget exhaustion** (sent in this exact order over the same
-connection, no interleaving):
+**On the last rejection** (`retries_remaining: 0`) the match aborts. The seat receives, in this
+order: this `action_rejected`, `match_state` with `lifecycle: "aborted"` (reason
+`adapter_error`), `match_aborted` (§8.9), and a close `1000 adapter_error`. Frames sent after the
+last rejection are never read.
 
-1. `action_rejected` carrying `retries_remaining: 0` and the final `<DomainErrorPayload>`.
-2. `match_state` with `lifecycle="aborted"` and abort reason `adapter_error`.
-3. `match_aborted` carrying the full abort metadata and the final transcript (§8.9).
-4. WebSocket close frame with code `1000`.
-
-The server stops reading once it has sent step 1, so `action_response` frames arriving after
-it go unanswered (see §8.10's action-after-terminal rule).
-
-### 8.7 `turn_committed` (Server → Client, broadcast)
+### 8.7 `turn_committed` (server → every seat and spectator)
 
 ```json
 {
-  "turn_record": <TurnRecordPayload>,
-  "post_snapshot": <SnapshotPayload>,
-  "events": [ <runtime/game events> ]
+  "turn_record": {
+    "turn_index": 4,
+    "kind": "action",
+    "seat": 0,
+    "action": {"column": 3},
+    "outcome": null,
+    "events": [{"event_type": "DiscDropped", "payload": {"seat": 0, "column": 3, "row": 5}}],
+    "post_snapshot": {"game_id": "connect4", "schema_version": 1, "config": {}, "state": {}}
+  },
+  "post_snapshot": {"game_id": "connect4", "schema_version": 1, "config": {}, "state": {}},
+  "public_snapshot": {"game_id": "connect4", "schema_version": 1, "config": {}, "state": {}},
+  "events": [{"event_type": "DiscDropped", "payload": {"seat": 0, "column": 3, "row": 5}}]
 }
 ```
 
-Sent once per committed turn. Both seats and every spectator receive it, **each in its own
-view** (v3):
+Sent once per committed turn, to every seat and spectator, **each in its own view**:
 
-- `post_snapshot` is the recipient's view: its seat's for a seat, the public view for a spectator.
-- `public_snapshot` (v3) is the public view, the same for every recipient. For a
-  perfect-information game it equals `post_snapshot`.
-- `events` holds only the events the recipient may see. A domain event may be private to some
-  seats (for example "you were dealt these dice"). Its serialized form then carries
-  `"is_public": false` and `"audience": [seats]`. A public event carries neither key.
-- `turn_record.outcome` of a chance turn is the recipient's view of the outcome. A spectator may
-  get `{}` for a private deal.
-- `turn_index` is **0-based** here and in transcripts. (`TurnAccepted` runtime events count
-  1-based.)
+- `turn_record` is the turn (§17). `turn_index` is 0-based and increases by one per turn; clients
+  may deduplicate by it.
+- `post_snapshot` (also inside `turn_record`) is the state after the turn in the recipient's view:
+  its seat's for a seat, the public one for a spectator. `public_snapshot` is the public view,
+  the same for everyone; for a perfect-information game it equals `post_snapshot`.
+- `events` (also inside `turn_record`) are the game's domain events that the recipient may see. An
+  event private to some seats (a dealt hand) carries `"is_public": false` and
+  `"audience": [seats]` and reaches only them; a public event carries neither key.
+- A chance turn (`kind: "chance"`) has null `seat` and `action`, and `outcome`: the random
+  outcome as the recipient may see it (a spectator may get `{}` for a private deal). Nobody can
+  recompute an outcome, so this and its events are how clients learn it.
+- A joint turn (`kind: "joint"`, a simultaneous round) has null `seat` and `action`, and
+  `actions`: every acting seat's action, keyed by the seat as a string (`"0"`, `"1"`). It is sent
+  once the last acting seat's action is accepted, never before. Other turns have no `actions` key.
 
-Since v2 one step can commit several turns. An accepted action is followed by one `turn_committed`
-for each chance node it leads to (for example the die roll after a Pig `roll`). A game that opens at
-a chance node sends those turns before the first `match_state`. Each carries its own `turn_index`.
+One accepted action can commit several turns: the action, then one chance turn per chance node
+it leads to (the die roll after a Pig `roll`). A game that opens at a chance node sends those turns
+before the first `match_state`.
 
-A simultaneous round (v4) commits as **one** `turn_committed` whose `turn_record` has
-`kind: "joint"`, null `seat` and `action`, and `actions`: every acting seat's action, keyed by the
-seat as a string. It is sent once the last acting seat's action is accepted, and not before.
+### 8.8 `match_finished` (server → every seat and spectator)
 
-### 8.8 `match_finished` (Server → Client, broadcast)
-
-```json
+```text
 {
-  "result": <ResultPayload>,
-  "transcript": <RuntimeTranscriptPayload>
+  "result": {"result_type": "Win", "payload": {"seat": 0}},
+  "transcript": <RuntimeTranscriptPayload, §17>
 }
 ```
 
-Terminal message before the server closes the connection with code `1000` (normal closure).
+- `result` is the result (§17): the same for every recipient.
+- `transcript` is the recipient's runtime transcript (§17): `view: "seat"` for a seat of a
+  hidden-information game, `"public"` for its spectators, `"full"` for everyone in a
+  perfect-information game.
 
-### 8.9 `match_aborted` (Server → Client, broadcast)
+The last frame; the server then closes with `1000 normal_closure`.
 
-```json
+### 8.9 `match_aborted` (server → every seat and spectator)
+
+```text
 {
-  "abort": <AbortMetadataPayload>,
-  "transcript": <RuntimeTranscriptPayload>
+  "abort": {"reason": "turn_deadline_expired", "message": "...", "cause_type": null, "cause_message": null},
+  "transcript": <RuntimeTranscriptPayload, §17>
 }
 ```
 
-Terminal message before close. The connection closes with code `1000`; the abort metadata carries
-the failure reason.
+- `abort` is the `AbortMetadataPayload` (§17). `reason` is one of `turn_deadline_expired`,
+  `peer_disconnected`, `heartbeat_timeout`, `adapter_error`, `turn_limit_exceeded`, `core_error`
+  (the rules refused a simultaneous round, or the match failed to start) or `runtime_error` (the
+  match failed to start, or the server's match driver failed). For a hidden-information game
+  `cause_message` is always null.
+- `transcript` is the recipient's runtime transcript, as for `match_finished`.
 
-### 8.10 `ping` / `pong` (bidirectional)
+The last frame; the server then closes with `1000` and a reason naming the abort (§9.1):
+`match_aborted` for a match that failed to start, and `4500 server_error` when the match driver
+crashed.
 
-```json
-{ "nonce": "<echoed>" }
-```
-
-Sent every 20 seconds by the server to the **active seat** while its turn is open (in a
-simultaneous round, to each acting seat until its action is accepted). An off-turn
-seat is not pinged: the server does not read from it, and it is checked when its turn comes
-(the protocol-level keepalive of §3 covers every connection meanwhile). Clients must reply with
-`pong` echoing the same `nonce` within 20 seconds. Two consecutive missed `pong` responses close
-the connection with code `4408` (`heartbeat_timeout`).
-
-Heartbeat-driven close is one of several ways a peer may disappear (others: explicit close, TCP
-RST, network partition). The disconnect grace period (§11) starts at the moment of close,
-regardless of which mechanism triggered it.
-
-**Action-after-terminal rule** (referenced from §8.6): once the server has emitted `match_state`
-with a non-`running` lifecycle, it reads nothing more from either seat: it sends the terminal
-frame (`match_finished` or `match_aborted`) and closes both play channels. Any `action_response`
-still in flight is never read, and no reply is sent. The error code `match_already_finished` is
-reserved and not currently emitted.
-
-The match's lifecycle transition itself is **atomic at the server**: a single state mutation
-flips `running → finished` or `running → aborted`. Frames arriving "during" that transition
-either land on `running` (and are processed normally) or land on the post-transition state (and
-follow this rule). There is no third outcome.
-
-### 8.11 `error` (Server → Client, non-terminal)
+### 8.10 `ping` / `pong` (server → acting seat; client → server)
 
 ```json
-{ "code": "<error_code>", "message": "..." }
+{"nonce": "3f2a9c1e"}
 ```
 
-For protocol-level issues that don't terminate the match (e.g., malformed message). The Client
-should log and continue.
+The server pings an **acting seat while its turn is open** (in a simultaneous round, each acting
+seat until its action is accepted); spectators and off-turn seats get no application pings. The
+first ping goes 20 s after the `observation_request`; each later one 20 s after the previous pong
+or miss. The client answers with `pong` echoing the `nonce`; a pong with another nonce is
+ignored. A ping not answered within 20 s is a miss, and the second consecutive miss closes the
+connection `4408 heartbeat_timeout`, about 80 s after the request. With the default 30 s turn
+deadline, the deadline always fires first.
 
-### 8.13 spectator_hello / spectator_welcome (Phase 36)
+The heartbeat restarts on every request and on a resume, so after a resume the first ping comes
+20 s later. The server never answers a client's `ping`. A `4408` close is a disconnect: the grace
+period of §11 applies, and if the seat does not resume the match aborts with `heartbeat_timeout`.
 
-Added for the spectator channel. New message types rather than widening `hello`/`welcome`,
-because §7 bumps the schema for type or semantic changes to existing fields but explicitly allows
-new message types that older clients can ignore. `WelcomeBody.seat` is `int` under `strict=True`
-and cannot carry `null`, so reusing `welcome` for a seatless client was not possible without a bump.
+**After the end.** Once the server has sent `match_state` with a lifecycle other than `running`,
+it reads nothing more from the seats: it sends the terminal frame and closes both play channels.
+An `action_response` still in flight is never read. (A client that keeps sending frames the
+server never reads may see its connection reset by TCP when the server closes, losing the
+terminal frame; the public transcript remains available over HTTP.) The code
+`match_already_finished` is reserved and not emitted. The transition itself is atomic: a frame lands either before it (and is processed
+normally) or after it (and is not read).
 
-`spectator_hello` (Client → Server), sent as the first frame on the spectate channel:
+### 8.11 `error` (server → client)
+
+```json
+{"code": "malformed_envelope", "message": "..."}
+```
+
+On a play channel, sent to the acting seat for a frame the server could not use: one that is not
+JSON or not a valid envelope, one with an envelope `schema_version` outside 1-4, or a message
+type other than `action_response`, `pong` or `ping` during its turn. The connection stays open
+and the error costs no retry, but at the 16th such frame in one turn the server stops reading the
+connection, closes it `4422 too_many_malformed_frames` after that error, and treats the seat as
+dropped (§11: it may resume, with a fresh count).
+
+On a spectate channel, a well-formed envelope of any type other than `ping`/`pong` is answered
+with `error` code `protocol_violation`, and the connection is closed `1000 match_over`. A frame
+that does not parse is ignored.
+
+### 8.12 `spectator_hello` / `spectator_welcome`
+
+`spectator_hello` (client → server), the first frame on a spectate channel, within 10 s of
+opening it:
 
 ```json
 {
-  "type": "spectator_hello",
-  "schema_version": 1,
-  "payload": {
-    "client_name": "my-viewer",
-    "client_version": "0.1.0",
-    "supported_schema_versions": [1]
-  }
+  "client_name": "my-viewer",
+  "client_version": "0.1.0",
+  "supported_schema_versions": [4]
 }
 ```
 
-No `requested_seat` and no `resume_token`: possession of the `match_id` is the capability, and a
-reconnecting spectator simply says hello again.
+No seat and no resume token: a reconnecting spectator says hello again and gets fresh history.
 
-`spectator_welcome` (Server → Client) answers it and carries the attach-time history:
+`spectator_welcome` (server → client):
 
 ```json
 {
-  "type": "spectator_welcome",
-  "schema_version": 1,
   "match_id": "...",
-  "payload": {
-    "match_id": "...",
-    "game_id": "connect4",
-    "game_schema_version": 1,
-    "lifecycle": "running",
-    "schema_version": 1,
-    "negotiated_schema_version": 1,
-    "players": [{"player_id": "p0", "label": "alice", "seat": 0}],
-    "turn_count": 4,
-    "transcript": { }
-  }
+  "game_id": "connect4",
+  "game_schema_version": 1,
+  "lifecycle": "running",
+  "schema_version": 4,
+  "negotiated_schema_version": 4,
+  "players": [{"player_id": "p0", "label": "alice", "seat": 0}],
+  "turn_count": 4,
+  "transcript": null
 }
 ```
 
-`transcript` is the public transcript, which for a perfect-information game is the full one, and is
-`null` before the match starts. Bundling it into the welcome means a spectator joining mid-match can
-render immediately; there is no separate history message for a running match. It is queued before
-the connection joins the broadcast set, so live frames always follow the history they continue.
+- `transcript` is the public runtime transcript so far (the full one for a perfect-information
+  game), and null before the match starts. A spectator joining mid-match can render at once; no
+  other history message exists.
+- Live frames follow: `match_state`, `turn_committed`, `match_finished`, `match_aborted`, never
+  `observation_request` or `action_rejected`. A spectator is sent no `turn_committed` for a turn
+  its welcome's transcript already carried, and misses none after it.
+- If the match has already ended, the server sends `spectator_welcome`, whose transcript is the
+  final one, and closes `1000 match_over`.
 
-If the match is already `finished` or `aborted`, the server sends `spectator_welcome` and closes.
+## 9. Errors
 
-## 9. Error taxonomy
+### 9.1 Close codes
 
-WebSocket close codes (4000-4999 are application-defined):
-
-| Code | Name | Meaning |
-|------|------|---------|
-| `1000` | `normal_closure` | Match completed or aborted; transcript already delivered. |
-| `1003` | `unsupported_data` | Binary frame received. |
-| `4400` | `schema_version_mismatch` | No mutually supported `schema_version`. |
-| `4401` | `unauthorized` | A `resume_token` bound to the other seat (§11). Further uses reserved for v2 auth. |
+| Code | Reasons | Meaning |
+|------|---------|---------|
+| `1000` | `normal_closure` | The match finished; `match_finished` was delivered. |
+| `1000` | `turn_deadline_expired`, `peer_disconnected` (also after a heartbeat timeout), `adapter_error`, `turn_limit_exceeded`, `core_error`; `match_aborted` for an abort before the match started | The match aborted; `match_aborted` was delivered. |
+| `1000` | `superseded` | A resume replaced this connection (§11). |
+| `1000` | `match_over` | Spectator: the match has ended, or the spectator sent a message it may not. |
+| `1000` | `spectator_too_slow` | Spectator: its outbound queue overflowed (§13). |
+| `1003` | | A binary frame. |
+| `1007`, `1009`, `1011` | | From the WebSocket layer: invalid UTF-8, a frame over 1 MiB, a keepalive ping not answered. |
+| `1013` | `outbox_overflow` | A seat stopped reading: more than 16 MiB sent to it is still unsent (§13). It may resume (§11). |
+| `4400` | `schema_version_mismatch` | The server's version is not in `supported_schema_versions`, or the first frame's envelope `schema_version` is outside 1-4. |
+| `4401` | `unauthorized` | The resume token is the *other* seat's current token. |
 | `4404` | `unsupported_endpoint` | No such WebSocket endpoint. |
-| `4408` | `heartbeat_timeout` | Two consecutive missed `pong`s. |
-| `4409` | `seat_taken` | Seat already has a live connection. |
-| `4410` | `match_not_found` | `match_id` does not exist (or expired with server restart). |
-| `4422` | `malformed_envelope` | Envelope failed validation, or no `hello` / `spectator_hello` within 10 s of connecting (reason `hello_timeout`). |
-| `4429` | `rate_limited` | Connection or match-creation rate cap hit (v1 has hardcoded caps). |
-| `4500` | `server_error` | Internal server failure. If the match driver fails, the match aborts with reason `runtime_error`, both seats receive `match_aborted`, and both close `4500`. |
+| `4408` | `heartbeat_timeout` | Two consecutive missed pongs (§8.10). |
+| `4409` | `seat_taken` | The seat has a live connection, or the match is running and the `hello` has no resume token. |
+| `4409` | `match_not_started` | A resume token before both seats have joined; send a fresh `hello`. |
+| `4410` | `match_not_found` | No such match. |
+| `4410` | `match_expired` | The match was evicted (§13) while the client waited or said hello. |
+| `4410` | `match_over` | The match has ended: no seat can be claimed or resumed. |
+| `4410` | `invalid_resume_token` | A token that is not this seat's current one (rotated, from another match, or from before a restart). |
+| `4422` | `invalid_seat` | `?seat=` missing, or anything but `0` or `1`. |
+| `4422` | `hello_timeout`, `no_hello_received` | No `hello` / `spectator_hello` within 10 s, or the socket closed first. (A binary first frame closes `1003`.) |
+| `4422` | `malformed_envelope`, `expected_hello_got_<type>`, `expected_spectator_hello_got_<type>` | The first frame is not a valid `hello` / `spectator_hello`. |
+| `4422` | `seat_mismatch` | A fresh `hello`'s `requested_seat` differs from `?seat=`. |
+| `4422` | `too_many_malformed_frames` | 16 unusable frames in one turn (§8.11). |
+| `4429` | `connections_per_ip`, `connection_opens_per_ip`, `connections_per_match`, `spectators_per_match` | A rate cap (§13). |
+| `4500` | `server_error` | Internal failure: the match driver crashed (the match aborts `runtime_error` first), or a `welcome` could not be sent. |
 
-In-band error codes carried in `error.code` and `action_rejected.error.code`:
+After the handshake, a malformed frame is answered in-band (§8.11) and does not close the
+connection until the cap. Every close of a play channel, the transport-level ones included, is a
+disconnect: the grace period of §11 applies.
 
-| Code | Source | Meaning |
-|------|--------|---------|
-| `illegal_action` | rules engine | Action rejected by `apply_action`. |
-| `wrong_seat` | server | Action sent by a non-active seat. |
-| `wrong_turn` | server | Action did not match the current observation. |
-| `match_already_finished` | server | Reserved; not currently emitted (see §8.10). |
-| `turn_deadline_expired` | server | `deadline_ms` elapsed; match aborts. |
-| `adapter_error` | server | Retry budget exhausted on `action_rejected`. |
-| `protocol_violation` | server | Message arrived in an invalid lifecycle state. |
+**Refusals before `hello`.** A connection refused before its `hello` is read (unknown endpoint,
+unknown match, bad `?seat=`, a per-IP cap) is accepted, the server waits up to 1 s for the client's
+first frame, and then closes with the code. A client should send its `hello` as soon as the socket
+opens and expect the close code, not a refused handshake. At most 64 refused connections wait
+like this at once, server-wide; past that they close at once.
 
-Domain-level errors raised inside `arena.core` retain their original `code`, `message`, and
-`details` fields; the wire never repackages them.
+### 9.2 The order of checks on a play channel
 
-## 10. Match creation and join flow
+1. Per-IP caps: `4429`.
+2. The match exists: `4410 match_not_found`.
+3. `?seat=` is 0 or 1: `4422 invalid_seat`.
+4. Accept; the first frame arrives within 10 s (`4422 hello_timeout`); it is text (`1003`); its
+   envelope `schema_version` is 1-4 (`4400`); it is a valid `hello` (`4422`).
+5. The match still exists: `4410 match_expired`.
+6. With a `resume_token`, the resume path: the match has not ended (`4410 match_over`); the token
+   is the seat's current one (`4401` if it is the other seat's, else `4410
+   invalid_resume_token`); the version is served (`4400`); the match is running (`4409
+   match_not_started`).
+7. Without one: the match has not ended (`4410 match_over`); it is not running (`4409
+   seat_taken`); `requested_seat` matches (`4422 seat_mismatch`); the version is served (`4400`);
+   the per-match cap (`4429`); the seat is free (`4409 seat_taken`).
 
-1. Creator sends `POST /matches` with `{game_id, game_config, players: [{label}, {label}],
-   per_turn_deadline_ms}`.
-2. Server returns `{match_id, seat_0_url, seat_1_url}`. Both URLs are
-   `WS /matches/{match_id}/play?seat=N`. Lifecycle starts at `created`.
-3. Creator opens `seat_0_url`; sends `hello`; receives `welcome` with `lifecycle="created"`.
-4. Creator forwards `seat_1_url` to the joiner out-of-band (Discord, email, etc.).
-5. Joiner opens `seat_1_url`; sends `hello`; receives `welcome` with `lifecycle="created"`.
-6. As soon as the second `hello` is accepted, the server emits `match_state` with
-   `lifecycle="running"` to both seats and immediately follows with an
-   `observation_request` to seat 0.
-7. The match proceeds turn by turn until `match_finished` or `match_aborted`.
+A spectate channel checks the per-IP caps, the match, the first frame (`spectator_hello`), the
+version, whether the match still exists, and the per-match spectator cap, in that order.
 
-The creator becomes seat 0 by convention; the joiner becomes seat 1. There is no client-side seat
-negotiation in v1.
+### 9.3 In-band error codes
+
+| Code | Carried in | Meaning |
+|------|------------|---------|
+| a domain code (`illegal_action`, `wrong_player`, `game_finished`, `serialization_error`, ...) | `action_rejected.error` | The rules refused the action. The code, message and details are the domain error's own, never repackaged. |
+| `adapter_error` | `action_rejected.error` | The action could not be loaded (§8.5). |
+| `malformed_envelope` | `error` | An unusable frame from the acting seat (§8.11). |
+| `protocol_violation` | `error` | A spectator sent a message other than `ping`/`pong`; the connection then closes. |
+| `match_already_finished` | | Reserved; not emitted. |
+
+## 10. Creating and joining a match
+
+1. The creator sends `POST /matches` and receives the `match_id` and both seat URLs. The match is
+   `created`.
+2. Each player opens its seat URL and sends `hello`, and receives `welcome` with
+   `lifecycle: "created"`. The creator hands the other seat's URL to its player out of band.
+3. When the second `hello` is accepted the match starts. Any opening chance turns are sent as
+   `turn_committed`, then `match_state` with `lifecycle: "running"` goes to both seats and every
+   spectator, then an `observation_request` to each acting seat (seat 0 in a sequential game, both
+   seats in a simultaneous round).
+4. Turns proceed until `match_finished` or `match_aborted`.
+
+Seats are assigned by URL; there is no seat negotiation.
 
 ## 11. Disconnects and reconnection
 
-- **Disconnect during own turn**: server starts the disconnect grace period (default 30s,
-  configurable at match creation via `disconnect_grace_ms`). If the seat reconnects with a valid
-  `resume_token` within the window, the in-flight `observation_request` is re-sent (with the
-  remaining `deadline_ms` recomputed from the original wall-clock deadline) and play continues.
-  If the deadline expires inside the grace window, the match aborts with reason
-  `turn_deadline_expired`. Otherwise the match aborts with reason `peer_disconnected`.
-- **Disconnect off-turn**: server keeps the match alive. When the dropped seat's turn arrives, the
-  same grace period applies before issuing the `observation_request`.
-- **Both seats disconnected**: there is no separate rule. The active seat's grace period (or
-  the turn deadline, whichever ends first) decides the match; the off-turn seat's absence is
-  noticed when its turn comes.
-- **Heartbeat timeouts** (§8.10) are disconnects too: the `4408` close starts the grace period,
-  and if the seat does not resume the match aborts with reason `heartbeat_timeout`.
-- **Running matches are reachable only by resume token.** Once both seats have joined, a
-  `hello` without a `resume_token` closes with `4409 seat_taken`, even while a seat's grace
-  period runs. (Before this rule, a seat whose socket had dropped could be claimed by anyone
-  holding the `match_id`, who then resumed with the fresh token and read that seat's view.)
-- **Server restart**: matches do not survive. Reconnects with a stale `resume_token` close with
-  `4410` (`match_not_found`).
-- **Resume protocol**: reconnecting client sends `hello` with `resume_token`. Server validates the
-  token's `(match_id, seat)` binding; mismatch closes with `4401` (`unauthorized`). On success the
-  server responds with `welcome` containing the latest lifecycle, a freshly-rotated
-  `resume_token`, and (v3) **`welcome.transcript`: the seat's own transcript so far**. The replay
-  rides inside the welcome rather than as separate frames. The client reaches **logically
-  equivalent state** to one that never disconnected. Framing is not byte-identical; the resulting
-  state is. The server then sends `match_state` and, if the reconnecting seat is the active seat,
-  re-sends the in-flight `observation_request`, so the client always knows what to act on. In a
-  simultaneous round (v4) a seat whose action was already accepted is not asked again: its action
-  stands, and it waits for the round's `turn_committed`.
-- **A resume is only for a running match.** Before both seats have joined there is nothing to
-  resume: a `hello` with a `resume_token` closes with `4409 match_not_started`, and the client
-  should send a fresh `hello`.
-- **The reconnected connection takes over immediately**, active seat or not. The old socket, if
-  still open (half-open TCP), is closed with `1000 superseded`. The server builds the
-  replay transcript and swaps the connection into the broadcast set in one uninterrupted step, so
-  every turn is either in `welcome.transcript` or delivered live afterwards, never both and never
-  neither.
-- **No seat can be claimed or resumed once a match has ended** (finished, aborted, or its driver
-  crashed): a `hello` closes with `4410 match_over`, and resume tokens are invalidated. A finished
-  match stays in the registry for late reads and releases its seats. Without this rule, anyone
-  holding the `match_id`, including every spectator, could claim a seat and read that seat's
-  private transcript.
-- **Capability caveat.** Seat URLs and the spectate URL share one `match_id`, so until both seats
-  are claimed, anyone who can spectate can take a seat. Share a hidden-information match's id only
-  with its players until both have joined. Separate spectate capabilities belong with real
-  authentication, which is deferred.
+- **A drop is noticed when the server next reads the seat**: during its own turn, at once; for an
+  off-turn seat, when its turn comes. Its `observation_request` is sent (and lost) first, so the
+  turn deadline is already running.
+- **Grace.** The seat then has `disconnect_grace_ms` to resume, capped by its turn deadline. If it
+  resumes, play continues. If the deadline ends first the match aborts `turn_deadline_expired`;
+  if the grace ends first, `peer_disconnected` (or `heartbeat_timeout` if a heartbeat closed it).
+- **Both seats dropped.** No separate rule: the acting seat's grace or deadline decides.
+- **Resume.** The client opens its seat URL again and sends `hello` with the `resume_token` from
+  its latest `welcome`. The server answers with a `welcome` carrying a fresh token and
+  **`transcript`: the seat's own transcript so far**, then a `match_state` to this seat, then, if
+  the seat is acting and its action is not yet accepted, the `observation_request` again with the
+  remaining `deadline_ms`. In a simultaneous round, a seat whose action was already accepted is not
+  asked again. The client reaches the same state as one that never dropped: the framing differs,
+  the information does not.
+- **The resumed connection takes over at once.** An old socket still open (half-open TCP) is
+  closed `1000 superseded`. The server builds the replay and swaps the connection into the
+  broadcast set in one step, so every turn is either in `welcome.transcript` or sent live
+  afterwards: never both, never neither.
+- **A resume replays the seat's own view**, redacted like the live frames, so it learns nothing
+  it would not have learned by staying connected.
+- **Only a running match can be resumed.** Before both seats have joined, a token is refused
+  `4409 match_not_started`; send a fresh `hello`.
+- **A running match is reachable only by resume token.** A token-less `hello` for a running match
+  is refused `4409 seat_taken`, even while a seat's grace period runs.
+- **Nothing can be claimed or resumed after the end.** A `hello` for an ended match closes
+  `4410 match_over`, and its tokens are invalid.
+- **Server restart.** Running matches do not survive; a resume then closes `4410`.
+- **Capability caveat.** Seat and spectate URLs share one `match_id`, so until both seats are
+  claimed anyone who can spectate can take a seat. Share a hidden-information match's id only with
+  its players until both have joined.
 
-**Information model (v3).** A reconnecting seat is replayed its *own* view: the same per-seat
-redaction as the live frames, so it learns nothing it would not have learned by staying
-connected. This is what makes resuming safe for hidden-information games. v1 and v2 relied on
-every game being perfect-information, and refused to serve any game that declared hidden
-information.
+## 12. Idempotency and retries
 
-## 12. Idempotency
+- The server keeps, per seat, the `turn_id`s it has committed and rejected. An `action_response`
+  whose `(seat, turn_id)` is among them is dropped silently: no reply, no retry spent, no commit.
+  So a client must use a fresh `turn_id` for every attempt, a retry included, and never reuse one
+  across turns.
+- Frames on one connection are processed in arrival order. Only one connection per seat is live
+  at a time (§11).
+- The sets live in memory with the match.
+- Broadcasts can be deduplicated by `turn_record.turn_index` (`turn_committed`) and `turn_count`
+  (`match_state`).
 
-- `action_response` carries a Client-generated `turn_id` (UUID4). Servers maintain a per-match
-  set of **observed** `turn_id`s, partitioned into "committed" and "rejected". Both states are
-  terminal for that `turn_id`.
-- WebSocket guarantees per-connection FIFO delivery; servers process `action_response` frames
-  strictly in arrival order on a given connection. There is no inter-connection ordering question
-  in v1 because only one connection per seat may be live at a time (§4, §11).
-- A duplicate `action_response` (same `turn_id` as a committed or rejected one) is silently
-  dropped by the server. It does **not** decrement the retry counter (§8.6), does **not** advance
-  the match, and does **not** generate any reply frame.
-- A `turn_id` reused **across turns** by the same seat (i.e., a `turn_id` already committed in
-  turn N being submitted again as the action for turn N+1) is treated the same way: dropped
-  silently. Clients must mint a fresh UUID4 per turn.
-- The committed/rejected set is in-memory and does not survive a server restart; once the
-  `match_id` is no longer in `MatchRegistry`, reconnects close with `4410` (`match_not_found`).
-- Server-broadcast messages (`turn_committed`, `match_state`) carry the integer `turn_count`;
-  clients deduplicate by it.
+## 13. Rate limits and resource bounds
 
-## 13. Rate limits (v1, hardcoded)
+Every cap below is enforced by the reference server (`arena/server/rate_limits.py`). A "source
+IP" is the TCP peer, or the right-most entry of the operator's trusted client-address header
+(`docs/DEPLOYMENT.md`); an IPv6 address counts by its /64, an IPv4-mapped one as its IPv4 address.
 
-> **Implementation status (Phase 40 Slice 0): every cap below is enforced.**
->
-> | Cap | Status |
-> |-----|--------|
-> | Max concurrent WebSocket connections per source IP | ✅ closes `4429` |
-> | Max WebSocket opens per source IP per minute | ✅ closes `4429` |
-> | Max match creations per source IP per minute | ✅ returns `HTTP 429 rate_limited` |
-> | Max concurrent seat connections per match | ✅ closes `4429` |
-> | Max concurrent spectators per match | ✅ closes `4429` |
-> | Max `action_response` per match per second | ✅ throttles (see below) |
-> | Max public-transcript reads per source IP per minute | ✅ returns `HTTP 429 rate_limited` |
->
-> **Scope of the action cap.** It counts action frames the server actually *reads*, which are the
-> ones from the seat whose turn it is. An off-turn seat's frames sit unread in its socket buffer
-> until its turn arrives, so they are not counted when sent. The cap therefore bounds work the
-> match loop performs, not raw inbound traffic — the per-IP and per-match connection caps are what
-> bound the latter. Exceeding it throttles (see below); it never closes a connection.
->
-> Implementation lives in `arena/server/rate_limits.py`. Caps are injectable: the test suite runs
-> with `RateLimiter.unlimited()` because the whole suite shares one client address.
->
-> **The action cap throttles instead of closing (Phase 38 hardening).** It used to close the seat
-> with `4429` at 2 actions per second. Two scripted or fast bots exceed that within one move each,
-> and every real-server demo then aborted as `peer_disconnected`, blaming a seat that did nothing
-> wrong. CI never saw it because tests run unlimited. The server now delays reading the next action
-> until the window has room, which bounds the loop's work just as closing did. The delay is the
-> server's, not the seat's: an action that has arrived counts as on time, and the wait is not charged
-> against the per-turn deadline (the window is shared by both seats). The cap is 10 per second.
+| Cap | Limit | On excess |
+|-----|-------|-----------|
+| Concurrent WebSocket connections per source IP (any path) | 8 | close `4429 connections_per_ip` |
+| WebSocket opens per source IP per minute (any path; refused ones count) | 60 | close `4429 connection_opens_per_ip` |
+| Match creations per source IP per minute (every attempt counts) | 5 | HTTP `429 rate_limited` |
+| Concurrent seat connections per match | 4 | close `4429 connections_per_match` |
+| Concurrent spectators per match | 16 | close `4429 spectators_per_match` |
+| `action_response` frames read per match per second | 10 | throttled |
+| Public-transcript reads per source IP per minute | 30 | HTTP `429 rate_limited` |
+| Public-transcript reads served at once, server-wide | 4 | queued |
 
-- Max concurrent WebSocket connections per source IP: **8**. "Source IP" is the TCP peer, or the
-  right-most entry of the operator's trusted client-address header (§ DEPLOYMENT); an IPv6
-  address counts by its /64, and an IPv4-mapped one as its IPv4 address.
-- Max WebSocket opens per source IP per minute, seats and spectators alike: **60**. The
-  concurrent cap alone let one client attach and detach a spectator in a loop, and each attach
-  to a long match costs the server a welcome of up to megabytes.
-- Max match creations per source IP per minute: **5**. Every attempt counts, and the cap is
-  checked before the request body is read. A create body is at most 64 KiB (`413
-  request_too_large`); `players` has at most two entries, and a label at most 64 characters.
-- Max `action_response` messages per match per second: **10**, enforced by throttling (see above).
-  The window is per match, so in a simultaneous round (v4) both seats share it: one seat's flood
-  slows both. It adds delay only and is never charged to either seat's deadline.
-- Max concurrent seat connections per match: **4**. A connection claims its per-match slot only
-  once its fresh `hello` is valid; a resume with a valid token claims none and is never refused
-  for this cap: sockets that never said hello used to hold the slots and lock a
-  dropped seat out of its own reconnect. Every new connection has 10 s to send its hello.
-- Max concurrent spectators per match: **16**, counted separately, so spectators can never
-  lock a seat out of its own reconnect.
-- Max public-transcript reads per source IP per minute (Phase 40): **30**; at most **4** are
-  served at once, server-wide (each holds a whole transcript in memory).
+- **Per-match slots are claimed after a valid `hello`.** A resume with a valid token claims none
+  and is never refused for the cap, so sockets that never said hello cannot lock a dropped seat out
+  of its own reconnect. Spectators have their own cap for the same reason.
+- **The action cap throttles, never closes.** The server delays reading the next action until the
+  window has room. The delay is the server's: an action that has arrived counts as on time, and the
+  wait is not charged to the deadline. The window is per match, so both seats of a simultaneous
+  round share it. It counts only frames the server reads, which are the acting seats'.
+- **Size bounds.** A create body is at most 64 KiB; `players` has at most 2 entries and a label at
+  most 64 characters; an inbound frame at most 1 MiB.
+- **Malformed frames.** At most 16 unusable frames per seat per turn, each answered with `error`
+  and logged; at the 16th the server stops reading that connection and closes it
+  `4422 too_many_malformed_frames`.
+- **Slow readers.** Every connection has its own outbound queue, so a slow reader never slows
+  the match. A connection with more than 16 MiB sent to it and still unsent, or 64 frames queued,
+  is closed: a spectator `1000 spectator_too_slow`, a seat `1013 outbox_overflow` (it may
+  resume). The keepalive (§3) closes a reader that stops answering pings within about 40 s in any
+  case.
+- **Match length.** At most 5000 turns, chance turns included; then the match aborts
+  `turn_limit_exceeded` (two Pig bots that only ever roll).
+- **Registry.** At most 1000 matches. When full, a new match sheds ended (finished or aborted)
+  matches first, then never-started ones, oldest first, and never a running match; if nothing can
+  be shed, `POST /matches` returns `503 server_busy`. An ended match is kept an hour after it
+  ended, a never-started one an hour after creation; a running match is never evicted (the turn
+  deadline and the turn cap end it). Eviction runs when a match is created, so these are minimums.
+  Clients waiting on an evicted match are closed `4410 match_expired`.
+- **Refusals.** At most 64 refused connections wait for their first frame at once (§9.1).
+- **Action throttle and duplicates.** The throttle counts every `action_response` read, a
+  duplicate `turn_id` included.
+- Other endpoints (`GET /matches/{id}`, `GET /games`, `GET /schemas/payloads`) are not
+  rate-limited.
 
-The server also bounds its match registry: at most 1000 matches. When it is full it sheds
-finished matches first, then never-started ones (which also expire after an hour), oldest
-first, and never a running match. Every age counts from the match's last change: a finished
-match is kept an hour after it *ended* (however long it ran), and a running match is given up
-only after 24 hours without a committed turn. If nothing can be shed, `POST /matches` returns `503
-server_busy`. Never-started matches the server sheds close any waiting seat or spectator with
-`4410 match_expired`.
+Rate limits bound abuse; they do not prevent it. The per-IP caps bound how many sockets one client
+holds, the refusal bound how many refused ones wait, and the malformed-frame cap how much logging
+one socket causes.
 
-Exceeding a connection or creation cap closes the connection with `4429` (HTTP `429` for match
-creation); the action cap throttles. The same caps apply to malformed
-or `protocol_violation`-emitting connections; a peer flooding the server with malformed frames
-hits the per-IP connection cap and is shed. This bounds the cost of the "logging DoS" attack
-surface to the cost of opening 8 sockets.
+## 14. Logging
 
-## 14. Logging contract
-
-The server emits one structured JSON log line per significant event. Every line contains:
+The server writes one structured JSON log line per significant event, with `timestamp`,
+`level`, `event` and `schema_version`, and `match_id` and `seat` where they apply:
 
 ```json
-{
-  "timestamp": "...",
-  "level": "info|warning|error",
-  "event": "<event_name>",
-  "match_id": "...",
-  "seat": 0,
-  "schema_version": 1,
-  ...event-specific fields
-}
+{"timestamp": "...", "level": "info", "event": "<event_name>", "match_id": "...", "seat": 0, "schema_version": 1}
 ```
 
-Documented `event` values: `match_created`, `match_started`, `seat_connected`, `seat_disconnected`,
-`turn_committed`, `action_rejected`, `turn_deadline_expired`, `match_finished`, `match_aborted`,
-`heartbeat_timeout`, `protocol_violation`.
+Events include `match_created`, `match_started`, `seat_connected`, `seat_disconnected`,
+`turn_committed`, `action_rejected`, `action_throttled`, `turn_deadline_expired`,
+`turn_limit_exceeded`, `match_finished`, `match_aborted`, `heartbeat_timeout`,
+`protocol_violation`, `rate_limited`, `spectator_connected`, `spectator_disconnected`,
+`spectator_dropped`, `outbox_overflow`, `transcript_stored`, `transcript_not_stored`,
+`transcript_store_failed`, `welcome_send_failed`, `run_match_error` and `public_view_failed`.
+The `schema_version` field of a log line is the log format's version, 1.
 
-Match transcripts are **not** logged (PII-by-default principle, even though current games are
-PII-free). They live in the dedicated transcript output channel.
+Transcripts are never logged; they go to the transcript store.
 
 ## 15. Test contract (informative)
 
-A conformant server passes:
-- a happy-path Connect 4 match with two scripted Clients
-- a happy-path Tic-Tac-Toe match with two scripted Clients
-- illegal action → `action_rejected` → retry → success
-- retry budget exhausted → `match_aborted` with `adapter_error`
-- per-turn deadline expired → `match_aborted` with `turn_deadline_expired`
-- mid-turn disconnect within grace → resume succeeds, transcript validates
-- mid-turn disconnect past grace → `match_aborted` with `peer_disconnected`
-- duplicate `action_response` (same `turn_id`) → idempotent, no double-commit
-- malformed envelope → `error` event, connection survives
-- binary frame → close `1003`
-- heartbeat miss → close `4408`
+A conformant server passes, among others:
 
-A conformant SDK passes the mirror suite from the Client side.
+- a full match of every game, with two scripted clients and a spectator;
+- illegal action → `action_rejected` → retry → commit; budget exhausted → `match_aborted`
+  `adapter_error`;
+- deadline expiry → `match_aborted` `turn_deadline_expired`;
+- a mid-turn drop and resume within grace; a drop past grace → `peer_disconnected`;
+- a duplicate `turn_id` → dropped, no double commit;
+- a malformed frame → `error`, connection survives; a binary frame → close `1003`;
+- a heartbeat miss → close `4408`;
+- a simultaneous round: both seats asked at once, neither's action visible before the round
+  commits;
+- a hidden-information game: no seat or spectator receives anything it may not see.
 
-## 16. Forward compatibility notes
+The repository's `tests/integration/` runs these over real TCP, and
+`tests/integration/test_typescript_sdk.py` runs the TypeScript SDK against the server.
 
-- The `auth` field is reserved on `hello` so adding token-based auth in v2 does not bump
-  `schema_version`.
-- The `spectate` URL is reserved so adding read-only spectators in v2 does not break clients.
-- The `resume_token` is opaque so server-side reconnection strategies can evolve without changing
-  the wire shape.
-- Game-config evolution is independent: a new optional Connect 4 field is a Connect 4 schema
-  change, not a wire change. v2 may extend `match_config` with hidden-information scoping, gated
-  by a `game_schema_version` bump per-game.
+## 16. Forward compatibility
+
+- `hello.auth` is reserved, so token-based authentication can be added without a version bump.
+- `resume_token` is opaque, so reconnection strategies can change without changing the wire.
+- Game configs evolve independently: a new optional config field is a `game_schema_version`
+  change for that game, not a wire change.
+- Clients must ignore message types they do not know (§7), and fields they do not know in §8
+  bodies (§6).
 
 ## 17. Payload reference
 
-The bodies of `observation_request`, `action_response`, `action_rejected`, `turn_committed`,
-`match_finished`, and `match_aborted` are not invented by the wire protocol — they reuse the
-existing `arena.adapters.in_process` and `arena.runtime` payload models verbatim, which are the
-canonical Pydantic v2 definitions plus their JSON Schema output.
-
-To keep this document a viable language-agnostic source of truth, every non-Python SDK MUST
-generate its own type bindings from the **JSON Schemas published alongside the server** at:
-
-- `GET /games` → per-game `config_schema` (Pydantic-derived JSON Schema)
-- `GET /schemas/payloads` → JSON Schema document covering: `ObservationRequestPayload`,
-  `ActionResponsePayload`, `DomainErrorPayload`, `TurnRecordPayload`, `SnapshotPayload`,
-  `ResultPayload`, `AbortMetadataPayload`, `RuntimeTranscriptPayload`, `SessionStatusPayload`,
-  `RuntimeEventPayload`, `PlayerRecordPayload`, plus every envelope message body in §8.
-
-Servers MUST expose `GET /schemas/payloads` at the same `schema_version` declared by the
-envelope. The endpoint returns:
+The bodies of §8 reuse the simulation's payload models verbatim. Their JSON Schemas are published
+at `GET /schemas/payloads`:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 4,
   "schemas": {
-    "ObservationRequestPayload": { /* JSON Schema */ },
-    "ActionResponsePayload":    { /* JSON Schema */ },
-    "DomainErrorPayload":       { /* JSON Schema */ },
-    "TurnRecordPayload":        { /* JSON Schema */ },
-    "SnapshotPayload":          { /* JSON Schema */ },
-    "ResultPayload":            { /* JSON Schema */ },
-    "AbortMetadataPayload":     { /* JSON Schema */ },
-    "RuntimeTranscriptPayload": { /* JSON Schema */ },
-    "SessionStatusPayload":     { /* JSON Schema */ },
-    "RuntimeEventPayload":      { /* JSON Schema */ },
-    "PlayerRecordPayload":      { /* JSON Schema */ },
-    "Envelope":                 { /* JSON Schema, discriminated union of message types */ }
+    "ObservationRequestPayload": {},
+    "ActionResponsePayload": {},
+    "DomainErrorPayload": {},
+    "RuntimeTranscriptPayload": {},
+    "SessionStatusPayload": {},
+    "RuntimeEventPayload": {},
+    "PlayerRecordPayload": {},
+    "AbortMetadataPayload": {},
+    "Envelope": {}
   }
 }
 ```
 
-The Python reference SDK (`arena.sdk`) consumes these schemas at install time via the bundled
-Pydantic models; it does not need to fetch from `/schemas/payloads` at runtime. Non-Python SDKs
-fetch once during build/codegen and pin to the same `schema_version` they support. Servers MUST
-keep `/schemas/payloads` byte-stable for a given `schema_version`; any change is a version bump.
+`Envelope` is a `oneOf` over the envelope of each message type except `spectator_hello` and
+`spectator_welcome`. The document is byte-stable for a given `schema_version`: any change to it is
+a version bump. The match transcript inside a runtime transcript is published only as an object;
+its shape is below. Non-Python clients may generate bindings from these schemas; the Python SDK
+uses its bundled models.
 
-**Envelope consistency (v3).** The JSON Schemas describe each field; a `RuntimeTranscriptPayload`
-or `SessionStatusPayload` must also agree with itself, and the reference implementation rejects
-one that does not:
+**Shapes** (the JSON Schemas are authoritative):
 
-- `lifecycle` is one of `created`, `running`, `finished`, `aborted`, and `abort` is present
-  exactly when it is `aborted`;
+- **`ObservationRequestPayload`**: `{game_id, schema_version: 1, seat, observation}`.
+  `observation` is the game's serialized observation for `seat`; legal moves live inside it.
+- **`ActionResponsePayload`**: `{game_id, schema_version: 1, seat, action}`. `action` is a
+  game-specific object, loaded by the game's serializer. Extra keys are rejected.
+- **`DomainErrorPayload`**: `{code, message, details}`. `details` is an object or null.
+- **Result**: `{result_type, payload}`: `{"result_type": "Win", "payload": {"seat": 0}}` or
+  `{"result_type": "Draw", "payload": {}}`.
+- **Snapshot**: `{game_id, schema_version: 1, config, state}`, the viewer's view of the config and
+  state. A full snapshot rehydrates the game state.
+- **Event**: `{event_type, payload}`, plus `is_public: false` and `audience: [seats]` for a private
+  event.
+- **Turn in `turn_committed`**: `{turn_index, kind, seat, action, outcome, events,
+  post_snapshot}`, plus `actions` for a joint turn.
+- **Turn in a match transcript**: `{kind, seat, action, outcome, events, result, post_snapshot}`,
+  plus `actions` for a joint turn. Its index is its position in `turns`; `result` is the result
+  after that turn (null until the end).
+  - `kind: "action"`: `seat` and `action` set, `outcome` null.
+  - `kind: "chance"`: `seat` and `action` null, `outcome` the recorded outcome (as the viewer may
+    see it).
+  - `kind: "joint"`: `seat`, `action` and `outcome` null, `actions` maps each acting seat (a
+    string key, in seat order) to its action.
+- **Match transcript**: `{game_id, schema_version, config, initial_snapshot, turns, view,
+  viewer_seat}`. Only a `view: "full"` transcript can be replayed; replay applies recorded chance
+  outcomes and never re-rolls, so it needs no seed. The seed appears nowhere.
+- **`RuntimeTranscriptPayload`**: `{match_id, game_id, schema_version, lifecycle, players, events,
+  abort, match_transcript, view, viewer_seat}`. `events` are runtime events.
+- **`RuntimeEventPayload`**: `{event_scope: "runtime", event_type, payload}`.
+- **`AbortMetadataPayload`**: `{reason, message, cause_type, cause_message}`.
+- **`PlayerRecordPayload`**: `{player_id, seat, label}`.
+
+**Consistency.** A runtime transcript or session status must also agree with itself, and the
+reference implementation rejects one that does not:
+
+- `lifecycle` is one of `created`, `running`, `finished`, `aborted`, and `abort` is present exactly
+  when it is `aborted`;
 - players have distinct seats and distinct `player_id`s;
-- `viewer_seat` is a seat exactly when `view` is `"seat"`, and `null` otherwise;
-- a transcript's `view` and `viewer_seat` equal those of the `match_transcript` it wraps (a
-  pre-v3 inner transcript carries none and is full);
-- in a view other than `"full"`, `abort.cause_message` is `null` (the text of an exception can
-  carry anything, including an agent's reasoning about its own hand).
+- `viewer_seat` is a seat exactly when `view` is `"seat"`, and null otherwise;
+- a transcript's `view` and `viewer_seat` equal those of the match transcript it wraps;
+- in a view other than `"full"`, `abort.cause_message` is null.
 
-**Key payload shapes** (informative summary; the JSON Schemas are authoritative):
+## 18. Who receives what
 
-- `ObservationRequestPayload`: `{schema_version, match_id, game_id, seat, observation,
-  legal_actions}`. `observation` and `legal_actions` are game-specific JSON-safe data produced by
-  the game's `Serializer`.
-- `ActionResponsePayload`: `{schema_version, match_id, game_id, seat, action}`. `action` is
-  game-specific JSON-safe data accepted by the game's `Serializer.load_action(...)`.
-- `DomainErrorPayload`: `{code, message, details}`. `code` is the simulation-layer exception's
-  canonical name (e.g. `"illegal_action"`, `"wrong_player"`, `"game_finished"`,
-  `"invalid_config"`); `details` carries arbitrary JSON-safe metadata.
-- `TurnRecordPayload`: `{turn_index, kind, seat, action, outcome, events, post_snapshot}`
-  mirroring `arena.match.TurnRecord`. `kind` is `"action"` or `"chance"` (v2). An action turn has
-  `seat` and `action` and a null `outcome`; a chance turn has null `seat` and `action` and a
-  game-specific `outcome`. `post_snapshot` is a full game-specific snapshot envelope.
-- `SnapshotPayload`: `{schema_version, game_id, state, terminal, result}` from
-  `Serializer.dump_snapshot(...)`. Required to rehydrate.
-- `ResultPayload`: `{kind: "win"|"draw", winner_seat, ...}` mirroring `arena.core.results`.
-- `AbortMetadataPayload`: `{reason, message, cause_type, cause_message}` from
-  `arena.runtime.AbortMetadata`. `reason` is one of the documented runtime abort codes
-  (e.g. `peer_disconnected`, `turn_deadline_expired`, `adapter_error`, `user_quit`,
-  `turn_limit_exceeded`).
-- `RuntimeEventPayload`: `{event_scope: "runtime", event_type, ...event-specific fields}`.
+| Server message | Acting seat | Other seat | Spectators |
+|----------------|-------------|------------|------------|
+| `welcome` | the seat that said `hello` | | no (`spectator_welcome`) |
+| `spectator_welcome` | no | no | the spectator that said hello |
+| `match_state` | yes | yes | yes |
+| `observation_request` | yes, each acting seat its own | no | never |
+| `action_rejected` | the seat whose action it was | no | never |
+| `turn_committed` | yes, its view | yes, its view | yes, the public view |
+| `match_finished` / `match_aborted` | yes, its transcript | yes, its transcript | yes, the public transcript |
+| `ping` | while its turn is open | no | no |
+| `error` | its own unusable frames | no (not read off-turn) | after a forbidden message |
 
-## 18. Message broadcast matrix
+- In a simultaneous round every acting seat is an acting seat above. A seat that has acted and
+  waits receives nothing about the others' choices until the joint `turn_committed`.
+- A seat that misses broadcasts while disconnected recovers them in its resume `welcome` (§11).
+- An off-turn seat's frames are not read until its turn.
 
-Who receives each Server → Client message. Spectators are live as of Phase 36.
+## Appendix A. Version history
 
-| Message type        | Active seat | Inactive seat | Spectators |
-|---------------------|-------------|---------------|------------|
-| `welcome`           | recipient only (response to that seat's `hello`) | recipient only | n/a — spectators get `spectator_welcome` |
-| `spectator_welcome` | n/a         | n/a           | recipient only (response to `spectator_hello`) |
-| `match_state`       | yes         | yes           | yes                      |
-| `observation_request` | **yes (only)**, each acting seat its own (v4) | no | **never** |
-| `action_rejected`   | **yes (only)**, the seat whose action it was | no | no |
-| `turn_committed`    | yes         | yes           | yes                      |
-| `match_finished`    | yes         | yes           | yes                      |
-| `match_aborted`     | yes         | yes           | yes                      |
-| `ping` / `pong`     | per-connection (independent of seat activity) | per-connection | per-connection |
-| `error`             | per-connection (only the offending peer) | per-connection | per-connection |
+| Version | Shipped in | What changed |
+|---------|-----------|--------------|
+| 1 | v1 (Phases 0-35) | The initial protocol. |
+| 2 | Phase 37 | **Chance turns.** Transcript turns gained `kind` (`"action"`, `"chance"`) and `outcome`; `seat` and `action` became nullable, since nobody chooses a chance outcome. `turn_committed.events` became load-bearing: it used to be an empty list, harmless while every game was deterministic, but a chance outcome cannot be recomputed. Replay applies recorded outcomes and never re-rolls; the seed is never sent. |
+| 3 | Phase 38 | **Per-viewer payloads**, so hidden-information games can be served. `turn_committed` carries the recipient's own `post_snapshot`, a new `public_snapshot`, and only the events and chance-outcome parts it may see; private events carry `is_public` / `audience`. Transcripts declare `view` and `viewer_seat`. `welcome.match_config` is the seat's view, and `welcome.transcript` replays the seat's history on resume. `POST /matches` accepts `supported_schema_versions`. New abort reason `turn_limit_exceeded`. For a perfect-information game every view is the full one. |
+| 4 | Phase 41 | **Simultaneous moves.** Several seats can act at once, each with its own `observation_request`, deadline, retry budget and grace. A round commits as one joint turn: `kind: "joint"` with an `actions` map keyed by seat. `match_state` and `GET /matches/{id}` gain `acting_seats`, and `current_seat` is null while several seats act. A sequential turn has no `actions` key. |
 
-Notes:
+## Appendix B. Superseded shapes and behaviour
 
-- "Inactive seat" includes seats currently in their disconnect grace period that later reconnect:
-  the missed broadcasts are reconstructed via transcript replay on resume (§11).
-- Spectators receive everything a seat receives except `observation_request` and
-  `action_rejected`, which are addressed to a seat and a spectator holds none. A spectator that
-  sends anything other than `ping`/`pong` gets an `error` with code `protocol_violation` and is
-  disconnected.
-- A spectator that cannot keep up is dropped rather than allowed to slow the match: once its
-  outbound queue overflows the server closes it with `1000 spectator_too_slow`. Seats are never
-  shed this way.
-- Attach-time history rides in `spectator_welcome.transcript` (the public transcript; identical to
-  the full one for a perfect-information game). There is no separate history message for a running
-  match.
-- Adding spectators required **no schema bump**: `spectator_hello` and `spectator_welcome` are new
-  message types, which §7 permits. v3 then made every broadcast **per recipient**: each seat gets
-  its own view and spectators the public view (§8.7). A spectator is sent no `turn_committed` for
-  a turn its `spectator_welcome` transcript already carried.
-- The server caps every match's length (default 5000 turns). A game that can loop forever
-  (two Pig seats that only ever roll) aborts with `turn_limit_exceeded` rather than pinning
-  server memory.
-- In a simultaneous round (v4) every acting seat is an "active seat" for the rows above. A seat
-  that has acted and is waiting for the others receives nothing about their choices until the
-  joint `turn_committed`.
-- `match_state` is the **only** lifecycle-transition signal; SDKs should drive their internal
-  state machine off it rather than off `welcome.lifecycle` after the initial handshake.
+A server decodes versions 1-3 (§7), and older clients or stored transcripts may still show these
+shapes.
+
+**Transcript turns.**
+
+- v1: `{seat, action, events, result, post_snapshot}`; `seat` and `action` always set; no `kind`,
+  no `outcome`.
+- v2: added `kind` (`"action"` or `"chance"`) and `outcome`; `seat` and `action` nullable.
+- v3: transcripts added `view` and `viewer_seat`. A transcript without them is a full one.
+- v4: added `kind: "joint"` and `actions`.
+
+**Messages.**
+
+- v1-v2: `turn_committed` had no `public_snapshot`; events had no `is_public` / `audience`;
+  `welcome.transcript` did not exist, and a resumed seat was not replayed its history.
+- v1-v3: `match_state` and `GET /matches/{id}` had no `acting_seats`.
+- v1 and v2 servers refused to serve any game that declared hidden information.
+
+**Server behaviour changed without a version bump** (a client may meet the old behaviour on an
+older server):
+
+- Before Phase 36 the spectate URL closed `4404`; spectators arrived with `spectator_hello` /
+  `spectator_welcome`, new message types, which §7 allows without a bump.
+- Before Phase 38 the action cap closed the seat `4429` at 2 actions per second; it now throttles
+  at 10.
+- Before Phase 40 a seat whose socket had dropped could be claimed by any holder of the
+  `match_id` sending a token-less `hello`; a running match now requires the resume token.
+- Before Phase 42:
+  - `match_finished.result` was always `{}`, and `match_state.result` and `GET /matches/{id}`
+    `result` always null; read the final transcript turn's `result` on such a server.
+  - A seat that stopped reading had frames dropped silently, instead of being closed `1013`.
+  - Malformed frames were answered without limit.
+  - Seat URLs were always `ws://`.
+  - Refusals before `hello` closed at once, and some clients (Node) saw `1006` instead of the
+    code.
+  - A non-integer `?seat=` was refused with HTTP 403 at the handshake, and unknown WebSocket
+    paths were outside the per-IP caps.
+  - The Python SDK stamped `1` on every envelope; it now stamps its `hello` with `1` and later
+    frames with the negotiated version.

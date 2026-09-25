@@ -1,0 +1,78 @@
+"""The shared contract suite for ${Name}: perfect information with chance.
+
+The chance part checks that the same seed and moves reproduce a match, that a
+transcript replays from its recorded outcomes alone, and that the seed appears
+nowhere a client could read it.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from arena.core.results import Win
+from arena.games.${name} import (
+    ${NAME}_GAME_ID,
+    ${Name}Action,
+    ${Name}Config,
+    ${Name}GameDefinition,
+    ${Name}State,
+)
+from arena.games.${name}.outcomes import ${Name}Flip
+from arena.testing import assert_game_contract
+
+
+@dataclass(frozen=True)
+class ${Name}ContractBundle:
+    definition: object
+    config: ${Name}Config
+    initial_state: ${Name}State
+    near_terminal_state: ${Name}State
+    terminal_state: ${Name}State
+    legal_action: ${Name}Action
+    illegal_action: object
+    terminal_action: ${Name}Action
+
+
+def build_${name}_contract_bundle() -> ${Name}ContractBundle:
+    definition = ${Name}GameDefinition
+    engine = definition.rules_engine
+    config = ${Name}Config()
+    # Seat 0 one point short: a safe choice wins without a flip.
+    near_terminal = ${Name}State(scores=(config.target - 1, 2), target=config.target)
+    safe = ${Name}Action(choice="safe")
+    # The chance contract plays the first legal action every turn, so CHOICES
+    # lists "risky" first: that playout must reach a chance node.
+    return ${Name}ContractBundle(
+        definition=definition,
+        config=config,
+        initial_state=engine.initial_state(config),
+        near_terminal_state=near_terminal,
+        terminal_state=engine.apply_action(near_terminal, 0, safe).state,
+        legal_action=${Name}Action(choice="risky"),
+        illegal_action=object(),
+        terminal_action=safe,
+    )
+
+
+def test_${name}_passes_the_shared_contract_suite() -> None:
+    bundle = build_${name}_contract_bundle()
+    assert bundle.definition.game_id == ${NAME}_GAME_ID
+    assert bundle.definition.has_chance_nodes is True
+    assert_game_contract(bundle)
+
+
+def test_a_risky_choice_waits_for_the_coin() -> None:
+    bundle = build_${name}_contract_bundle()
+    engine = bundle.definition.rules_engine
+    flipping = engine.apply_action(bundle.initial_state, 0, bundle.legal_action).state
+    assert engine.is_chance_node(flipping)
+    assert engine.legal_actions(flipping, 0) == ()
+    heads = engine.apply_chance(flipping, ${Name}Flip(heads=True)).state
+    tails = engine.apply_chance(flipping, ${Name}Flip(heads=False)).state
+    assert (heads.scores, tails.scores) == ((3, 0), (0, 0))
+    assert heads.seat == tails.seat == 1
+
+
+def test_the_near_terminal_fixture_wins() -> None:
+    bundle = build_${name}_contract_bundle()
+    assert bundle.definition.rules_engine.result(bundle.terminal_state) == Win(seat=0)

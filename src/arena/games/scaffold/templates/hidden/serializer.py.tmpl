@@ -1,0 +1,227 @@
+"""Boundary serializers for ${Name}.
+
+Everything a client sends is validated here (strict Pydantic payloads), and
+everything a viewer is sent is built for that viewer: ``dump_state`` is the
+full state, which only the server holds; seats get ``dump_state_for_seat`` and
+spectators ``dump_public_state``. Each view is built directly rather than by
+trimming another, so a leak in one cannot hide behind the other.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from typing import Annotated, TypeVar
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from arena.core.config import BaseGameConfig
+from arena.core.serializer import JSONMapping
+from arena.core.types import Seat
+from arena.games.${name}.actions import ${Name}Action
+from arena.games.${name}.config import (
+    DEFAULT_DIGITS,
+    MAX_DIGITS,
+    ${Name}Config,
+)
+from arena.games.${name}.observation import (
+    ${Name}Observation,
+    ${Name}PublicView,
+)
+from arena.games.${name}.outcomes import ${Name}Deal
+from arena.games.${name}.state import ${Name}State
+
+_T = TypeVar("_T")
+_STRICT = ConfigDict(extra="forbid", strict=True)
+
+#: One number per seat.
+Pair = Annotated[list[int], Field(min_length=2, max_length=2)]
+
+
+class ${Name}ConfigPayload(BaseModel):
+    model_config = _STRICT
+
+    digits: int = Field(default=DEFAULT_DIGITS, ge=2, le=MAX_DIGITS)
+
+
+class ${Name}ActionPayload(BaseModel):
+    model_config = _STRICT
+
+    choice: str
+
+
+class ${Name}StatePayload(BaseModel):
+    """The full state: the server's copy, never sent to a client."""
+
+    model_config = _STRICT
+
+    digits: int = Field(ge=2, le=MAX_DIGITS)
+    secrets: Pair | None = None
+    choices: list[str] = Field(max_length=2)
+
+
+class ${Name}PublicStatePayload(BaseModel):
+    model_config = _STRICT
+
+    digits: int = Field(ge=2, le=MAX_DIGITS)
+    dealt: bool
+    choices: list[str] = Field(max_length=2)
+    revealed: Pair | None = None
+
+
+class ${Name}SeatStatePayload(${Name}PublicStatePayload):
+    seat: int = Field(ge=0, le=1)
+    my_secret: int | None
+
+
+class ${Name}ObservationPayload(BaseModel):
+    model_config = _STRICT
+
+    seat: int = Field(ge=0, le=1)
+    digits: int = Field(ge=2, le=MAX_DIGITS)
+    my_secret: int | None
+    choices: list[str] = Field(max_length=2)
+    legal_actions: list[${Name}ActionPayload]
+
+
+class ${Name}DealPayload(BaseModel):
+    model_config = _STRICT
+
+    secrets: Pair
+
+
+def _expect(value: object, kind: type[_T]) -> _T:
+    if not isinstance(value, kind):
+        raise TypeError(f"expected {kind.__name__}, got {type(value).__name__}")
+    return value
+
+
+def _public(state: ${Name}State) -> ${Name}PublicStatePayload:
+    showdown = len(state.choices) == 2 and "fold" not in state.choices
+    return ${Name}PublicStatePayload(
+        digits=state.digits,
+        dealt=state.secrets is not None,
+        choices=list(state.choices),
+        revealed=list(state.secrets) if showdown and state.secrets is not None else None,
+    )
+
+
+class ${Name}Serializer:
+    """Boundary serializer for ${Name} domain models."""
+
+    # -- config ------------------------------------------------------------
+
+    def dump_config(self, config: BaseGameConfig) -> JSONMapping:
+        cfg = _expect(config, ${Name}Config)
+        return ${Name}ConfigPayload(digits=cfg.digits).model_dump(mode="json")
+
+    def load_config(self, payload: JSONMapping) -> BaseGameConfig:
+        p = ${Name}ConfigPayload.model_validate(payload)
+        return ${Name}Config(**p.model_dump())
+
+    # -- full state (server only) -----------------------------------------
+
+    def dump_state(self, state: object) -> JSONMapping:
+        s = _expect(state, ${Name}State)
+        return ${Name}StatePayload(
+            digits=s.digits,
+            secrets=list(s.secrets) if s.secrets is not None else None,
+            choices=list(s.choices),
+        ).model_dump(mode="json")
+
+    def load_state(self, payload: JSONMapping) -> object:
+        p = ${Name}StatePayload.model_validate(payload)
+        return ${Name}State(
+            digits=p.digits,
+            secrets=(p.secrets[0], p.secrets[1]) if p.secrets is not None else None,
+            choices=tuple(p.choices),
+        )
+
+    # -- per-viewer state (Phase 38) --------------------------------------
+
+    def dump_public_state(self, state: object) -> JSONMapping:
+        return _public(_expect(state, ${Name}State)).model_dump(mode="json")
+
+    def load_public_state(self, payload: JSONMapping) -> object:
+        p = ${Name}PublicStatePayload.model_validate(payload)
+        return ${Name}PublicView(
+            digits=p.digits,
+            dealt=p.dealt,
+            choices=tuple(p.choices),
+            revealed=(p.revealed[0], p.revealed[1]) if p.revealed is not None else None,
+        )
+
+    def dump_state_for_seat(self, state: object, seat: Seat) -> JSONMapping:
+        s = _expect(state, ${Name}State)
+        public = _public(s)
+        return ${Name}SeatStatePayload(
+            digits=public.digits,
+            dealt=public.dealt,
+            choices=public.choices,
+            revealed=public.revealed,
+            seat=seat,
+            my_secret=s.secrets[seat] if s.secrets is not None else None,
+        ).model_dump(mode="json")
+
+    # -- actions and observations -----------------------------------------
+
+    def dump_action(self, action: object) -> JSONMapping:
+        a = _expect(action, ${Name}Action)
+        return ${Name}ActionPayload(choice=a.choice).model_dump(mode="json")
+
+    def load_action(self, payload: JSONMapping) -> object:
+        # Client input: an unknown choice raises ValueError, which the server
+        # answers with action_rejected.
+        p = ${Name}ActionPayload.model_validate(payload)
+        return ${Name}Action(choice=p.choice)
+
+    def dump_observation(self, observation: object) -> JSONMapping:
+        o = _expect(observation, ${Name}Observation)
+        return ${Name}ObservationPayload(
+            seat=o.seat,
+            digits=o.digits,
+            my_secret=o.my_secret,
+            choices=list(o.choices),
+            legal_actions=[
+                ${Name}ActionPayload(choice=a.choice) for a in o.legal_actions
+            ],
+        ).model_dump(mode="json")
+
+    def load_observation(self, payload: JSONMapping) -> object:
+        p = ${Name}ObservationPayload.model_validate(payload)
+        return ${Name}Observation(
+            seat=p.seat,
+            digits=p.digits,
+            my_secret=p.my_secret,
+            choices=tuple(p.choices),
+            legal_actions=tuple(${Name}Action(choice=a.choice) for a in p.legal_actions),
+        )
+
+    # -- chance outcomes (Phase 37, per viewer since Phase 38) -------------
+
+    def dump_chance_outcome(self, outcome: object) -> JSONMapping:
+        o = _expect(outcome, ${Name}Deal)
+        return ${Name}DealPayload(secrets=list(o.secrets)).model_dump(mode="json")
+
+    def load_chance_outcome(self, payload: JSONMapping) -> object:
+        p = ${Name}DealPayload.model_validate(payload)
+        return ${Name}Deal(secrets=(p.secrets[0], p.secrets[1]))
+
+    def dump_chance_outcome_for_seat(self, outcome: object, seat: Seat) -> JSONMapping:
+        o = _expect(outcome, ${Name}Deal)
+        return {"my_secret": o.secrets[seat]}
+
+    def dump_public_chance_outcome(self, outcome: object) -> JSONMapping:
+        _expect(outcome, ${Name}Deal)
+        return {}
+
+
+__all__: Sequence[str] = [
+    "${Name}ActionPayload",
+    "${Name}ConfigPayload",
+    "${Name}DealPayload",
+    "${Name}ObservationPayload",
+    "${Name}PublicStatePayload",
+    "${Name}SeatStatePayload",
+    "${Name}Serializer",
+    "${Name}StatePayload",
+]

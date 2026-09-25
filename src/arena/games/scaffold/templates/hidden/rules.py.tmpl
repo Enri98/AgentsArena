@@ -1,0 +1,186 @@
+"""${Name} rules engine: hidden information plus chance.
+
+The game opens at a chance node that deals each seat a private number. Then
+seat 0 and seat 1 each choose once: ``keep`` or ``fold``. A fold loses at once
+(and shows nothing). If both keep, the numbers are shown and the higher one
+wins; equal numbers draw.
+
+Replace the rules with your game's; keep the structure. The pieces a hidden-
+information game needs are all here: a ``public_state`` for spectators, an
+observation holding only what its seat may see, private events, and a chance
+node whose outcome is private.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Sequence
+
+from arena.core.actions import Action
+from arena.core.chance import ChanceRng
+from arena.core.events import DomainEvent
+from arena.core.exceptions import (
+    ChanceResolutionError,
+    GameFinished,
+    IllegalAction,
+    WrongPlayer,
+)
+from arena.core.results import Draw, RuleResult, Win
+from arena.core.rules_engine import TransitionResult
+from arena.core.types import Seat
+from arena.games.${name}.actions import CHOICES, ${Name}Action
+from arena.games.${name}.config import ${Name}Config
+from arena.games.${name}.events import (
+    ${Name}Chose,
+    ${Name}Dealt,
+    ${Name}SecretReceived,
+    ${Name}Showdown,
+)
+from arena.games.${name}.observation import (
+    ${Name}Observation,
+    ${Name}PublicView,
+)
+from arena.games.${name}.outcomes import ${Name}Deal
+from arena.games.${name}.state import VALID_SEATS, ${Name}State
+
+#: The rules in a few sentences, for agents (see arena.agents.ollama.${name}).
+RULES_SUMMARY = (
+    "You are playing ${Name}, a two-player game of hidden numbers.\n"
+    "Each player is dealt a secret number; you see only your own.\n"
+    "Seat 0 chooses first, then seat 1: 'keep' or 'fold'.\n"
+    "Folding loses at once. If both keep, the higher number wins; equal numbers draw.\n"
+    "Keep a high number; fold a low one rather than lose the showdown."
+)
+
+_ALL_ACTIONS = tuple(${Name}Action(choice=choice) for choice in CHOICES)
+
+
+class ${Name}RulesEngine:
+    """Rules engine for ${Name}."""
+
+    def initial_state(self, config: ${Name}Config) -> ${Name}State:
+        return ${Name}State(digits=config.digits)
+
+    # -- seats -------------------------------------------------------------
+
+    def current_seat(self, state: ${Name}State) -> Seat:
+        # Seat 0 chooses first, then seat 1.
+        return len(state.choices) % 2
+
+    # -- actions -----------------------------------------------------------
+
+    def legal_actions(
+        self, state: ${Name}State, seat: Seat
+    ) -> tuple[${Name}Action, ...]:
+        if self.is_terminal(state) or self.is_chance_node(state):
+            return ()
+        return _ALL_ACTIONS if seat == self.current_seat(state) else ()
+
+    def validate_action(self, state: ${Name}State, seat: Seat, action: Action) -> None:
+        if self.is_terminal(state):
+            raise GameFinished("The game is already over.")
+        if self.is_chance_node(state):
+            raise IllegalAction("The deal is pending.")
+        if type(seat) is not int or seat != self.current_seat(state):
+            raise WrongPlayer("It is not this seat's turn.", details={"seat": seat})
+        if not isinstance(action, ${Name}Action):
+            raise IllegalAction(
+                "${Name} takes ${Name}Action moves.",
+                details={"action_type": type(action).__name__},
+            )
+
+    def apply_action(
+        self, state: ${Name}State, seat: Seat, action: Action
+    ) -> TransitionResult[${Name}State, DomainEvent, RuleResult | None]:
+        # Revalidate: callers are not trusted to have checked.
+        self.validate_action(state, seat, action)
+        assert isinstance(action, ${Name}Action)
+        next_state = replace(state, choices=state.choices + (action.choice,))
+        events: list[DomainEvent] = [${Name}Chose(seat=seat, choice=action.choice)]
+        if self._showdown(next_state):
+            assert next_state.secrets is not None
+            events.append(${Name}Showdown(secrets=list(next_state.secrets)))
+        return TransitionResult(
+            state=next_state, events=tuple(events), result=self.result(next_state)
+        )
+
+    # -- chance (Phase 37) -------------------------------------------------
+
+    def is_chance_node(self, state: ${Name}State) -> bool:
+        return state.secrets is None
+
+    def sample_chance(
+        self, state: ${Name}State, rng: ChanceRng
+    ) -> tuple[${Name}Deal, ChanceRng]:
+        (first, second), rng = rng.draw_many(state.digits, 2)
+        return ${Name}Deal(secrets=(first, second)), rng
+
+    def apply_chance(
+        self, state: ${Name}State, outcome: object
+    ) -> TransitionResult[${Name}State, DomainEvent, None]:
+        # Revalidate: a replayed transcript supplies the outcome.
+        if not self.is_chance_node(state):
+            raise ChanceResolutionError("The numbers are already dealt.")
+        if (
+            not isinstance(outcome, ${Name}Deal)
+            or type(outcome.secrets) is not tuple
+            or len(outcome.secrets) != len(VALID_SEATS)
+            or not all(
+                type(secret) is int and 0 <= secret < state.digits
+                for secret in outcome.secrets
+            )
+        ):
+            raise ChanceResolutionError("Each seat is dealt a number in [0, digits).")
+        return TransitionResult(
+            state=replace(state, secrets=outcome.secrets),
+            events=(
+                ${Name}Dealt(),
+                ${Name}SecretReceived(seat=0, secret=outcome.secrets[0]),
+                ${Name}SecretReceived(seat=1, secret=outcome.secrets[1]),
+            ),
+        )
+
+    # -- outcome -----------------------------------------------------------
+
+    def is_terminal(self, state: ${Name}State) -> bool:
+        return "fold" in state.choices or len(state.choices) == len(VALID_SEATS)
+
+    def result(self, state: ${Name}State) -> RuleResult | None:
+        if not self.is_terminal(state):
+            return None
+        if "fold" in state.choices:
+            return Win(seat=1 - state.choices.index("fold"))
+        assert state.secrets is not None
+        first, second = state.secrets
+        if first == second:
+            return Draw()
+        return Win(seat=0 if first > second else 1)
+
+    def _showdown(self, state: ${Name}State) -> bool:
+        return self.is_terminal(state) and "fold" not in state.choices
+
+    # -- views (Phase 38) --------------------------------------------------
+
+    def observation(
+        self, state: ${Name}State, seat: Seat
+    ) -> ${Name}Observation:
+        if type(seat) is not int or seat not in VALID_SEATS:
+            raise WrongPlayer("Only seats 0 and 1 play.", details={"seat": seat})
+        return ${Name}Observation(
+            seat=seat,
+            digits=state.digits,
+            my_secret=state.secrets[seat] if state.secrets is not None else None,
+            choices=state.choices,
+            legal_actions=self.legal_actions(state, seat),
+        )
+
+    def public_state(self, state: ${Name}State) -> ${Name}PublicView:
+        return ${Name}PublicView(
+            digits=state.digits,
+            dealt=state.secrets is not None,
+            choices=state.choices,
+            revealed=state.secrets if self._showdown(state) else None,
+        )
+
+
+__all__: Sequence[str] = ["RULES_SUMMARY", "${Name}RulesEngine"]

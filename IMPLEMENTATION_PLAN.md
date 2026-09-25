@@ -4404,7 +4404,7 @@ Each slice had an adversarial review; every confirmed finding was fixed with a t
 
 ---
 
-### Phase 42 - Documentation, examples, and the TypeScript SDK
+### Phase 42 - Documentation, examples, and the TypeScript SDK — ✅ COMPLETE (2026-09-25)
 
 Objective:
 - close the v2 loop and make the wire consumable outside Python
@@ -4426,3 +4426,60 @@ Acceptance criteria:
 - the scaffold generates a working hidden-information game skeleton that passes the generic
   contract suite
 - every doc claim about the wire matches the shipped code
+
+Status: **complete** (2026-09-25). Each slice had an adversarial review, and every confirmed
+finding was fixed with a test.
+
+#### Slice 1 - Packaged TypeScript SDK — ✅ COMPLETE
+
+`sdk-ts/` (`@agents-arena/sdk`): `playMatch`, `SeatSession`, `spectate`, `createMatch`,
+`fetchPublicTranscript`, on the standard `WebSocket` and `fetch` with no runtime dependencies. CI
+type-checks and tests it, and `tests/integration/test_typescript_sdk.py` plays tictactoe, Pig
+and RPS matches with a TypeScript spectator against the real server.
+
+Review findings, all fixed:
+- An abort during an async `choose` surfaced as a bare close instead of `MatchAbortedError`.
+- Spectating an aborted match did not raise `MatchAbortedError`.
+- Timeout timers kept the process alive for 10 s.
+- A failed handshake leaked its socket.
+- HTTP errors were not typed.
+- Node saw `1006` for close codes sent before `hello`. The server now reads the first frame
+  before closing (`_refuse`).
+- The server had to disable permessage-deflate, which broke Node's client.
+
+#### Slice 2 - Scaffold kinds — ✅ COMPLETE
+
+`python -m arena.games.scaffold --kind chance|hidden|simultaneous` generates a working game (a
+coin-flip race, keep-or-fold on a private deal, matching pennies), with working CLI, Ollama and
+MCP adapters and a contract test. The hidden kind passes the full shared suite, seat-view
+indistinguishability included. `tests/unit/games/test_scaffold_kinds.py` renders each kind into a
+temporary tree and checks that it:
+- lints clean;
+- passes its generated test;
+- registers and plays whole matches;
+- keeps each number hidden. This is checked by indistinguishability over whole matches, so it
+  names no event or field.
+
+Review findings, all fixed:
+- The contract skipped seat 0's `keep` entirely, because `revealing_actions` is per action. The
+  suite now also accepts `reveals(state, action)`.
+- Python keywords and names shadowing framework modules were accepted.
+- A registry test turned red once a hidden game was scaffolded.
+- Class-name casing differed between kinds.
+
+#### Slice 3 - Docs reconciliation — ✅ COMPLETE
+
+- `CLAUDE.md`, `AGENTS.md`, `docs/ADAPTER_BOUNDARIES.md` (rewritten around the enforced import
+  table), `docs/ADDING_A_GAME.md` (starts from the scaffold) and `README.md` reconciled with v4.
+- `docs/NETWORK_PROTOCOL.md` consolidated at v4. An audit checked every claim against the code
+  and validated every JSON example against the models. Version history and the superseded
+  v1-v3 shapes are now appendices.
+- About 30 claims were wrong. In four places the code was wrong, not the doc, and the code was
+  fixed:
+  - `result` was always empty in `match_finished`, `match_state` and `GET /matches/{id}`.
+  - A seat that stopped reading silently lost frames. It is now closed `1013` and can resume.
+  - Malformed frames were answered without limit. The cap is now 16 per turn, then `4422`.
+  - Seat URLs were always `ws://`. They now follow https, and `--public-url` sets them.
+- The Python SDK now stamps the wire version on its envelopes.
+- Real stack: `python -m arena.server` served TypeScript matches of RPS, Pig and Liar's Dice
+  with spectators, and a 20-round RPS match between two local qwen2.5 agents.

@@ -1,0 +1,41 @@
+"""Immutable ${Name} game state."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Sequence
+
+from arena.games.${name}.actions import CHOICES
+
+VALID_SEATS = (0, 1)
+
+
+@dataclass(frozen=True)
+class ${Name}State:
+    """The minimum authoritative state.
+
+    No seat's choice for the current round is ever stored: a round is applied
+    only once every seat has chosen (``apply_joint_action``), so there is
+    nothing to hide. ``last_round`` is the previous round's two choices.
+    """
+
+    scores: tuple[int, int]
+    target: int
+    last_round: tuple[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        if len(self.scores) != 2 or any(
+            type(score) is not int or score < 0 for score in self.scores
+        ):
+            raise ValueError("scores must be two non-negative ints")
+        if type(self.target) is not int or self.target < 1:
+            raise ValueError("target must be a positive int")
+        if max(self.scores) > self.target or min(self.scores) >= self.target:
+            raise ValueError("a score never passes the target, and only one seat reaches it")
+        if self.last_round is not None and (
+            len(self.last_round) != 2 or any(c not in CHOICES for c in self.last_round)
+        ):
+            raise ValueError(f"last_round must be two of {CHOICES}")
+
+
+__all__: Sequence[str] = ["VALID_SEATS", "${Name}State"]

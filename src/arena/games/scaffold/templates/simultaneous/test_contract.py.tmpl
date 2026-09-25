@@ -1,0 +1,78 @@
+"""The shared contract suite for ${Name}: simultaneous moves.
+
+The suite applies a bundle action as the acting seats would: at a joint node
+every acting seat plays it, so the bundle's actions are choices any seat makes.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import pytest
+
+from arena.core.exceptions import WrongPlayer
+from arena.core.results import Win
+from arena.games.${name} import (
+    ${NAME}_GAME_ID,
+    ${Name}Action,
+    ${Name}Config,
+    ${Name}GameDefinition,
+    ${Name}State,
+)
+from arena.testing import assert_game_contract
+
+
+@dataclass(frozen=True)
+class ${Name}ContractBundle:
+    definition: object
+    config: ${Name}Config
+    initial_state: ${Name}State
+    near_terminal_state: ${Name}State
+    terminal_state: ${Name}State
+    legal_action: ${Name}Action
+    illegal_action: object
+
+
+def build_${name}_contract_bundle() -> ${Name}ContractBundle:
+    definition = ${Name}GameDefinition
+    engine = definition.rules_engine
+    config = ${Name}Config()
+    heads = ${Name}Action(choice="heads")
+    # Seat 0 one round short; matching choices give it the match.
+    near_terminal = ${Name}State(scores=(config.target - 1, 1), target=config.target)
+    return ${Name}ContractBundle(
+        definition=definition,
+        config=config,
+        initial_state=engine.initial_state(config),
+        near_terminal_state=near_terminal,
+        terminal_state=engine.apply_joint_action(near_terminal, {0: heads, 1: heads}).state,
+        legal_action=heads,
+        illegal_action=object(),
+    )
+
+
+def test_${name}_passes_the_shared_contract_suite() -> None:
+    bundle = build_${name}_contract_bundle()
+    assert bundle.definition.game_id == ${NAME}_GAME_ID
+    assert bundle.definition.has_simultaneous_moves is True
+    assert_game_contract(bundle)
+
+
+def test_both_seats_act_and_neither_acts_alone() -> None:
+    bundle = build_${name}_contract_bundle()
+    engine = bundle.definition.rules_engine
+    assert engine.acting_seats(bundle.initial_state) == (0, 1)
+    with pytest.raises(WrongPlayer):
+        engine.apply_action(bundle.initial_state, 0, bundle.legal_action)
+
+
+def test_differing_choices_score_for_seat_1() -> None:
+    bundle = build_${name}_contract_bundle()
+    engine = bundle.definition.rules_engine
+    tails = ${Name}Action(choice="tails")
+    after = engine.apply_joint_action(
+        bundle.initial_state, {0: bundle.legal_action, 1: tails}
+    ).state
+    assert after.scores == (0, 1)
+    assert after.last_round == ("heads", "tails")
+    assert engine.result(bundle.terminal_state) == Win(seat=0)
