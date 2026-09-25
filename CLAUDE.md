@@ -94,7 +94,13 @@ several seats act at once is one **joint turn** (`arena.core.simultaneous`:
 asks every acting seat at once, each with its own deadline, retries, and grace. Exemplar:
 Rock-Paper-Scissors (`arena.games.rps`).
 
-**Active phase: 42**: docs reconciliation, scaffold templates, packaged TypeScript SDK.
+Phase 42 ✅ (2026-09-25): packaged TypeScript SDK (`sdk-ts/`), scaffold `--kind
+chance|hidden|simultaneous`, and docs reconciled with v4 (`docs/NETWORK_PROTOCOL.md` consolidated,
+every claim checked against the code, superseded shapes in appendices).
+
+**The v2 roadmap is complete.** No numbered phase is active. Follow-up work (packaging metadata,
+type checking in CI, release workflow) happens on the `library-basics` branch; see the known gaps
+in `docs/MATCH_ARENA_HANDOFF.md`.
 
 **Owner rule (2026-09-24): dispatch adversarial reviewer subagents between one feature and the
 next**, and fix confirmed findings before moving on.
