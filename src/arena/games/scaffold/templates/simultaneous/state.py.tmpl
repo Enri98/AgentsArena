@@ -30,8 +30,8 @@ class ${Name}State:
             raise ValueError("scores must be two non-negative ints")
         if type(self.target) is not int or self.target < 1:
             raise ValueError("target must be a positive int")
-        if max(self.scores) > self.target:
-            raise ValueError("a score never passes the target")
+        if max(self.scores) > self.target or min(self.scores) >= self.target:
+            raise ValueError("a score never passes the target, and only one seat reaches it")
         if self.last_round is not None and (
             len(self.last_round) != 2 or any(c not in CHOICES for c in self.last_round)
         ):

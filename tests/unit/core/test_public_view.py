@@ -182,9 +182,12 @@ def test_existing_engines_and_serializers_still_satisfy_their_protocols() -> Non
         assert isinstance(definition.serializer, Serializer)
 
 
-def test_only_liars_dice_declares_hidden_information() -> None:
+def test_liars_dice_declares_hidden_information_and_the_others_do_not() -> None:
+    # Checked by name, so a scaffolded hidden game registered beside these
+    # (python -m arena.games.scaffold --kind hidden) does not turn this red.
     hidden = {d.game_id for d in build_default_registry().list() if d.has_hidden_information}
-    assert hidden == {"liarsdice"}
+    assert "liarsdice" in hidden
+    assert hidden.isdisjoint({"connect4", "tictactoe", "nim", "pig", "rps"})
 
 
 def test_perfect_information_games_expose_their_full_state_as_the_public_view() -> None:

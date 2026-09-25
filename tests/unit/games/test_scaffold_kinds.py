@@ -29,12 +29,14 @@ from arena.agents.ollama._adapters import OLLAMA_GAME_ADAPTERS
 from arena.cli.games._registry import CLI_GAME_ADAPTERS
 from arena.core.registry import GameRegistry
 from arena.core.simultaneous import acting_seats
-from arena.games.scaffold._cli import KINDS, _render_files, main
+from arena.games.scaffold._cli import KINDS, _pascal, _render_files, main
 from arena.match import (
     apply_match_action,
+    apply_match_chance,
     apply_match_joint_action,
     dump_match_transcript,
     start_match,
+    start_replay_match,
     validate_match_transcript,
 )
 from arena.match.transcript import dump_match_transcript_for_viewer
@@ -176,30 +178,39 @@ def test_the_generated_game_registers_and_plays_whole_matches(generate, kind: st
 
 
 def test_the_hidden_game_keeps_each_number_from_the_other_seat(generate) -> None:
+    """Indistinguishability over whole matches: the same moves under two deals
+    that differ only in numbers a viewer may not see must look identical to it,
+    in every transcript turn and every observation, until the showdown. Nothing
+    here names an event or a field, so a leak added anywhere is caught."""
+
     generate("hidden", "gen_hidden")
+    game = importlib.import_module("arena.games.gen_hidden")
+    deal_type = importlib.import_module("arena.games.gen_hidden.outcomes").GenHiddenDeal
     definition = _definition("gen_hidden")
-    for seed in range(20):
-        match = _play(definition, seed)
-        secrets = match.state.secrets
-        for viewer in (0, 1, None):
-            view = dump_match_transcript_for_viewer(match, viewer)
-            assert view["view"] == ("public" if viewer is None else "seat")
-            deal = view["turns"][0]
-            assert deal["kind"] == "chance"
-            expected = {} if viewer is None else {"my_secret": secrets[viewer]}
-            assert deal["outcome"] == expected
-            received = [
-                event["payload"]
-                for turn in view["turns"]
-                for event in turn["events"]
-                if event["event_type"].endswith("SecretReceived")
-            ]
-            assert received == ([] if viewer is None else [{"seat": viewer,
-                                                             "secret": secrets[viewer]}])
-            states = [turn["post_snapshot"]["state"] for turn in view["turns"]]
-            assert all("secrets" not in state for state in states)
-            for state in states[:-1]:  # before the end, nobody's number is shown
-                assert state["revealed"] is None
+    engine = definition.rules_engine
+    serializer = definition.serializer
+
+    def views(deal: tuple[int, int], choices: tuple[str, ...], viewer: int | None) -> tuple:
+        match = start_replay_match(definition, definition.config_type())
+        match = apply_match_chance(match, deal_type(secrets=deal))
+        observations = []
+        for seat, choice in enumerate(choices):
+            if viewer is not None:
+                observed = engine.observation(match.state, viewer)
+                observations.append(serializer.dump_observation(observed))
+            match = apply_match_action(match, seat, game.GenHiddenAction(choice=choice))
+        turns = dump_match_transcript_for_viewer(match, viewer)["turns"]
+        return turns, observations
+
+    for choices in (("fold",), ("keep", "fold"), ("keep", "keep")):
+        # The showdown (both keep) shows both numbers: compare the turns before it.
+        compared = len(choices) if "fold" in choices else len(choices) - 1
+        for viewer, other_deal in ((0, (3, 5)), (1, (6, 8)), (None, (6, 5))):
+            turns_a, obs_a = views((3, 8), choices, viewer)
+            turns_b, obs_b = views(other_deal, choices, viewer)
+            # Turn 0 is the deal; turn i + 1 is choice i.
+            assert turns_a[: compared + 1] == turns_b[: compared + 1], (choices, viewer)
+            assert obs_a == obs_b, (choices, viewer)
 
 
 @pytest.mark.parametrize("kind", WORKING_KINDS)
@@ -211,7 +222,7 @@ def test_the_generated_adapters_work(generate, kind: str) -> None:
     importlib.import_module(f"arena.mcp.games.{name}")
     game = importlib.import_module(f"arena.games.{name}")
     choices = game.CHOICES
-    definition = getattr(game, f"{name.title().replace('_', '')}GameDefinition")
+    definition = getattr(game, f"{_pascal(name)}GameDefinition")
     match = start_match(definition, definition.config_type(), seed=7)
     engine = match.rules_engine
     seat = acting_seats(engine, match.state)[0]
@@ -226,7 +237,7 @@ def test_the_generated_adapters_work(generate, kind: str) -> None:
     assert cli.parse_input("nonsense", observation) is None
     assert "\n" in cli.render_state_plain(definition.serializer.dump_state(match.state))
 
-    builder = ollama.__dict__[f"{name.title().replace('_', '')}PromptBuilder"]()
+    builder = ollama.__dict__[f"{_pascal(name)}PromptBuilder"]()
     messages = builder.build_messages(observation, ("try again",))
     assert messages[0]["role"] == "system" and "try again" in messages[1]["content"]
     reply = json.dumps({"thought": "t", "choice": first.choice.upper()})
@@ -255,3 +266,71 @@ def test_dry_run_lists_the_kind_files(kind: str, capsys: pytest.CaptureFixture[s
 def test_an_unknown_kind_is_refused(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         main(["--dry-run", "--name", "demo", "--kind", "quantum"])
+
+
+def _checkout(tmp_path: Path) -> Path:
+    """The parts of a checkout the scaffold edits: the real games/__init__.py,
+    and adapter packages holding one framework module each."""
+
+    games = tmp_path / "src" / "arena" / "games"
+    games.mkdir(parents=True)
+    source = REPO_ROOT / "src" / "arena" / "games" / "__init__.py"
+    (games / "__init__.py").write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    (games / "scaffold").mkdir()
+    for parts in (("cli", "games"), ("agents", "ollama"), ("mcp", "games")):
+        package = tmp_path.joinpath("src", "arena", *parts)
+        package.mkdir(parents=True, exist_ok=True)
+        (package / "_registry.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "arena" / "agents" / "ollama" / "agent.py").write_text("", "utf-8")
+    return tmp_path
+
+
+@pytest.mark.parametrize("kind", WORKING_KINDS)
+def test_the_scaffold_writes_a_working_kind_into_a_checkout(
+    tmp_path: Path, kind: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _checkout(tmp_path)
+    assert main(["--name", "my_game", "--kind", kind, "--root", str(root)]) == 0
+    out = capsys.readouterr().out
+    assert f"Scaffolded a working {kind} game 'my_game'" in out
+    assert "from arena.agents.ollama.my_game import MyGamePromptBuilder" in out
+    assert (root / "tests" / "contract" / "test_my_game_contract.py").is_file()
+    assert (root / "src" / "arena" / "games" / "my_game" / "rules.py").is_file()
+    init = (root / "src" / "arena" / "games" / "__init__.py").read_text(encoding="utf-8")
+    assert "from arena.games.my_game.definition import register_my_game" in init
+    assert "register_my_game(registry)" in init
+    # A second run finds the game and refuses, --force or not.
+    assert main(["--name", "my_game", "--kind", kind, "--root", str(root), "--force"]) == 2
+
+
+@pytest.mark.parametrize(
+    ("name", "problem"),
+    [
+        ("class", "Python keyword"),
+        ("scaffold", "is not a game"),
+        ("agent", "--force would overwrite it"),
+        ("Bad", "must match"),
+    ],
+)
+def test_names_that_would_break_the_package_are_refused(
+    tmp_path: Path, name: str, problem: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _checkout(tmp_path)
+    assert main(["--name", name, "--kind", "hidden", "--root", str(root), "--force"]) == 2
+    assert problem in capsys.readouterr().err
+    init = (root / "src" / "arena" / "games" / "__init__.py").read_text(encoding="utf-8")
+    assert f"register_{name}" not in init
+
+
+def test_a_root_that_is_not_a_checkout_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["--name", "demo", "--root", str(tmp_path)]) == 2
+    assert "not an AgentsArena source checkout" in capsys.readouterr().err
+
+
+def test_class_names_are_pascal_case_for_every_kind() -> None:
+    assert _pascal("my_game") == "MyGame"
+    basic = _render_files("my_game", "basic", REPO_ROOT)
+    actions = REPO_ROOT / "src" / "arena" / "games" / "my_game" / "actions.py"
+    assert "class MyGameAction(Action):" in basic[actions]

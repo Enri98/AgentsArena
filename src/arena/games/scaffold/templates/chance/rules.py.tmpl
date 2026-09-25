@@ -77,7 +77,7 @@ class ${Name}RulesEngine:
             raise GameFinished("The game is already over.")
         if self.is_chance_node(state):
             raise IllegalAction("The coin is in the air.")
-        if seat != state.seat:
+        if type(seat) is not int or seat != state.seat:
             raise WrongPlayer("It is not this seat's turn.", details={"seat": seat})
         if not isinstance(action, ${Name}Action):
             raise IllegalAction(
@@ -152,7 +152,7 @@ class ${Name}RulesEngine:
     def observation(
         self, state: ${Name}State, seat: Seat
     ) -> ${Name}Observation:
-        if seat not in VALID_SEATS:
+        if type(seat) is not int or seat not in VALID_SEATS:
             raise WrongPlayer("Only seats 0 and 1 play.", details={"seat": seat})
         return ${Name}Observation(
             seat=seat,

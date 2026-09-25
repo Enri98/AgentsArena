@@ -81,7 +81,7 @@ class ${Name}RulesEngine:
             raise GameFinished("The game is already over.")
         if self.is_chance_node(state):
             raise IllegalAction("The deal is pending.")
-        if seat != self.current_seat(state):
+        if type(seat) is not int or seat != self.current_seat(state):
             raise WrongPlayer("It is not this seat's turn.", details={"seat": seat})
         if not isinstance(action, ${Name}Action):
             raise IllegalAction(
@@ -121,8 +121,14 @@ class ${Name}RulesEngine:
         # Revalidate: a replayed transcript supplies the outcome.
         if not self.is_chance_node(state):
             raise ChanceResolutionError("The numbers are already dealt.")
-        if not isinstance(outcome, ${Name}Deal) or not all(
-            type(secret) is int and 0 <= secret < state.digits for secret in outcome.secrets
+        if (
+            not isinstance(outcome, ${Name}Deal)
+            or type(outcome.secrets) is not tuple
+            or len(outcome.secrets) != len(VALID_SEATS)
+            or not all(
+                type(secret) is int and 0 <= secret < state.digits
+                for secret in outcome.secrets
+            )
         ):
             raise ChanceResolutionError("Each seat is dealt a number in [0, digits).")
         return TransitionResult(
@@ -158,7 +164,7 @@ class ${Name}RulesEngine:
     def observation(
         self, state: ${Name}State, seat: Seat
     ) -> ${Name}Observation:
-        if seat not in VALID_SEATS:
+        if type(seat) is not int or seat not in VALID_SEATS:
             raise WrongPlayer("Only seats 0 and 1 play.", details={"seat": seat})
         return ${Name}Observation(
             seat=seat,

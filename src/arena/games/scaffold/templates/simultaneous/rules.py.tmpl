@@ -62,14 +62,14 @@ class ${Name}RulesEngine:
     def legal_actions(
         self, state: ${Name}State, seat: Seat
     ) -> tuple[${Name}Action, ...]:
-        if self.is_terminal(state) or seat not in VALID_SEATS:
+        if self.is_terminal(state) or type(seat) is not int or seat not in VALID_SEATS:
             return ()
         return _ALL_ACTIONS
 
     def validate_action(self, state: ${Name}State, seat: Seat, action: Action) -> None:
         if self.is_terminal(state):
             raise GameFinished("The match is already over.")
-        if seat not in VALID_SEATS:
+        if type(seat) is not int or seat not in VALID_SEATS:
             raise WrongPlayer("Only seats 0 and 1 play.", details={"seat": seat})
         if not isinstance(action, ${Name}Action):
             raise IllegalAction(
@@ -91,7 +91,9 @@ class ${Name}RulesEngine:
         self, state: ${Name}State, actions: Mapping[Seat, Action]
     ) -> TransitionResult[${Name}State, DomainEvent, RuleResult | None]:
         # Revalidate every choice: callers are not trusted to have checked.
-        if sorted(actions) != list(VALID_SEATS):
+        if any(type(seat) is not int for seat in actions) or sorted(actions) != list(
+            VALID_SEATS
+        ):
             raise WrongPlayer(
                 "A round needs one choice from each seat.",
                 details={"seats": sorted(actions)},
@@ -124,7 +126,7 @@ class ${Name}RulesEngine:
     def observation(
         self, state: ${Name}State, seat: Seat
     ) -> ${Name}Observation:
-        if seat not in VALID_SEATS:
+        if type(seat) is not int or seat not in VALID_SEATS:
             raise WrongPlayer("Only seats 0 and 1 play.", details={"seat": seat})
         return ${Name}Observation(
             seat=seat,

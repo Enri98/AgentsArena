@@ -9,6 +9,7 @@ registry.
 from __future__ import annotations
 
 import argparse
+import keyword
 import re
 import string
 import sys
@@ -93,9 +94,7 @@ def _render_files(
     root = root or _repo_root()
     if kind != "basic":
         return _render_working_files(name, kind, root)
-    pascal = name[:1].upper() + name[1:]
-    upper = name.upper()
-    ctx = {"name": name, "Name": pascal, "NAME": upper}
+    ctx = {"name": name, "Name": _pascal(name), "NAME": name.upper()}
 
     files: dict[Path, str] = {}
     game_dir = root / "src" / "arena" / "games" / name
@@ -234,7 +233,7 @@ def _next_steps_checklist(name: str, kind: str = "basic") -> str:
     """Return the printed checklist of follow-ups for the contributor."""
     if kind != "basic":
         return _working_next_steps(name, kind)
-    pascal = name[:1].upper() + name[1:]
+    pascal = _pascal(name)
     cli_import = f"from arena.cli.games import {name} as _{name}  # noqa: F401"
     ollama_import = f"from arena.agents.ollama.{name} import {pascal}PromptBuilder"
     mcp_import = f"from arena.mcp.games import {name} as _{name}  # noqa: F401"
@@ -307,10 +306,11 @@ def _working_next_steps(name: str, kind: str) -> str:
     )
 
 
-def _print_dry_run(name: str, files: dict[Path, str], init_edit: tuple[str, str]) -> None:
+def _print_dry_run(
+    name: str, files: dict[Path, str], init_edit: tuple[str, str], root: Path
+) -> None:
     """Print the dry-run preview: file list, the planned __init__.py edit,
     and one full example file (events.py — the smallest)."""
-    root = _repo_root()
     print(f"[dry-run] Would create {len(files)} file(s) for game '{name}':")
     for path in sorted(files):
         try:
@@ -338,6 +338,36 @@ def _print_dry_run(name: str, files: dict[Path, str], init_edit: tuple[str, str]
         print("-" * 60)
         print(files[example_path], end="")
         print("-" * 60)
+
+
+#: Adapter packages a game adds a module to; a name must not shadow one of theirs.
+_ADAPTER_DIRS = (("cli", "games"), ("agents", "ollama"), ("mcp", "games"))
+
+
+def _name_problem(name: str, root: Path) -> str | None:
+    """Why ``name`` cannot be a new game id under ``root``, or None."""
+
+    if not _NAME_PATTERN.fullmatch(name):
+        return f"--name {name!r} must match /[a-z][a-z0-9_]*/ (lowercase Python identifier)."
+    if keyword.iskeyword(name):
+        return f"--name {name!r} is a Python keyword, so it cannot name a package."
+    games_dir = root / "src" / "arena" / "games"
+    if name in _existing_game_ids(games_dir):
+        return (
+            f"a game package 'arena.games.{name}' already exists. Choose a different "
+            "--name (the scaffold refuses to clobber existing games)."
+        )
+    if (games_dir / name).exists():
+        return f"'src/arena/games/{name}' already exists and is not a game. Choose another --name."
+    for parts in _ADAPTER_DIRS:
+        module = root.joinpath("src", "arena", *parts, f"{name}.py")
+        if module.exists():
+            where = "/".join(("src", "arena", *parts, f"{name}.py"))
+            return (
+                f"'{where}' already exists, and --force would overwrite it. Choose another "
+                "--name, or delete it if it is left over from an earlier scaffold run."
+            )
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -369,35 +399,42 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Overwrite existing files. Without it, the scaffold refuses if any target exists.",
+        help=(
+            "Overwrite the new game's own files (its contract test, say) if they exist. "
+            "Never overwrites an existing game or adapter module."
+        ),
+    )
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=None,
+        help="The AgentsArena checkout to write into (default: the one this module is in).",
     )
     args = parser.parse_args(argv)
 
     name: str = args.name
-    if not _NAME_PATTERN.fullmatch(name):
-        sys.stderr.write(
-            f"Error: --name {name!r} must match /[a-z][a-z0-9_]*/ "
-            "(lowercase Python identifier).\n"
-        )
-        return 2
-
-    root = _repo_root()
+    root: Path = args.root.resolve() if args.root is not None else _repo_root()
     games_dir = root / "src" / "arena" / "games"
-    if name in _existing_game_ids(games_dir):
+    games_init_path = games_dir / "__init__.py"
+    if not games_init_path.is_file():
         sys.stderr.write(
-            f"Error: a game package 'arena.games.{name}' already exists. "
-            "Choose a different --name (the scaffold refuses to clobber existing games).\n"
+            f"Error: {root} is not an AgentsArena source checkout (no "
+            "src/arena/games/__init__.py). Run the scaffold from a checkout, or pass "
+            "--root.\n"
         )
         return 2
+    problem = _name_problem(name, root)
+    if problem is not None:
+        sys.stderr.write(f"Error: {problem}\n")
+        return 2
 
-    files = _render_files(name, args.kind)
+    files = _render_files(name, args.kind, root)
 
-    games_init_path = games_dir / "__init__.py"
     games_init_text = games_init_path.read_text(encoding="utf-8")
     init_edit = _games_init_edit(name, games_init_text)
 
     if args.dry_run:
-        _print_dry_run(name, files, init_edit)
+        _print_dry_run(name, files, init_edit, root)
         return 0
 
     existing = [p for p in files if p.exists()]

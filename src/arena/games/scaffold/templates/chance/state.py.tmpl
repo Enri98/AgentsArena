@@ -35,6 +35,8 @@ class ${Name}State:
             raise ValueError("seat must be 0 or 1")
         if type(self.flip_pending) is not bool:
             raise ValueError("flip_pending must be a bool")
+        if self.flip_pending and max(self.scores) >= self.target:
+            raise ValueError("no coin is flipped once the game is over")
 
 
 __all__: Sequence[str] = ["VALID_SEATS", "${Name}State"]

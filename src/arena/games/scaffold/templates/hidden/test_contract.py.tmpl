@@ -2,8 +2,8 @@
 
 Each private variant pairs two states that differ only in what its blind seat
 may not see; the suite checks that seat is sent identical data for both.
-``keep`` is declared revealing: when both seats keep, showing both numbers is
-its whole point.
+Seat 1's ``keep`` reveals both numbers (the showdown is its whole point), so
+``reveals`` names it; seat 0's ``keep`` reveals nothing and stays checked.
 """
 
 from __future__ import annotations
@@ -35,7 +35,11 @@ class ${Name}ContractBundle:
     private_variants: tuple[PrivateVariant, ...]
     chance_state: ${Name}State
     private_outcome_variants: tuple[PrivateVariant, ...]
-    revealing_actions: tuple[object, ...]
+
+    @staticmethod
+    def reveals(state: ${Name}State, action: object) -> bool:
+        """Only the second keep, which ends the game in a showdown, reveals."""
+        return action == ${Name}Action(choice="keep") and len(state.choices) == 1
 
 
 def build_${name}_contract_bundle() -> ${Name}ContractBundle:
@@ -68,7 +72,6 @@ def build_${name}_contract_bundle() -> ${Name}ContractBundle:
             PrivateVariant(deal, ${Name}Deal(secrets=(3, 5)), blind_seat=0),
             PrivateVariant(deal, ${Name}Deal(secrets=(6, 8)), blind_seat=1),
         ),
-        revealing_actions=(keep,),
     )
 
 

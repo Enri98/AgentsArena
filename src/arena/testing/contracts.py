@@ -34,7 +34,10 @@ class GameContractBundle(Protocol):
     outcomes that take ``initial_state(config)`` to ``bundle.initial_state``.
 
     A hidden-information game with an action that legitimately reveals private
-    information to the table (a showdown) lists it in ``revealing_actions``.
+    information to the table (a showdown) lists it in ``revealing_actions``, or,
+    when the same action reveals only in some states, defines
+    ``reveals(state, action) -> bool`` instead: a listed action is skipped in
+    every state, so ``reveals`` keeps the others checked.
 
     A bundle may also define ``terminal_action``: the action that takes
     ``near_terminal_state`` to ``terminal_state``, when that is not
@@ -380,8 +383,9 @@ def assert_seat_view_contract(bundle: GameContractBundle) -> None:
     # Dice "call" shows both hands): excluded from the one-step comparison,
     # because their whole point is that the result differs.
     revealing = tuple(getattr(bundle, "revealing_actions", ()) or ())
+    reveals = getattr(bundle, "reveals", None)
     for pv in variants:
-        _assert_state_variant(engine, serializer, pv, revealing)
+        _assert_state_variant(engine, serializer, pv, revealing, reveals)
 
     if getattr(definition, "has_chance_nodes", False):
         chance_state = getattr(bundle, "chance_state", None)
@@ -403,7 +407,11 @@ def assert_seat_view_contract(bundle: GameContractBundle) -> None:
 
 
 def _assert_state_variant(
-    engine: object, serializer: object, pv: PrivateVariant, revealing: tuple[object, ...] = ()
+    engine: object,
+    serializer: object,
+    pv: PrivateVariant,
+    revealing: tuple[object, ...] = (),
+    reveals: object = None,
 ) -> None:
     blind, a, b = pv.blind_seat, pv.state, pv.variant
     assert serializer.dump_state(a) != serializer.dump_state(b), (
@@ -445,7 +453,7 @@ def _assert_state_variant(
     )
     common = [x for x in engine.legal_actions(a, mover) if x in engine.legal_actions(b, mover)]
     for action in common:
-        if action in revealing:
+        if action in revealing or (reveals is not None and reveals(a, action)):
             continue
         ta, tb = engine.apply_action(a, mover, action), engine.apply_action(b, mover, action)
         _assert_indistinguishable(

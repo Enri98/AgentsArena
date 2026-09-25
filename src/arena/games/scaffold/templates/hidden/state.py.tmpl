@@ -30,12 +30,21 @@ class ${Name}State:
         if self.secrets is None:
             if self.choices:
                 raise ValueError("nobody chooses before the deal")
-        elif len(self.secrets) != 2 or any(
-            type(secret) is not int or not 0 <= secret < self.digits for secret in self.secrets
+        elif (
+            type(self.secrets) is not tuple
+            or len(self.secrets) != 2
+            or any(
+                type(secret) is not int or not 0 <= secret < self.digits
+                for secret in self.secrets
+            )
         ):
-            raise ValueError("secrets must be two ints in [0, digits)")
-        if len(self.choices) > 2 or any(choice not in CHOICES for choice in self.choices):
-            raise ValueError(f"choices must be at most two of {CHOICES}")
+            raise ValueError("secrets must be a tuple of two ints in [0, digits)")
+        if (
+            type(self.choices) is not tuple
+            or len(self.choices) > 2
+            or any(choice not in CHOICES for choice in self.choices)
+        ):
+            raise ValueError(f"choices must be a tuple of at most two of {CHOICES}")
         if self.choices[:1] == ("fold",) and len(self.choices) > 1:
             raise ValueError("the game ends at a fold")
 
