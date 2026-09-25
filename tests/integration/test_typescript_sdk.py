@@ -65,3 +65,28 @@ def test_the_typescript_sdk_plays_and_watches_a_match(
     assert len(summary["spectator_lines"]) == summary["turns"]
     assert any(f" {turn_kind} " in line for line in summary["spectator_lines"]), summary
     assert summary["public_transcript_turns"] == summary["turns"]
+
+
+def test_the_typescript_sdk_reports_aborts_and_refusals() -> None:
+    """Review findings: an abort landing while ``choose`` thinks is a
+    MatchAbortedError, not a bare close; a refused connection carries its close
+    code (4410), not 1006; spectating an aborted match reports the abort; and no
+    timer is left keeping the process alive."""
+
+    app = create_app(rate_limiter=RateLimiter.unlimited())
+    with serve(app) as server:
+        completed = subprocess.run(
+            [NODE, "test/live/edge_cases.ts", server.http_base_url],
+            cwd=SDK,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    assert completed.returncode == 0, completed.stderr
+    summary = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert summary == {
+        "unknown_match": "closed:4410",
+        "deadline": ["aborted:turn_deadline_expired", "aborted:turn_deadline_expired"],
+        "spectate_aborted": "aborted:turn_deadline_expired",
+        "pending_timers": 0,
+    }

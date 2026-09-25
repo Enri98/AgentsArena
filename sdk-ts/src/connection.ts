@@ -18,6 +18,7 @@ import {
 type Waiter = {
   resolve: (message: ServerMessage) => void;
   reject: (error: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
 };
 
 export class Connection {
@@ -31,22 +32,50 @@ export class Connection {
     socket.addEventListener("message", (event: MessageEvent) => this.#onMessage(event));
     socket.addEventListener("close", (event: CloseEvent) => {
       this.#closed = new ConnectionClosedError(event.code, event.reason);
-      for (const waiter of this.#waiters.splice(0)) waiter.reject(this.#closed);
+      for (const waiter of this.#waiters.splice(0)) {
+        clearTimeout(waiter.timer);
+        waiter.reject(this.#closed);
+      }
     });
   }
 
-  /** Open a connection; rejects if the socket cannot open. */
-  static open(url: string): Promise<Connection> {
+  /**
+   * Open a connection. Rejects with `ConnectionClosedError` if the socket
+   * cannot open, or `ProtocolError` if it has not opened within `timeoutMs`.
+   */
+  static open(url: string, timeoutMs?: number): Promise<Connection> {
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(url);
       const connection = new Connection(socket);
-      socket.addEventListener("open", () => resolve(connection), { once: true });
+      const timer =
+        timeoutMs === undefined
+          ? undefined
+          : setTimeout(() => {
+              socket.close();
+              reject(new ProtocolError(`not connected within ${timeoutMs} ms`));
+            }, timeoutMs);
+      socket.addEventListener(
+        "open",
+        () => {
+          clearTimeout(timer);
+          resolve(connection);
+        },
+        { once: true },
+      );
       socket.addEventListener(
         "close",
-        (event: CloseEvent) => reject(new ConnectionClosedError(event.code, event.reason)),
+        (event: CloseEvent) => {
+          clearTimeout(timer);
+          reject(new ConnectionClosedError(event.code, event.reason));
+        },
         { once: true },
       );
     });
+  }
+
+  /** Whether the connection has closed. */
+  get closed(): boolean {
+    return this.#closed !== null;
   }
 
   send(envelope: Envelope): void {
@@ -54,16 +83,20 @@ export class Connection {
     this.#socket.send(JSON.stringify(envelope));
   }
 
-  /** The next message in order; rejects once the connection has closed. */
+  /**
+   * The next message in order. Messages that arrived before the connection
+   * closed are still returned; after them, rejects with the
+   * `ConnectionClosedError`. With `timeoutMs`, rejects with `ProtocolError`
+   * if nothing arrives in time.
+   */
   next(timeoutMs?: number): Promise<ServerMessage> {
     const queued = this.#inbox.shift();
     if (queued) return Promise.resolve(queued);
     if (this.#closed) return Promise.reject(this.#closed);
     return new Promise((resolve, reject) => {
       const waiter: Waiter = { resolve, reject };
-      this.#waiters.push(waiter);
       if (timeoutMs !== undefined) {
-        setTimeout(() => {
+        waiter.timer = setTimeout(() => {
           const index = this.#waiters.indexOf(waiter);
           if (index >= 0) {
             this.#waiters.splice(index, 1);
@@ -71,6 +104,7 @@ export class Connection {
           }
         }, timeoutMs);
       }
+      this.#waiters.push(waiter);
     });
   }
 
@@ -88,6 +122,7 @@ export class Connection {
     }
     if (message === null) return; // section 7: ignore unknown message types
     if (message.type === "ping") {
+      if (this.#closed) return;
       this.send({
         type: "pong",
         schema_version: WIRE_SCHEMA_VERSION,
@@ -97,7 +132,11 @@ export class Connection {
       return;
     }
     const waiter = this.#waiters.shift();
-    if (waiter) waiter.resolve(message);
-    else this.#inbox.push(message);
+    if (waiter) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(message);
+    } else {
+      this.#inbox.push(message);
+    }
   }
 }

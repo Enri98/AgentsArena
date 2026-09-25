@@ -21,7 +21,7 @@ from arena.adapters.websocket import (
 )
 from arena.adapters.websocket.errors import SchemaVersionMismatch, WireProtocolError
 from arena.adapters.websocket.messages import ErrorBody
-from arena.server.config import HEARTBEAT_MAX_MISSES, HELLO_TIMEOUT_S
+from arena.server.config import HEARTBEAT_MAX_MISSES, HELLO_TIMEOUT_S, REJECT_LINGER_S
 from arena.server.errors import MatchNotFound
 from arena.server.rate_limits import (
     CLOSE_RATE_LIMITED,
@@ -104,6 +104,23 @@ async def _close(ws: WebSocket, code: int, reason: str) -> None:
         await ws.close(code=code, reason=reason)
     except Exception:
         pass
+
+
+async def _refuse(ws: WebSocket, code: int, reason: str) -> None:
+    """Accept, read the client's first frame, then close with ``code``.
+
+    Used before a hello has been read. Closing at once raced the hello the
+    client sends on open: the frame then arrived at a closed socket, and Node's
+    WebSocket reported 1006 instead of the code. The wait is short and bounded.
+    """
+
+    await ws.accept()
+    linger = getattr(ws.app.state, "reject_linger_s", REJECT_LINGER_S)
+    try:
+        await asyncio.wait_for(ws.receive(), linger)
+    except Exception:
+        pass  # timed out, disconnected, or anything else: close regardless
+    await _close(ws, code, reason)
 
 
 def _client_ip(ws: WebSocket) -> str:
@@ -196,8 +213,7 @@ async def play_handler(ws: WebSocket, match_id: str, seat: int = -1) -> None:
             scope=exc.scope,
             detail=exc.message,
         )
-        await ws.accept()
-        await _close(ws, _CLOSE_RATE_LIMITED, exc.scope)
+        await _refuse(ws, _CLOSE_RATE_LIMITED, exc.scope)
         return
 
     try:
@@ -217,14 +233,12 @@ async def _play_session(
     try:
         match: Match = registry.get(match_id)
     except MatchNotFound:
-        await ws.accept()
-        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_not_found")
+        await _refuse(ws, _CLOSE_MATCH_NOT_FOUND, "match_not_found")
         return
 
     # 2. Validate seat param.
     if seat not in (0, 1):
-        await ws.accept()
-        await _close(ws, _CLOSE_MALFORMED, "invalid_seat")
+        await _refuse(ws, _CLOSE_MALFORMED, "invalid_seat")
         return
 
     # 3. Accept the WebSocket.
@@ -662,8 +676,7 @@ async def spectate_handler(ws: WebSocket, match_id: str) -> None:
             scope=exc.scope,
             detail=exc.message,
         )
-        await ws.accept()
-        await _close(ws, _CLOSE_RATE_LIMITED, exc.scope)
+        await _refuse(ws, _CLOSE_RATE_LIMITED, exc.scope)
         return
 
     try:
@@ -680,8 +693,7 @@ async def _spectate_session(ws: WebSocket, match_id: str, slot: _MatchSlot) -> N
     try:
         match: Match = registry.get(match_id)
     except MatchNotFound:
-        await ws.accept()
-        await _close(ws, _CLOSE_MATCH_NOT_FOUND, "match_not_found")
+        await _refuse(ws, _CLOSE_MATCH_NOT_FOUND, "match_not_found")
         return
 
     await ws.accept()
@@ -853,5 +865,4 @@ async def unknown_endpoint_handler(ws: WebSocket, path: str) -> None:
     tell apart from a proxy rejecting it.
     """
 
-    await ws.accept()
-    await _close(ws, _CLOSE_UNSUPPORTED_ENDPOINT, "unsupported_endpoint")
+    await _refuse(ws, _CLOSE_UNSUPPORTED_ENDPOINT, "unsupported_endpoint")

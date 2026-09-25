@@ -2,6 +2,41 @@
 
 import { type JsonObject, type RuntimeTranscript, WIRE_SCHEMA_VERSION } from "./protocol.ts";
 
+/** A non-success HTTP answer: the status, and the server's error code when it sent one. */
+export class ArenaHttpError extends Error {
+  readonly status: number;
+  readonly code: string | null;
+
+  constructor(what: string, status: number, code: string | null, message: string | null) {
+    super(`${what}: HTTP ${status}${code ? ` ${code}` : ""}${message ? `: ${message}` : ""}`);
+    this.name = "ArenaHttpError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+/** The body as JSON, or `null` when it is not JSON (a proxy's HTML error page). */
+async function jsonBody(response: Response): Promise<JsonObject | null> {
+  try {
+    const value: unknown = await response.json();
+    return typeof value === "object" && value !== null && !Array.isArray(value)
+      ? (value as JsonObject)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function httpError(what: string, response: Response): Promise<ArenaHttpError> {
+  const error = (await jsonBody(response))?.error as { code?: unknown; message?: unknown } | undefined;
+  return new ArenaHttpError(
+    what,
+    response.status,
+    typeof error?.code === "string" ? error.code : null,
+    typeof error?.message === "string" ? error.message : null,
+  );
+}
+
 export interface CreateMatchOptions {
   gameConfig?: JsonObject;
   players?: { label?: string }[];
@@ -22,7 +57,7 @@ export interface CreatedMatch {
   disconnect_grace_ms: number;
 }
 
-/** `POST /matches`. Throws with the server's error code on a non-201 answer. */
+/** `POST /matches`. Throws `ArenaHttpError` (with the server's error code) on a non-201 answer. */
 export async function createMatch(
   httpBase: string,
   gameId: string,
@@ -44,11 +79,9 @@ export async function createMatch(
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  const payload = (await response.json()) as JsonObject;
-  if (response.status !== 201) {
-    const error = payload.error as { code?: string; message?: string } | undefined;
-    throw new Error(`create match failed: ${response.status} ${error?.code}: ${error?.message}`);
-  }
+  if (response.status !== 201) throw await httpError("create match", response);
+  const payload = await jsonBody(response);
+  if (payload === null) throw new ArenaHttpError("create match: not JSON", response.status, null, null);
   return payload as unknown as CreatedMatch;
 }
 
@@ -64,6 +97,6 @@ export async function fetchPublicTranscript(
     `${httpBase.replace(/\/+$/, "")}/matches/${encodeURIComponent(matchId)}/public-transcript`,
   );
   if (response.status === 404 || response.status === 409) return null;
-  if (!response.ok) throw new Error(`public transcript: HTTP ${response.status}`);
+  if (!response.ok) throw await httpError("public transcript", response);
   return (await response.json()) as RuntimeTranscript;
 }

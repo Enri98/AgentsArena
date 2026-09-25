@@ -25,4 +25,10 @@ export {
   playMatch,
 } from "./seat.ts";
 export { type SpectateOptions, type SpectatorEvent, spectate } from "./spectator.ts";
-export { createMatch, type CreateMatchOptions, type CreatedMatch, fetchPublicTranscript } from "./http.ts";
+export {
+  ArenaHttpError,
+  createMatch,
+  type CreateMatchOptions,
+  type CreatedMatch,
+  fetchPublicTranscript,
+} from "./http.ts";

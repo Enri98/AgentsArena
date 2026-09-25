@@ -214,7 +214,11 @@ export class ConnectionClosedError extends Error {
   }
 }
 
-/** The server broke the protocol (an unparseable frame, a missing welcome). */
+/**
+ * The exchange broke the protocol or timed out: a missing or wrong welcome, no
+ * message within a timeout. (A frame that does not parse is dropped, as an
+ * unknown message type is.)
+ */
 export class ProtocolError extends Error {
   constructor(message: string) {
     super(message);

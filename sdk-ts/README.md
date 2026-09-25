@@ -10,13 +10,14 @@ browser.
 ## Play a seat
 
 ```ts
-import { createMatch, playMatch } from "@agents-arena/sdk";
+import { type JsonObject, type ObservationRequest, createMatch, playMatch } from "@agents-arena/sdk";
 
 const match = await createMatch("http://127.0.0.1:8080", "tictactoe");
 
 // Each seat answers its observation requests. `choose` may be async (an LLM
 // call): pings are answered in the background while it thinks.
-const firstLegal = (request) => request.observation.legal_actions[0];
+const firstLegal = (request: ObservationRequest): JsonObject =>
+  (request.observation.legal_actions as JsonObject[])[0];
 const [seat0, seat1] = await Promise.all([
   playMatch(match.seat_0_url, 0, firstLegal),
   playMatch(match.seat_1_url, 1, firstLegal),
@@ -25,9 +26,16 @@ console.log(seat0.transcript.lifecycle); // "finished"
 ```
 
 `playMatch` chooses again after an `action_rejected` while retries remain, and rejects with
-`MatchAbortedError` (carrying the abort and the transcript) if the match aborts. For full
-control use `SeatSession`: `connect`, `recv`, `sendAction`, `close`, and `resumeToken` to
-resume a dropped seat.
+`MatchAbortedError` (carrying the abort and the transcript) if the match aborts, even when the
+abort lands while `choose` is thinking. A connection the server refuses rejects with
+`ConnectionClosedError`, whose `code` is the protocol's close code (section 9: 4410 for an
+unknown or ended match, 4429 when rate limited, and so on). For full control use
+`SeatSession`: `connect`, `recv`, `sendAction`, `close`, and `resumeToken` to resume a dropped
+seat.
+
+Keep `choose` asynchronous, or quick: a synchronous `choose` that holds the CPU longer than
+the server's heartbeat allows (40 s by default) stops pings being answered, and the server
+drops the seat.
 
 ## Watch a match
 

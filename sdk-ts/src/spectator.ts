@@ -19,6 +19,8 @@ import {
 export type SpectatorEvent = Exclude<ServerMessage, { type: "spectator_welcome" | "ping" }>;
 
 export interface SpectateOptions {
+  /** How long to wait for the socket to open and then for the welcome, in ms (default 10 000 each). */
+  handshakeTimeoutMs?: number;
   /** Called once with the welcome, which carries the history so far. */
   onWelcome?: (welcome: SpectatorWelcomeBody) => void;
   /** Called for each live message, in order. */
@@ -31,7 +33,8 @@ export interface SpectateOptions {
  * an aborted one.
  */
 export async function spectate(url: string, options: SpectateOptions = {}): Promise<RuntimeTranscript> {
-  const connection = await Connection.open(url);
+  const timeoutMs = options.handshakeTimeoutMs ?? 10_000;
+  const connection = await Connection.open(url, timeoutMs);
   try {
     connection.send({
       type: "spectator_hello",
@@ -42,14 +45,18 @@ export async function spectate(url: string, options: SpectateOptions = {}): Prom
         supported_schema_versions: [...SUPPORTED_SCHEMA_VERSIONS],
       },
     });
-    const first = await connection.next(10_000);
+    const first = await connection.next(timeoutMs);
     if (first.type !== "spectator_welcome") {
       throw new ProtocolError(`expected spectator_welcome, got ${first.type}`);
     }
     options.onWelcome?.(first.payload);
     // A match already over is fully described by the welcome's transcript.
-    if (first.payload.lifecycle === "finished" && first.payload.transcript) {
-      return first.payload.transcript;
+    const { lifecycle, transcript } = first.payload;
+    if (lifecycle === "finished" || lifecycle === "aborted") {
+      if (!transcript) throw new ProtocolError(`a ${lifecycle} match's welcome has no transcript`);
+      if (lifecycle === "finished") return transcript;
+      if (!transcript.abort) throw new ProtocolError("an aborted match's transcript has no abort");
+      throw new MatchAbortedError({ abort: transcript.abort, transcript });
     }
     for (;;) {
       const message = (await connection.next()) as SpectatorEvent;

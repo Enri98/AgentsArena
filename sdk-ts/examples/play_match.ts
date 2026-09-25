@@ -46,6 +46,7 @@ const watching = spectate(`${wsBase}/matches/${match.match_id}/spectate`, {
     if (line) rendered.push(line);
   },
 });
+watching.catch(() => {}); // awaited below; if a seat fails first, not an unhandled rejection
 const [seat0, seat1] = await Promise.all([
   playMatch(match.seat_0_url, 0, firstLegal),
   playMatch(match.seat_1_url, 1, firstLegal),

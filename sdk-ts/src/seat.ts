@@ -8,6 +8,7 @@ import { Connection } from "./connection.ts";
 import {
   CLIENT_NAME,
   CLIENT_VERSION,
+  ConnectionClosedError,
   type JsonObject,
   MatchAbortedError,
   type ObservationRequest,
@@ -22,8 +23,15 @@ import {
 export interface ConnectOptions {
   /** A token from an earlier `welcome`, to resume a dropped seat (section 11). */
   resumeToken?: string;
-  /** How long to wait for `welcome`, in milliseconds (default 10 000). */
+  /** How long to wait for the socket to open and then for `welcome`, in ms (default 10 000 each). */
   handshakeTimeoutMs?: number;
+}
+
+/** A fresh turn id. `crypto.randomUUID` is missing outside secure contexts (plain http pages). */
+function newTurnId(): string {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  if (uuid) return uuid;
+  return `t-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
 /** A connected seat: the low-level loop form. */
@@ -38,7 +46,17 @@ export class SeatSession {
 
   /** Connect to a seat URL (`.../matches/{id}/play?seat=N`) and say hello. */
   static async connect(url: string, seat: number, options: ConnectOptions = {}): Promise<SeatSession> {
-    const connection = await Connection.open(url);
+    const timeoutMs = options.handshakeTimeoutMs ?? 10_000;
+    const connection = await Connection.open(url, timeoutMs);
+    try {
+      return new SeatSession(connection, await SeatSession.#handshake(connection, seat, options));
+    } catch (error) {
+      connection.close(); // never leave a socket open behind a failed handshake
+      throw error;
+    }
+  }
+
+  static async #handshake(connection: Connection, seat: number, options: ConnectOptions): Promise<WelcomeBody> {
     connection.send({
       type: "hello",
       schema_version: WIRE_SCHEMA_VERSION,
@@ -54,14 +72,12 @@ export class SeatSession {
     });
     const first = await connection.next(options.handshakeTimeoutMs ?? 10_000);
     if (first.type !== "welcome") {
-      connection.close();
       throw new ProtocolError(`expected welcome, got ${first.type}`);
     }
     if (first.payload.seat !== seat) {
-      connection.close();
       throw new ProtocolError(`asked for seat ${seat}, got seat ${first.payload.seat}`);
     }
-    return new SeatSession(connection, first.payload);
+    return first.payload;
   }
 
   get matchId(): string {
@@ -83,7 +99,7 @@ export class SeatSession {
   }
 
   /** Answer the current observation request with a game-specific action. */
-  sendAction(action: JsonObject, turnId: string = crypto.randomUUID()): string {
+  sendAction(action: JsonObject, turnId: string = newTurnId()): string {
     this.#connection.send({
       type: "action_response",
       schema_version: WIRE_SCHEMA_VERSION,
@@ -107,7 +123,14 @@ export class SeatSession {
   }
 }
 
-/** Chooses an action for an observation request; may be async (an LLM call). */
+/**
+ * Chooses an action for an observation request; may be async (an LLM call).
+ *
+ * Pings are answered while an async `choose` awaits. A synchronous one that
+ * keeps the CPU busy for longer than the server's heartbeat allows (40 s by
+ * default) blocks them, and the server drops the seat: move heavy work off the
+ * event loop (a worker) or make it async.
+ */
 export type ChooseAction = (request: ObservationRequest) => JsonObject | Promise<JsonObject>;
 
 export interface MatchOutcome {
@@ -131,19 +154,31 @@ export async function playMatch(
 ): Promise<MatchOutcome> {
   const session = await SeatSession.connect(url, seat, options);
   let pending: ObservationRequest | null = null;
+  // The match can end while `choose` thinks (a deadline, the peer dropping).
+  // The terminal frame is then already queued: sending fails, and the next
+  // recv() returns it (match_aborted, with the transcript) before reporting
+  // the close.
+  const answer = async (request: ObservationRequest): Promise<void> => {
+    const action = await choose(request);
+    try {
+      session.sendAction(action);
+    } catch (error) {
+      if (!(error instanceof ConnectionClosedError)) throw error;
+    }
+  };
   try {
     for (;;) {
       const message = await session.recv();
       switch (message.type) {
         case "observation_request":
           pending = message.payload.observation_request;
-          session.sendAction(await choose(pending));
+          await answer(pending);
           break;
         case "action_rejected":
           // The turn is still open and no new request follows: choose again,
           // unless that was the last attempt (the abort follows).
           if (pending && message.payload.retries_remaining > 0) {
-            session.sendAction(await choose(pending));
+            await answer(pending);
           }
           break;
         case "match_finished":
