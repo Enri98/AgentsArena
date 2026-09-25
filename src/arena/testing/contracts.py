@@ -18,6 +18,7 @@ from arena.core.public_view import (
 )
 from arena.core.seats import is_seat
 from arena.core.serializer import Serializer
+from arena.core.simultaneous import acting_seats, apply_joint_action
 
 
 @runtime_checkable
@@ -90,6 +91,17 @@ def assert_valid_initial_state(bundle: GameContractBundle) -> None:
     )
 
 
+def _apply(rules_engine: object, state: object, action: object) -> object:
+    """Apply ``action`` as the acting seat would: at a joint node (Phase 41) every
+    acting seat plays it, so a simultaneous game runs the same contract."""
+
+    seats = acting_seats(rules_engine, state)
+    if len(seats) > 1:
+        return apply_joint_action(rules_engine, state, {seat: action for seat in seats})
+    seat = seats[0] if seats else rules_engine.current_seat(state)  # type: ignore[attr-defined]
+    return rules_engine.apply_action(state, seat, action)  # type: ignore[attr-defined]
+
+
 def assert_legal_action_generation(bundle: GameContractBundle) -> None:
     """Assert that ongoing states expose valid legal actions."""
 
@@ -139,7 +151,7 @@ def assert_illegal_action_rejection(bundle: GameContractBundle) -> None:
         )
 
     try:
-        rules_engine.apply_action(state, seat, bundle.illegal_action)
+        _apply(rules_engine, state, bundle.illegal_action)
     except ArenaCoreError:
         return
     else:  # pragma: no cover - exercised by negative tests
@@ -154,8 +166,7 @@ def assert_state_transition_behavior(bundle: GameContractBundle) -> None:
 
     rules_engine = bundle.definition.rules_engine
     state = bundle.initial_state
-    seat = rules_engine.current_seat(state)
-    transition = rules_engine.apply_action(state, seat, bundle.legal_action)
+    transition = _apply(rules_engine, state, bundle.legal_action)
 
     assert transition.state != state, (
         "state transition contract failed: applying a legal action must produce a new state"
@@ -173,13 +184,8 @@ def assert_terminal_result_consistency(bundle: GameContractBundle) -> None:
     """Assert that terminal fixtures and results stay coherent."""
 
     rules_engine = bundle.definition.rules_engine
-    near_terminal_seat = rules_engine.current_seat(bundle.near_terminal_state)
     terminal_action = _terminal_action(bundle)
-    transition = rules_engine.apply_action(
-        bundle.near_terminal_state,
-        near_terminal_seat,
-        terminal_action,
-    )
+    transition = _apply(rules_engine, bundle.near_terminal_state, terminal_action)
 
     assert transition.state == bundle.terminal_state, (
         "terminal/result contract failed: near_terminal_state should reach terminal_state via "

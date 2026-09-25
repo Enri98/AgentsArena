@@ -36,8 +36,11 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from arena.core.chance import is_chance_node
-from arena.core.exceptions import IncompleteSimultaneousSupport, WrongPlayer
+from arena.core.exceptions import GameFinished, IncompleteSimultaneousSupport, WrongPlayer
 from arena.core.types import Seat
+
+#: The arena is two-seat (see ``arena.core.public_view.VIEWER_SEATS``).
+_SEATS = (0, 1)
 
 ACTING_SEATS_METHOD = "acting_seats"
 APPLY_JOINT_ACTION_METHOD = "apply_joint_action"
@@ -68,10 +71,14 @@ def acting_seats(rules_engine: Any, state: Any) -> tuple[Seat, ...]:
     if not callable(hook):
         return (rules_engine.current_seat(state),)
     seats = tuple(hook(state))
-    if not seats or list(seats) != sorted(set(seats)):
+    if (
+        not seats
+        or any(type(seat) is not int or seat not in _SEATS for seat in seats)
+        or list(seats) != sorted(set(seats))
+    ):
         raise WrongPlayer(
             "acting_seats must name at least one seat, in seat order, without repeats.",
-            details={"acting_seats": list(seats)},
+            details={"acting_seats": [repr(seat) for seat in seats]},
         )
     return seats
 
@@ -91,13 +98,16 @@ def apply_joint_action(
     the acting seats, and each action must pass ``validate_action``.
     """
 
+    if rules_engine.is_terminal(state):
+        raise GameFinished("The match is already over.")
     seats = acting_seats(rules_engine, state)
     if len(seats) < 2:
         raise WrongPlayer(
             "No joint node is pending: act with apply_action.",
             details={"acting_seats": list(seats)},
         )
-    if sorted(actions) != list(seats):
+    # Real seat ints only: True/False sort as 1/0, and "0" is not a seat.
+    if any(type(seat) is not int for seat in actions) or sorted(actions) != list(seats):
         raise WrongPlayer(
             "A joint action needs exactly one action per acting seat.",
             details={"acting_seats": list(seats), "given": sorted(actions)},

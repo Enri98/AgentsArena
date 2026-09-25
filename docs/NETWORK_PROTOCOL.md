@@ -157,6 +157,7 @@ Success (`HTTP 200`):
   "lifecycle": "running",
   "schema_version": 3,
   "current_seat": 0,
+  "acting_seats": [0],
   "turn_count": 4,
   "players": [
     {"player_id": "p0", "label": "alice", "seat": 0},

@@ -21,6 +21,7 @@ from arena.core.public_view import (
 )
 from arena.core.results import RuleResult
 from arena.core.serializer import JSONMapping, SnapshotEnvelope
+from arena.core.simultaneous import acting_seats
 from arena.match.local_match import build_snapshot_for_viewer
 from arena.match.transcript import (
     VIEW_FULL,
@@ -253,7 +254,9 @@ def dump_session_status(
                 local_match.definition, local_match.config, local_match.state, viewer
             )
         if not local_match.rules_engine.is_terminal(local_match.state):
-            current_seat = local_match.rules_engine.current_seat(local_match.state)
+            seats = acting_seats(local_match.rules_engine, local_match.state)
+            # Several seats acting at once (Phase 41) have no single current seat.
+            current_seat = seats[0] if len(seats) == 1 else None
         result = _dump_rule_result(local_match.rules_engine.result(local_match.state))
 
     payload = RuntimeSessionStatusPayload(

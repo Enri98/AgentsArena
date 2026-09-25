@@ -83,3 +83,57 @@ def test_the_flag_and_the_hooks_must_agree() -> None:
         validate_simultaneous_support(replace(NIM, has_simultaneous_moves=True))
     with pytest.raises(IncompleteSimultaneousSupport):
         GameRegistry().register(replace(NIM, has_simultaneous_moves=True))
+
+
+@pytest.mark.parametrize(
+    "keys", [(False, True), ("0", "1"), (0.0, 1.0)], ids=["bools", "strings", "floats"]
+)
+def test_joint_action_keys_must_be_seat_ints(keys: tuple) -> None:
+    from arena.games.rps import Throw
+
+    state = RPS.rules_engine.initial_state(RPS.config_type())
+    with pytest.raises(WrongPlayer):
+        apply_joint_action(RPS.rules_engine, state, {k: Throw("rock") for k in keys})
+
+
+@pytest.mark.parametrize("seats", [(-1, 0), (0, 5), (True, 1)])
+def test_acting_seats_must_be_real_seats(seats: tuple) -> None:
+    with pytest.raises(WrongPlayer):
+        acting_seats(_BadEngine(seats), object())
+
+
+def test_a_joint_action_on_a_finished_match_is_game_finished() -> None:
+    from arena.core.exceptions import GameFinished
+    from arena.games.rps import Throw
+
+    engine = RPS.rules_engine
+    state = engine.initial_state(RPS.config_type(target_wins=1))
+    done = apply_joint_action(engine, state, {0: Throw("rock"), 1: Throw("scissors")}).state
+    with pytest.raises(GameFinished):
+        apply_joint_action(engine, done, {0: Throw("rock"), 1: Throw("rock")})
+
+
+def test_recorded_actions_are_read_only() -> None:
+    from arena.games.rps import Throw
+    from arena.match import apply_match_joint_action, start_match
+
+    match = apply_match_joint_action(
+        start_match(RPS, RPS.config_type()), {0: Throw("rock"), 1: Throw("paper")}
+    )
+    with pytest.raises(TypeError):
+        match.turns[0].actions[0] = Throw("paper")  # type: ignore[index]
+
+
+def test_the_runtime_refuses_a_single_seat_request_at_a_joint_node() -> None:
+    from arena.runtime.exceptions import RuntimeStateError
+    from arena.runtime.models import PlayerRecord
+    from arena.runtime.session import Arena
+
+    arena = Arena()
+    session = arena.start_session(
+        arena.create_session(
+            RPS, RPS.config_type(), [PlayerRecord("p0", 0), PlayerRecord("p1", 1)], {}
+        )
+    )
+    with pytest.raises(RuntimeStateError):
+        arena.request_turn(session)

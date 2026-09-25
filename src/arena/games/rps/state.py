@@ -66,6 +66,14 @@ class RpsState:
             raise ValueError("only one seat can reach target_wins")
         if (self.rounds_played == 0) != (self.last_round is None):
             raise ValueError("last_round is present exactly when a round has been played")
+        if self.last_round is not None and self.last_round.winner is not None:
+            if self.wins[self.last_round.winner] < 1:
+                raise ValueError("the last round's winner must have won a round")
+        leaders = [seat for seat in VALID_SEATS if self.wins[seat] == self.target_wins]
+        if leaders and (self.last_round is None or self.last_round.winner != leaders[0]):
+            # The match ends the round a seat reaches target_wins: that round
+            # is the last one, and that seat won it.
+            raise ValueError("a seat reaches target_wins only by winning the last round")
 
 
 __all__: Sequence[str] = ["RoundResult", "RpsState", "VALID_SEATS", "round_winner"]

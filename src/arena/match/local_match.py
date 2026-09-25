@@ -6,6 +6,7 @@ import secrets
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from typing import Any, Generic, TypeVar, cast
 
 from arena.core.actions import Action
@@ -19,7 +20,7 @@ from arena.core.public_view import Viewer, dump_config_for_viewer, dump_state_fo
 from arena.core.results import RuleResult
 from arena.core.rules_engine import RulesEngine
 from arena.core.serializer import SnapshotEnvelope
-from arena.core.simultaneous import apply_joint_action, is_joint_node
+from arena.core.simultaneous import acting_seats, apply_joint_action, is_joint_node
 from arena.core.types import Seat
 
 ConfigT = TypeVar("ConfigT", bound=BaseGameConfig)
@@ -207,6 +208,11 @@ def apply_match_joint_action(
     """
 
     transition = apply_joint_action(match.rules_engine, match.state, actions)
+    # Keyed by the validated acting seats: apply_joint_action accepted exactly
+    # these, so the record replays as it was played.
+    recorded = MappingProxyType(
+        {seat: actions[seat] for seat in acting_seats(match.rules_engine, match.state)}
+    )
     post_snapshot = _build_snapshot(match.definition, match.config, transition.state)
     turn_record = TurnRecord(
         seat=None,
@@ -216,7 +222,7 @@ def apply_match_joint_action(
         post_state=transition.state,
         post_snapshot=post_snapshot,
         kind=TURN_KIND_JOINT,
-        actions={seat: actions[seat] for seat in sorted(actions)},
+        actions=recorded,
     )
     state, turns, rng = _drain_chance_nodes(
         match.definition,

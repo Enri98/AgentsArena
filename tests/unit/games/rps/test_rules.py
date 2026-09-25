@@ -150,3 +150,39 @@ def test_every_throw_pair_resolves() -> None:
     for a, b in itertools.product(ENGINE.legal_actions(state, 0), repeat=2):
         result = apply_joint_action(ENGINE, state, {0: a, 1: b})
         assert sum(result.state.wins) == (0 if a == b else 1)
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"wins": (0, 0), "rounds_played": 1, "last_round": RoundResult(("rock", "scissors"), 0)},
+        {"wins": (3, 0), "rounds_played": 4, "last_round": RoundResult(("rock", "rock"), None)},
+        {"wins": (3, 1), "rounds_played": 4, "last_round": RoundResult(("rock", "paper"), 1)},
+    ],
+)
+def test_states_that_cannot_follow_from_play_are_refused(kw: dict) -> None:
+    with pytest.raises(ValueError):
+        _state(**kw)
+
+
+def test_every_reachable_state_is_accepted_over_many_matches() -> None:
+    import random
+
+    from arena.games import build_default_registry
+    from arena.match import run_local_match, start_match
+
+    rps = build_default_registry().get("rps")
+
+    class Rand:
+        def __init__(self, seed: int) -> None:
+            self.r = random.Random(seed)
+
+        def select_action(self, obs):  # type: ignore[no-untyped-def]
+            return self.r.choice(obs.legal_actions)
+
+    for seed in range(300):
+        config = RpsConfig(target_wins=1 + seed % 10, max_rounds=1 + (seed * 7) % 100)
+        match = run_local_match(start_match(rps, config), {0: Rand(seed), 1: Rand(-seed)})
+        for turn in match.turns:
+            state = turn.post_state
+            assert RpsState(**{f: getattr(state, f) for f in state.__dataclass_fields__}) == state

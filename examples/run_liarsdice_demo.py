@@ -61,7 +61,7 @@ async def _spectate(url: str) -> list[dict[str, Any]]:
             json.dumps(
                 {
                     "type": "spectator_hello",
-                    "schema_version": 3,
+                    "schema_version": 4,
                     "payload": {
                         "client_name": "liarsdice-demo",
                         "client_version": "0.1.0",

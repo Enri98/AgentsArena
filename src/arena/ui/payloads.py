@@ -74,6 +74,8 @@ class UIScreenTurnPayload(BaseModel):
     seat: int | None = Field(default=None, ge=0)
     action: JSONMapping | None = None
     outcome: JSONMapping | None = None
+    #: A joint turn (Phase 41): every acting seat's action, keyed "0", "1".
+    actions: dict[str, JSONMapping] | None = None
     events: list[JSONMapping]
     result: UIScreenResultPayload | None
     post_snapshot: JSONMapping
@@ -132,6 +134,7 @@ class _MatchTurnPayload(BaseModel):
     post_snapshot: _SnapshotPayload
     kind: str = "action"
     outcome: JSONMapping | None = None
+    actions: dict[str, JSONMapping] | None = None
 
 
 class _MatchTranscriptPayload(BaseModel):
@@ -372,6 +375,7 @@ def _dump_turn(*, turn_index: int, turn: _MatchTurnPayload) -> UIScreenTurnPaylo
         seat=turn.seat,
         action=turn.action,
         outcome=turn.outcome,
+        actions=turn.actions,
         events=[event.model_dump(mode="json") for event in turn.events],
         result=_dump_match_result(
             turn.result.model_dump(mode="json") if turn.result is not None else None

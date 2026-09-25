@@ -164,6 +164,12 @@ class Arena:
             raise RuntimeStateError("Running session has no local match.")
 
         local_match = session.local_match
+        if is_joint_node(local_match.rules_engine, local_match.state):
+            # Several seats act at once: step_session resolves the round.
+            raise RuntimeStateError(
+                "Several seats act at once here; advance with step_session.",
+                details={"match_id": session.match_id},
+            )
         seats = acting_seats(local_match.rules_engine, local_match.state)
         seat = seats[0] if seats else local_match.rules_engine.current_seat(local_match.state)
         requested_session = replace(
