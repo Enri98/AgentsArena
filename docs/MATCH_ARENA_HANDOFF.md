@@ -124,7 +124,14 @@ Only the public view is stored. A pre-phase adversarial review found, and the ph
 - a driver crash from one malformed frame;
 - eviction of running matches.
 
-Active phase: **41**, the generalized turn loop (simultaneous moves, wire `schema_version=4`).
+**Phase 41 is complete** (2026-09-25, wire `schema_version=4`): simultaneous moves as joint
+turns, with Rock-Paper-Scissors as the exemplar. The server asks every acting seat at once,
+each with its own deadline, retries and grace; the round commits as one `turn_committed`, and
+no throw is visible to anyone before both are in. Adversarial review found a double-abort race
+(fixed: one shielded abort) and cross-seat turn-id blocking (fixed: per-seat turn ids).
+
+Active phase: **42**: docs reconciliation, scaffold templates for hidden-information,
+stochastic and simultaneous games, and a packaged TypeScript SDK.
 
 The Phase 36-38 specs were revised on 2026-09-22 after an adversarial review that checked every
 claim against the code. Three findings are worth carrying forward, because each is easy to
