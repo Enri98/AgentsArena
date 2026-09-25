@@ -41,7 +41,7 @@ jobs:
       # tests/integration/test_typescript_sdk.py plays it against the server,
       # running its sources with Node's type stripping.
       - name: Set up Node 24
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
           cache: npm
