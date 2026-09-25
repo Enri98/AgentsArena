@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import fields, is_dataclass
-from typing import Literal, TypeVar
+from typing import Any, Final, Literal, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -59,7 +59,7 @@ ResultT = TypeVar("ResultT", bound=RuleResult)
 
 # Moves with RUNTIME_TRANSCRIPT_SCHEMA_VERSION: arena.ui cross-checks that a
 # status and a transcript come from the same runtime payload generation.
-RUNTIME_STATUS_SCHEMA_VERSION = 4
+RUNTIME_STATUS_SCHEMA_VERSION: Final = 4
 
 #: Versions the status validator accepts.
 SUPPORTED_RUNTIME_STATUS_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3, 4)
@@ -69,7 +69,7 @@ SUPPORTED_RUNTIME_STATUS_SCHEMA_VERSIONS: tuple[int, ...] = (1, 2, 3, 4)
 # the public's), and a redacted one omits hidden information.
 # Bumped to 4 in Phase 41: the embedded match transcript can carry joint turns
 # (several seats acting at once), with an `actions` map and no single seat.
-RUNTIME_TRANSCRIPT_SCHEMA_VERSION = 4
+RUNTIME_TRANSCRIPT_SCHEMA_VERSION: Final = 4
 
 #: Versions the transcript validator accepts. v1 predates chance nodes; v1 and
 #: v2 predate views and are always full.
@@ -402,8 +402,8 @@ def redact_session_status(
         serializer = definition.serializer
         latest = build_snapshot_for_viewer(
             definition,
-            serializer.load_config(latest.config),
-            serializer.load_state(latest.state),
+            cast(Any, serializer.load_config(latest.config)),
+            cast(Any, serializer.load_state(latest.state)),
             viewer,
         )
     redacted = status.model_copy(
@@ -541,7 +541,9 @@ def _dump_runtime_event(
     elif isinstance(event, TurnAccepted):
         payload = {"seat": event.seat, "turn_index": event.turn_index}
     elif isinstance(event, MatchAborted):
-        payload = {"abort": _dump_abort(event.abort, view).model_dump(mode="json")}
+        abort = _dump_abort(event.abort, view)
+        assert abort is not None  # a MatchAborted event always carries its abort
+        payload = {"abort": abort.model_dump(mode="json")}
     elif isinstance(event, PolicyRetried):
         payload = {
             "seat": event.seat,

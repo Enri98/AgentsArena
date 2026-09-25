@@ -7,7 +7,7 @@ import os
 import sys
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from arena.cli.policies import HumanQuit
 from arena.cli.rendering import render_match_screen
@@ -194,11 +194,12 @@ def _render(
         # While a human plays, an agent's notes stay private to it: its
         # reasoning often names its next move (in Rock-Paper-Scissors, the next
         # throw). The finished screen shows everything.
+        events = cast(list[dict[str, Any]], transcript_payload["events"])
         transcript_payload = {
             **transcript_payload,
             "events": [
                 event
-                for event in transcript_payload["events"]
+                for event in events
                 if event["event_type"] not in _AGENT_NOTES
                 or event["payload"].get("seat") in human_seats
             ],

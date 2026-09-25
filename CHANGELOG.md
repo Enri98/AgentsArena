@@ -42,7 +42,7 @@ The v2 roadmap (Phases 36-42). Wire `schema_version` 4; decoders accept 1-4.
   (`wss://` behind a TLS-terminating proxy).
 - Packaging: console scripts (`arena-server`, `arena-play`, `arena-replay`, `arena-mcp`,
   `arena-scaffold`), `arena.__version__`, PEP 561 `py.typed`, project URLs and classifiers.
-- CI (GitHub Actions): ruff, the TypeScript SDK's type-check and tests, pytest, and a job that
+- CI (GitHub Actions): ruff, mypy, the TypeScript SDK's type-check and tests, pytest, and a job that
   builds the distributions and smoke-tests the installed wheel. A release workflow builds both
   packages on a `v*` tag and attaches them to a GitHub release; publishing is opt-in.
 - `CONTRIBUTING.md`, `SECURITY.md`, this changelog, Dependabot and a pre-commit config.

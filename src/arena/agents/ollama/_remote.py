@@ -118,7 +118,7 @@ async def run_remote_seat(
         def decision_callback(attempt: int, thought: str) -> None:  # noqa: E306
             decision_sink.append((attempt, thought))
 
-    agent = OllamaAgent(
+    agent: OllamaAgent[Any, Any] = OllamaAgent(
         client=http_client,
         model=model,
         prompt_builder=builder,

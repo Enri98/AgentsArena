@@ -14,7 +14,7 @@ class HumanQuit(BaseException):
 
 
 class _Parser(Protocol):
-    def __call__(self, line: str, observation: Any) -> Any | None: ...
+    def __call__(self, line: str, observation: Any, /) -> Any | None: ...
 
 
 class HumanPolicy:

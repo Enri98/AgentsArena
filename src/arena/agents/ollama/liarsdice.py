@@ -54,7 +54,7 @@ class LiarsDicePromptBuilder:
             f"Your dice: {mine} (count per face: {json.dumps(tally)}).",
             f"Opponent has {opponent_dice} hidden dice; {sum(counts)} dice are in play in total.",
         ]
-        if bids:
+        if standing is not None:
             history = ", ".join(f"{b.quantity} x {b.face}" for b in bids)
             lines.append(f"Bids this round, oldest first: {history}.")
             lines.append(

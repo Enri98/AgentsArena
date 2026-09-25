@@ -56,7 +56,7 @@ def _build_seat(
     if spec.startswith("scripted:"):
         raw = spec[len("scripted:"):]
         actions = get_cli_adapter(game).scripted_parser(raw)
-        return player, _ScriptedPolicy(actions, seat_index=seat)
+        return player, _ScriptedPolicy(list(actions), seat_index=seat)
     if spec.startswith("ollama:"):
         model_name = spec[len("ollama:"):]
         return player, _build_ollama_agent(

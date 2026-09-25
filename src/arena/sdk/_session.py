@@ -105,7 +105,7 @@ class Session:
             await ws.close()
             raise HandshakeError(f"Expected welcome, got {env.type!r}")
 
-        welcome: WelcomeBody = env.payload  # type: ignore[assignment]
+        welcome: WelcomeBody = env.payload
         if welcome.seat != seat:
             await ws.close()
             raise HandshakeError(
@@ -138,7 +138,7 @@ class Session:
                 pong = PongEnvelope(
                     schema_version=self._welcome.negotiated_schema_version,
                     match_id=env.match_id,
-                    payload=PongBody(nonce=env.payload.nonce),  # type: ignore[union-attr]
+                    payload=PongBody(nonce=env.payload.nonce),
                 )
                 await self._ws.send(dumps(pong))
                 continue
@@ -247,7 +247,7 @@ def _env_to_event(env: object) -> SdkEvent | None:
     may send more), rather than failing the session.
     """
     t = getattr(env, "type", None)
-    payload = getattr(env, "payload", None)
+    payload: Any = getattr(env, "payload", None)
 
     if t == "welcome":
         return WelcomeEvent(body=payload)

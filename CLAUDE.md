@@ -4,7 +4,7 @@ Python 3.11 library powering an agent-vs-agent arena for two-seat games — sequ
 
 > Source of truth for plan + status: `IMPLEMENTATION_PLAN.md`. Working rules + style: `AGENTS.md`. Wire protocol: `docs/NETWORK_PROTOCOL.md`. Adapter boundaries: `docs/ADAPTER_BOUNDARIES.md`. Cross-session handoff: `docs/MATCH_ARENA_HANDOFF.md`.
 
-> **Activate `.venv` before running any script.** Verify with `.\.venv\Scripts\ruff.exe check .` and `.\.venv\Scripts\pytest.exe -q`.
+> **Activate `.venv` before running any script.** Verify with `.\.venv\Scripts\ruff.exe check .`, `.\.venv\Scripts\python.exe -m mypy` and `.\.venv\Scripts\pytest.exe -q`.
 
 ## Layered architecture (strict, downward-only deps)
 
@@ -98,9 +98,10 @@ Phase 42 ✅ (2026-09-25): packaged TypeScript SDK (`sdk-ts/`), scaffold `--kind
 chance|hidden|simultaneous`, and docs reconciled with v4 (`docs/NETWORK_PROTOCOL.md` consolidated,
 every claim checked against the code, superseded shapes in appendices).
 
-**The v2 roadmap is complete.** No numbered phase is active. Follow-up work (packaging metadata,
-type checking in CI, release workflow) happens on the `library-basics` branch; see the known gaps
-in `docs/MATCH_ARENA_HANDOFF.md`.
+**The v2 roadmap is complete.** No numbered phase is active. The library basics landed after it:
+packaging metadata and console scripts, `py.typed`, `arena.__version__`, `mypy` in CI (clean,
+configured in `pyproject.toml`), a release workflow, CHANGELOG / CONTRIBUTING / SECURITY. See the
+known gaps in `docs/MATCH_ARENA_HANDOFF.md`.
 
 **Owner rule (2026-09-24): dispatch adversarial reviewer subagents between one feature and the
 next**, and fix confirmed findings before moving on.

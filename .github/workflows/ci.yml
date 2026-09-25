@@ -34,6 +34,9 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      - name: Type check
+        run: mypy
+
       # The TypeScript SDK (sdk-ts/) is type-checked and unit-tested here, and
       # tests/integration/test_typescript_sdk.py plays it against the server,
       # running its sources with Node's type stripping.

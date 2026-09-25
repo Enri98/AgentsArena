@@ -92,3 +92,16 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+packages = ["arena"]
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+
+[[tool.mypy.overrides]]
+# Minimal duck-typed fake games that exercise the contract suite itself.
+module = ["arena.testing.factories", "arena.testing.chance_factory", "arena.testing.hidden_factory"]
+ignore_errors = true

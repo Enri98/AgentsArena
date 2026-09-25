@@ -67,10 +67,15 @@ class PayloadPolicy(Protocol):
         """Return an adapter-facing action response."""
 
 
-class InProcessAgent(Protocol[ObservationT, ActionT]):
+# A policy consumes observations and produces actions.
+_ObservationContraT = TypeVar("_ObservationContraT", bound=Observation, contravariant=True)
+_ActionCoT = TypeVar("_ActionCoT", bound=Action, covariant=True)
+
+
+class InProcessAgent(Protocol[_ObservationContraT, _ActionCoT]):
     """Select a typed action from a typed observation."""
 
-    def select_action(self, observation: ObservationT) -> ActionT:
+    def select_action(self, observation: _ObservationContraT) -> _ActionCoT:
         """Return the next typed action for the supplied observation."""
 
 

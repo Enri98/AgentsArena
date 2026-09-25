@@ -41,6 +41,7 @@ Phase 32 features implemented here:
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import secrets as _secrets
 import uuid
@@ -193,6 +194,10 @@ class SpectatorConnection:
     #: Its welcome carries every earlier turn in the transcript, so a
     #: turn_committed below the watermark would be a duplicate.
     next_turn_index: int = 0
+
+
+#: Either kind of connection: the send path treats them alike.
+AnyConnection = SeatConnection | SpectatorConnection
 
 
 class MatchConnections:
@@ -574,7 +579,7 @@ async def persist_public_transcript(app_state: Any, match: "Match") -> None:
         match.transcript_settled = True
 
 
-async def _send_now(conn: SeatConnection, text: str) -> bool:
+async def _send_now(conn: AnyConnection, text: str) -> bool:
     """Write one frame straight to the socket. Returns whether it went out."""
 
     async with conn.send_lock:
@@ -629,7 +634,7 @@ def _send_backlog(ws: Any) -> int | None:
         return None
 
 
-async def _writer_loop(conn: SeatConnection) -> None:
+async def _writer_loop(conn: AnyConnection) -> None:
     """Drain one connection's outbox, one frame at a time, in order.
 
     Exactly one writer per connection, so FIFO per connection is preserved while
@@ -651,7 +656,7 @@ async def _writer_loop(conn: SeatConnection) -> None:
             _overflowed(conn, f"{backlog} bytes unsent")
 
 
-def _queue_close(conn: SeatConnection, code: int, reason: str) -> None:
+def _queue_close(conn: AnyConnection, code: int, reason: str) -> None:
     """Close ``conn`` once the frames already queued for it are sent."""
 
     try:
@@ -660,12 +665,12 @@ def _queue_close(conn: SeatConnection, code: int, reason: str) -> None:
         asyncio.get_running_loop().create_task(_close_ws_quietly(conn.websocket, code, reason))
 
 
-def _start_writer(conn: SeatConnection) -> None:
+def _start_writer(conn: AnyConnection) -> None:
     if conn.writer_task is None:
         conn.writer_task = asyncio.create_task(_writer_loop(conn))
 
 
-async def _stop_writer(conn: SeatConnection, *, drain_timeout: float = 2.0) -> None:
+async def _stop_writer(conn: AnyConnection, *, drain_timeout: float = 2.0) -> None:
     """Flush anything still queued, then stop the writer.
 
     Terminal messages (match_finished / match_aborted) are enqueued like any
@@ -688,7 +693,7 @@ async def _stop_writer(conn: SeatConnection, *, drain_timeout: float = 2.0) -> N
         pass
 
 
-async def _send(conn: SeatConnection, envelope: Any) -> None:
+async def _send(conn: AnyConnection, envelope: Any) -> None:
     """Queue one envelope for a single connection.
 
     Before the writer is running (the hello/welcome handshake) this writes
@@ -701,7 +706,7 @@ async def _send(conn: SeatConnection, envelope: Any) -> None:
     await _send_text(conn, dumps(envelope))
 
 
-async def _send_text(conn: SeatConnection, text: str) -> None:
+async def _send_text(conn: AnyConnection, text: str) -> None:
     """:func:`_send` for an envelope that is already serialised."""
 
     if conn.writer_task is None:
@@ -918,7 +923,7 @@ async def _broadcast_turns_committed(
     for turn_index in range(since, len(local_match.turns)):
         await _broadcast_per_viewer(
             conns,
-            lambda viewer, i=turn_index: _build_turn_committed_env(session, i, viewer),
+            functools.partial(_build_turn_committed_env, session, turn_index),
             turn_index=turn_index,
             shared=not session.definition.has_hidden_information,
         )
@@ -993,6 +998,7 @@ async def _broadcast_match_aborted(
     conns: "MatchConnections",
     session: MatchSession,
 ) -> None:
+    assert session.abort is not None  # only an aborted session is broadcast so
     abort_payload = _wire_abort(session.abort, session)
 
     def build(viewer: Viewer) -> Any:
@@ -1529,6 +1535,9 @@ async def run_match(
                 # The other seat's loop ended the match (simultaneous rounds).
                 _cancel_task(deadline_timer_task)
                 return None
+            turn_id: str | None
+            action_resp: ActionResponsePayload | None
+            error_msg: str | None
             if dropped:
                 dropped = False
                 turn_id, action_resp, error_msg = None, None, "disconnected"
@@ -1626,7 +1635,7 @@ async def run_match(
                     return None
 
                 # Reconnected: use the connection the handler swapped in.
-                new_conn = conns[active_seat]
+                new_conn: SeatConnection | None = conns[active_seat]
                 if new_conn is active_conn:
                     new_conn = (
                         _get_reconnect_conns(app_state)
@@ -1877,7 +1886,7 @@ async def run_match(
                 obtained = await _obtain(
                     local_match,
                     seat,
-                    lambda action, seat=seat: apply_match_action(local_match, seat, action),
+                    functools.partial(apply_match_action, local_match, seat),
                 )
                 if obtained is None:
                     return

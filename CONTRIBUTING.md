@@ -16,6 +16,7 @@ Always work inside the virtual environment.
 
 ```bash
 ruff check .
+mypy                          # configured in pyproject.toml; the package ships py.typed
 pytest -q                     # about 1,400 tests; a hung test fails after 120 s
 cd sdk-ts && npm ci && npm run typecheck && npm test   # if you touched sdk-ts/
 ```

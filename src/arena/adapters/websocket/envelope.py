@@ -7,7 +7,7 @@ Each concrete envelope class carries a Literal `type` field used as the discrimi
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal, Union, cast
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -144,7 +144,7 @@ WireEnvelope = Annotated[
     Field(discriminator="type"),
 ]
 
-_ENVELOPE_TYPES: dict[str, type] = {
+_ENVELOPE_TYPES: dict[str, type[_EnvelopeBase]] = {
     MSG_HELLO: HelloEnvelope,
     MSG_WELCOME: WelcomeEnvelope,
     MSG_MATCH_STATE: MatchStateEnvelope,
@@ -162,7 +162,7 @@ _ENVELOPE_TYPES: dict[str, type] = {
 }
 
 
-def decode_envelope(obj: dict) -> WireEnvelope:  # type: ignore[return]
+def decode_envelope(obj: dict) -> WireEnvelope:
     """Dispatch a raw dict to the correct envelope model by its `type` field.
 
     Callers are responsible for raising WireDecodeError / UnknownMessageType on
@@ -179,7 +179,7 @@ def decode_envelope(obj: dict) -> WireEnvelope:  # type: ignore[return]
         raise UnknownMessageType(msg_type)
 
     try:
-        return envelope_cls.model_validate(obj)
+        return cast(WireEnvelope, envelope_cls.model_validate(obj))
     except Exception as exc:
         raise WireDecodeError(f"Envelope validation failed: {exc}") from exc
 

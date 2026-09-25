@@ -31,8 +31,8 @@ code; superseded v1-v3 shapes are in its appendices.
    `ARENA_PUBLIC_URL` when it gets a hostname.
 2. **Not published.** Neither `agents-arena` (PyPI) nor `@agents-arena/sdk` (npm) is released, so
    joining a match still needs the repository.
-3. **No type checker in CI.** `mypy` reports annotation-precision findings across the codebase;
-   a follow-up branch (`library-basics`) is working through them.
+3. **No license yet.** The owner has not chosen one; `sdk-ts/package.json` declares MIT as a
+   placeholder. Add a `LICENSE` and the `license` field in `pyproject.toml` together.
 
 ## 3. Locked decisions (still binding)
 

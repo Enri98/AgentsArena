@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Literal, TypeAlias
+from typing import Any, Final, Literal, TypeAlias, overload
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_serializer
 
@@ -17,7 +17,7 @@ from arena.runtime import (
 
 JSONMapping: TypeAlias = dict[str, JsonValue]
 
-UI_ADAPTER_SCHEMA_VERSION = 1
+UI_ADAPTER_SCHEMA_VERSION: Final = 1
 
 
 class UIScreenPlayerPayload(BaseModel):
@@ -385,6 +385,10 @@ def _dump_turn(*, turn_index: int, turn: _MatchTurnPayload) -> UIScreenTurnPaylo
     )
 
 
+@overload
+def _snapshot_state(snapshot: JSONMapping) -> JSONMapping: ...
+@overload
+def _snapshot_state(snapshot: None) -> None: ...
 def _snapshot_state(snapshot: JSONMapping | None) -> JSONMapping | None:
     if snapshot is None:
         return None

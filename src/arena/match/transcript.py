@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, fields, is_dataclass
-from typing import Any, Generic, Literal, TypeVar, cast
+from typing import Any, Final, Generic, Literal, TypeVar, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer
 
@@ -53,7 +53,7 @@ ResultT = TypeVar("ResultT", bound=RuleResult)
 #:
 #: Bumped to 4 in Phase 41: a joint turn (several seats acting at once) carries
 #: an ``actions`` map instead of one seat and one action.
-MATCH_TRANSCRIPT_SCHEMA_VERSION = 4
+MATCH_TRANSCRIPT_SCHEMA_VERSION: Final = 4
 
 #: Transcript versions this loader accepts. A v1 transcript predates chance
 #: nodes; v1 and v2 predate views, and are always full transcripts; v1-v3
@@ -61,11 +61,11 @@ MATCH_TRANSCRIPT_SCHEMA_VERSION = 4
 SUPPORTED_MATCH_TRANSCRIPT_SCHEMA_VERSIONS = (1, 2, 3, 4)
 
 #: The unredacted transcript: everything, including every seat's private state.
-VIEW_FULL = "full"
+VIEW_FULL: Final = "full"
 #: One seat's transcript: only what that seat was entitled to see.
-VIEW_SEAT = "seat"
+VIEW_SEAT: Final = "seat"
 #: The public transcript: what a spectator may see.
-VIEW_PUBLIC = "public"
+VIEW_PUBLIC: Final = "public"
 
 TranscriptView = Literal["full", "seat", "public"]
 
@@ -612,11 +612,7 @@ def _turn_record_for_viewer(
         outcome=turn.outcome,
         actions=_dump_joint_actions(definition.serializer, turn.actions),
         event_payloads=[dump_domain_event(event).model_dump(mode="json") for event in turn.events],
-        result=(
-            _dump_rule_result(turn.result).model_dump(mode="json")
-            if turn.result is not None
-            else None
-        ),
+        result=dump_rule_result(turn.result),
         post_state=turn.post_state,
         viewer=viewer,
     )
@@ -825,11 +821,7 @@ def _ensure_result_matches(
     actual_result: RuleResult | None,
     context: str,
 ) -> None:
-    actual_payload = (
-        _dump_rule_result(actual_result).model_dump(mode="json")
-        if actual_result is not None
-        else None
-    )
+    actual_payload = dump_rule_result(actual_result)
     if actual_result != expected_result:
         raise ValueError(
             f"{context} result mismatch: expected {expected_result!r}, got {actual_result!r}."

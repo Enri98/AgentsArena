@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -18,23 +18,23 @@ from arena.runtime.payloads import RuntimeAbortPayload, RuntimeTranscriptPayload
 # Message type string constants
 # ---------------------------------------------------------------------------
 
-MSG_HELLO = "hello"
-MSG_WELCOME = "welcome"
-MSG_MATCH_STATE = "match_state"
-MSG_OBSERVATION_REQUEST = "observation_request"
-MSG_ACTION_RESPONSE = "action_response"
-MSG_ACTION_REJECTED = "action_rejected"
-MSG_TURN_COMMITTED = "turn_committed"
-MSG_MATCH_FINISHED = "match_finished"
-MSG_MATCH_ABORTED = "match_aborted"
-MSG_PING = "ping"
-MSG_PONG = "pong"
-MSG_ERROR = "error"
+MSG_HELLO: Final = "hello"
+MSG_WELCOME: Final = "welcome"
+MSG_MATCH_STATE: Final = "match_state"
+MSG_OBSERVATION_REQUEST: Final = "observation_request"
+MSG_ACTION_RESPONSE: Final = "action_response"
+MSG_ACTION_REJECTED: Final = "action_rejected"
+MSG_TURN_COMMITTED: Final = "turn_committed"
+MSG_MATCH_FINISHED: Final = "match_finished"
+MSG_MATCH_ABORTED: Final = "match_aborted"
+MSG_PING: Final = "ping"
+MSG_PONG: Final = "pong"
+MSG_ERROR: Final = "error"
 # Phase 36: spectator handshake. New message types rather than widening
 # hello/welcome, because §7 bumps the schema for type or semantic changes to
 # existing fields but allows new message types older clients can ignore.
-MSG_SPECTATOR_HELLO = "spectator_hello"
-MSG_SPECTATOR_WELCOME = "spectator_welcome"
+MSG_SPECTATOR_HELLO: Final = "spectator_hello"
+MSG_SPECTATOR_WELCOME: Final = "spectator_welcome"
 
 # ---------------------------------------------------------------------------
 # Shared player payload (mirrors RuntimePlayerPayload without importing runtime)
