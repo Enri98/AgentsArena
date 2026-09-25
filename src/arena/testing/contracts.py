@@ -150,6 +150,21 @@ def assert_illegal_action_rejection(bundle: GameContractBundle) -> None:
             "must raise a domain error during validate_action"
         )
 
+    seats = acting_seats(rules_engine, state)
+    if len(seats) > 1:
+        # The core helper validates before calling the engine, which would hide
+        # an engine hook that never revalidates: call the hook itself.
+        try:
+            rules_engine.apply_joint_action(  # type: ignore[attr-defined]
+                state, {s: bundle.illegal_action for s in seats}
+            )
+        except ArenaCoreError:
+            return
+        raise AssertionError(
+            "illegal action rejection contract failed: apply_joint_action must "
+            "defensively reject bundle.illegal_action"
+        )
+
     try:
         _apply(rules_engine, state, bundle.illegal_action)
     except ArenaCoreError:
@@ -526,14 +541,20 @@ _CHANCE_PLAYOUT_STEPS = 60
 
 
 def _first_legal_playout(definition: object, seed: int) -> object:
-    from arena.match import apply_match_action, start_match
+    from arena.match import apply_match_action, apply_match_joint_action, start_match
 
     match = start_match(definition, definition.config_type(), seed=seed)
     engine = match.rules_engine
     for _ in range(_CHANCE_PLAYOUT_STEPS):
         if engine.is_terminal(match.state):
             break
-        seat = engine.current_seat(match.state)
+        seats = acting_seats(engine, match.state)
+        if len(seats) > 1:  # a simultaneous round
+            match = apply_match_joint_action(
+                match, {s: engine.legal_actions(match.state, s)[0] for s in seats}
+            )
+            continue
+        seat = seats[0]
         match = apply_match_action(match, seat, engine.legal_actions(match.state, seat)[0])
     return match
 

@@ -263,7 +263,8 @@ def get_match(match_id: str, request: Request) -> JSONResponse:
     turn_count = 0
     if local_match is not None:
         turn_count = len(local_match.turns)
-        if not local_match.rules_engine.is_terminal(local_match.state):
+        running = session.lifecycle.value == "running"
+        if running and not local_match.rules_engine.is_terminal(local_match.state):
             seats = list(acting_seats(local_match.rules_engine, local_match.state))
             current_seat = seats[0] if len(seats) == 1 else None
 

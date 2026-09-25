@@ -388,7 +388,13 @@ def main(argv: list[str] | None = None) -> int:
 
     def _wrap(raw: Any, seat: int) -> Any:
         if raw is None:
-            policy = HumanPolicy(parser_fn, stdin=sys.stdin, stdout=sys.stdout)
+            policy = HumanPolicy(
+                parser_fn,
+                stdin=sys.stdin,
+                stdout=sys.stdout,
+                # Named: in a simultaneous round two humans are asked in turn.
+                prompt=f"Seat {seat}, your move: ",
+            )
             return TypedPayloadPolicyAdapter(definition, policy)
         return TypedPayloadPolicyAdapter(definition, raw)
 

@@ -12,7 +12,7 @@ from typing import Any
 from arena.cli.policies import HumanQuit
 from arena.cli.rendering import render_match_screen
 from arena.core.public_view import FULL_VIEW
-from arena.core.simultaneous import is_joint_node
+from arena.core.simultaneous import acting_seats, is_joint_node
 from arena.runtime import (
     AbortReason,
     Arena,
@@ -21,6 +21,7 @@ from arena.runtime import (
     PolicyRetried,
     RuntimeLifecycle,
     RuntimeStateError,
+    TurnRequested,
     dump_runtime_transcript,
     dump_session_status,
     record_runtime_event,
@@ -71,7 +72,7 @@ def play_match(
     session = arena.start_session(session)
 
     while session.lifecycle is RuntimeLifecycle.RUNNING:
-        _render(session, stdout, _viewer(session, human_seats))
+        _render(session, stdout, _viewer(session, human_seats), human_seats=human_seats)
         local_match = session.local_match
         if local_match is not None and is_joint_node(local_match.rules_engine, local_match.state):
             # A simultaneous round (Phase 41): every acting seat chooses, then
@@ -80,6 +81,16 @@ def play_match(
             try:
                 session = arena.step_session(session)
             except (HumanQuit, KeyboardInterrupt) as exc:
+                # Record the round that was being played, as the sequential
+                # path keeps its TurnRequested, and what the agents noted.
+                for seat in acting_seats(local_match.rules_engine, local_match.state):
+                    session = record_runtime_event(
+                        session, TurnRequested(match_id=session.match_id, seat=seat)
+                    )
+                if retry_sink is not None:
+                    session = _drain_retry_sink(session, retry_sink)
+                if decision_sink is not None:
+                    session = _drain_decision_sink(session, decision_sink)
                 abort_reason, msg = _abort_info(exc)
                 session = arena.abort_session(session, reason=abort_reason, message=msg)
                 break
@@ -166,9 +177,32 @@ def _viewer(session: Any, human_seats: tuple[int, ...]) -> Any:
     return None
 
 
-def _render(session: Any, stdout: Any, viewer: Any = FULL_VIEW) -> None:
+#: An agent's own notes: its reasoning, and why a retry was needed.
+_AGENT_NOTES = ("PolicyDecided", "PolicyRetried")
+
+
+def _render(
+    session: Any,
+    stdout: Any,
+    viewer: Any = FULL_VIEW,
+    *,
+    human_seats: tuple[int, ...] | None = None,
+) -> None:
     status_payload = dump_session_status(session, viewer=viewer)
     transcript_payload = dump_runtime_transcript(session, viewer=viewer)
+    if human_seats:
+        # While a human plays, an agent's notes stay private to it: its
+        # reasoning often names its next move (in Rock-Paper-Scissors, the next
+        # throw). The finished screen shows everything.
+        transcript_payload = {
+            **transcript_payload,
+            "events": [
+                event
+                for event in transcript_payload["events"]
+                if event["event_type"] not in _AGENT_NOTES
+                or event["payload"].get("seat") in human_seats
+            ],
+        }
     screen = build_match_screen(
         status_payload=status_payload,
         transcript_payload=transcript_payload,

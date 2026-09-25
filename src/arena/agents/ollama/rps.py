@@ -19,9 +19,9 @@ class RpsPromptBuilder:
         "- rock beats scissors, scissors beats paper, paper beats rock;\n"
         "- the same throw is a tie and scores nobody.\n"
         "The first player to win the target number of rounds takes the match.\n\n"
-        "Strategy: a predictable player loses. Look at the opponent's past throws for a "
-        "pattern (repeating a throw, or switching to what would have beaten their last "
-        "one) and counter it; with no pattern, vary your throws.\n\n"
+        "Strategy: a predictable player loses. You see the last round: many players "
+        "repeat a winning throw, or switch to what would have beaten their last one. "
+        "Counter that, and vary your own throws.\n\n"
         "Respond with a JSON object choosing rock, paper or scissors."
     )
 

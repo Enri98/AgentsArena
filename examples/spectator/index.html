@@ -153,6 +153,7 @@
   }
 
   function seatSpan(seat) {
+    if (seat === null || seat === undefined) return "";  // chance or joint round
     return seat === 0 ? "seat0" : "seat1";
   }
 
