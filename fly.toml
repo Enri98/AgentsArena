@@ -16,6 +16,9 @@ primary_region = "fra"
   # Fly's proxy sets this to the real client address. Without it every client
   # shares the proxy's address, and the per-IP rate limits become server-wide.
   ARENA_CLIENT_IP_HEADER = "Fly-Client-IP"
+  # The address clients use: seat URLs are built on it (wss:// for https).
+  # Replace with your app's hostname once it has one.
+  # ARENA_PUBLIC_URL = "https://arena-server.fly.dev"
   # Durable public transcripts: create the volume first (docs/DEPLOYMENT.md,
   # "Persistent public transcripts"), then uncomment this and [mounts].
   # ARENA_TRANSCRIPT_STORE = "sqlite:/data/transcripts.sqlite3"

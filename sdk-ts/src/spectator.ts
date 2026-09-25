@@ -1,5 +1,5 @@
 /**
- * Watching a match (docs/NETWORK_PROTOCOL.md section 8.13): the public view,
+ * Watching a match (docs/NETWORK_PROTOCOL.md section 8.12): the public view,
  * live. A spectator holds no seat and is never sent an observation request.
  */
 

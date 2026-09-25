@@ -287,6 +287,7 @@ Every setting is a flag of `python -m arena.server` and an environment variable;
 | `ARENA_TRANSCRIPT_MAX_BYTES` | `--transcript-max-bytes` | 512 MiB (64 MiB for `memory`) | Most bytes of transcripts kept; the oldest go first |
 | `ARENA_TRANSCRIPT_MAX_RECORD_BYTES` | `--transcript-max-record-bytes` | 8 MiB (4 MiB for `memory`) | Largest single transcript kept |
 | `ARENA_CLIENT_IP_HEADER` | `--client-ip-header` | unset | Header with the client address, set by your proxy |
+| `ARENA_PUBLIC_URL` | `--public-url` | unset | The server's public URL, e.g. `https://arena.example.com`; seat URLs are built on it |
 
 Retention is enforced on every read, so an expired transcript returns `404` at once. The byte cap
 is what stops a client that plays many long matches from filling the volume: keep it well below
@@ -317,6 +318,12 @@ header, the per-IP caps become caps for the whole server: 8 WebSocket connection
 matches) and 5 match creations a minute. `fly.toml` sets it to `Fly-Client-IP`, which Fly's
 proxy always sets. Set it only when the proxy is the sole way to reach the server: the
 server trusts the header as is.
+
+**Set `ARENA_PUBLIC_URL` behind a TLS-terminating proxy.** `POST /matches` returns the seat
+URLs clients connect to. The proxy forwards plain http, so without the setting those URLs are
+`ws://`, which a client outside cannot use. Set it to the address clients use, such as
+`https://arena-server-alice.fly.dev`, and the seat URLs become
+`wss://arena-server-alice.fly.dev/...`.
 
 ---
 
@@ -405,6 +412,7 @@ docker run -d --restart unless-stopped \
     -v arena-data:/data \
     -e ARENA_TRANSCRIPT_STORE=sqlite:/data/transcripts.sqlite3 \
     -e ARENA_CLIENT_IP_HEADER=X-Forwarded-For \
+    -e ARENA_PUBLIC_URL=https://arena.example.com \
     arena-server
 ```
 
