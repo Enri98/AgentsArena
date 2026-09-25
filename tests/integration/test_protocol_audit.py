@@ -126,7 +126,10 @@ def test_a_spectator_that_stops_reading_is_dropped_on_a_real_server(
 ) -> None:
     """uvicorn's sansio WebSocket never blocks a send, so the outbox of a reader
     that stopped never fills; the transport's unsent bytes are the signal. The
-    bound is lowered so a short match is enough to cross it."""
+    bound is lowered, and the client's receive buffer made small, so a short
+    match crosses it on any platform (Linux loopback buffers hold megabytes)."""
+
+    import socket
 
     from websockets.asyncio.client import connect as ws_connect
 
@@ -134,7 +137,7 @@ def test_a_spectator_that_stops_reading_is_dropped_on_a_real_server(
 
     monkeypatch.setattr(bridge, "MAX_SEND_BACKLOG_BYTES", 64 * 1024)
     app = create_app(rate_limiter=RateLimiter.unlimited(), max_turns_per_match=3000)
-    with serve(app) as server:
+    with capture_logs() as logs, serve(app) as server:
         match = httpx.post(f"{server.http_base_url}/matches", json={"game_id": "pig"}).json()
         spectate_url = f"{server.ws_base_url}/matches/{match['match_id']}/spectate"
 
@@ -142,8 +145,15 @@ def test_a_spectator_that_stops_reading_is_dropped_on_a_real_server(
             return {"choice": "roll"}
 
         async def run() -> tuple[int | None, str | None]:
-            # max_queue=1: the client stops reading the socket once one frame waits.
-            spectator = await ws_connect(spectate_url, ping_interval=None, max_queue=1)
+            # max_queue=1: the client stops reading the socket once one frame
+            # waits; a small receive buffer makes the server's transport back up.
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            port = int(server.http_base_url.rsplit(":", 1)[1])
+            sock.connect(("127.0.0.1", port))
+            spectator = await ws_connect(
+                spectate_url, sock=sock, ping_interval=None, max_queue=1
+            )
             await spectator.send(
                 json.dumps(
                     {
@@ -178,4 +188,8 @@ def test_a_spectator_that_stops_reading_is_dropped_on_a_real_server(
 
         code, reason = asyncio.run(run())
 
-    assert (code, reason) == (1000, "spectator_too_slow")
+    events = [entry["event"] for entry in logs]
+    assert "spectator_dropped" in events
+    # Its close frame may be lost behind the unsent backlog; it was never let
+    # run to the normal end.
+    assert (code, reason) in ((1000, "spectator_too_slow"), (None, None))
