@@ -55,6 +55,19 @@ async def _close_quietly(ws: object, code: int, reason: str) -> None:
         pass
 
 
+def check_public_url(url: str) -> None:
+    """Raise ``ValueError`` unless ``url`` is an http(s) URL with a host and no
+    query or fragment (seat URLs are built by appending a path to it)."""
+
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.netloc:
+        raise ValueError(f"public URL {url!r} must be http:// or https:// with a host")
+    if parts.query or parts.fragment:
+        raise ValueError(f"public URL {url!r} must have no query or fragment")
+
+
 def create_app(
     game_registry=None,
     *,
@@ -98,8 +111,8 @@ def create_app(
         proxy that forwards plain http.
     """
 
-    if public_url is not None and not public_url.startswith(("http://", "https://")):
-        raise ValueError("public_url must start with http:// or https://")
+    if public_url is not None:
+        check_public_url(public_url)
 
     if game_registry is None:
         from arena.games import build_default_registry

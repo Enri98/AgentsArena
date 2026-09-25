@@ -404,3 +404,116 @@ def test_a_seat_that_stops_reading_is_closed_not_silently_starved() -> None:
         return socket.closes
 
     assert asyncio.run(run()) == [(WS_CLOSE_TRY_AGAIN, "outbox_overflow")]
+
+
+
+def test_a_reader_whose_transport_backs_up_is_closed() -> None:
+    """uvicorn's sansio WebSocket never blocks a send, so a slow reader never
+    fills the outbox: the transport's unsent bytes are what give it away."""
+
+    import asyncio
+
+    from arena.server.runtime_bridge import (
+        MAX_SEND_BACKLOG_BYTES,
+        WS_CLOSE_TRY_AGAIN,
+        SeatConnection,
+        SpectatorConnection,
+        _writer_loop,
+    )
+
+    class _Transport:
+        def get_write_buffer_size(self) -> int:
+            return MAX_SEND_BACKLOG_BYTES + 1
+
+    class _Protocol:
+        transport = _Transport()
+
+        async def send(self, message: dict) -> None:
+            pass
+
+    class _Socket:
+        def __init__(self) -> None:
+            self._send = _Protocol().send
+            self.closes: list[tuple[int, str]] = []
+
+        async def send_text(self, text: str) -> None:
+            pass
+
+        async def close(self, code: int, reason: str) -> None:
+            self.closes.append((code, reason))
+
+    async def run(conn: object) -> None:
+        conn.outbox.put_nowait("frame")  # type: ignore[attr-defined]
+        conn.outbox.put_nowait(None)  # type: ignore[attr-defined]
+        await _writer_loop(conn)  # type: ignore[arg-type]
+        await asyncio.sleep(0)
+
+    seat_socket = _Socket()
+    seat = SeatConnection(websocket=seat_socket, seat=0)  # type: ignore[arg-type]
+    asyncio.run(run(seat))
+    assert seat.outbox_overflowed
+    assert seat_socket.closes == [(WS_CLOSE_TRY_AGAIN, "outbox_overflow")]
+
+    # A spectator is flagged, then dropped by the next broadcast.
+    spectator_socket = _Socket()
+    spectator = SpectatorConnection(websocket=spectator_socket)  # type: ignore[arg-type]
+    asyncio.run(run(spectator))
+    assert spectator.outbox_overflowed
+    assert spectator_socket.closes == []
+
+
+def test_frames_for_a_connection_whose_writer_stopped_are_dropped_quietly() -> None:
+    import asyncio
+
+    from arena.server.runtime_bridge import SeatConnection, _enqueue_text
+
+    async def run() -> SeatConnection:
+        conn = SeatConnection(websocket=object(), seat=0)  # type: ignore[arg-type]
+        conn.writer_task = asyncio.ensure_future(asyncio.sleep(0))
+        await conn.writer_task
+        for _ in range(500):
+            _enqueue_text(conn, "frame")
+        return conn
+
+    conn = asyncio.run(run())
+    assert conn.outbox.qsize() == 0
+    assert not conn.outbox_overflowed
+
+
+def test_a_public_url_must_be_a_plain_http_url() -> None:
+    import pytest
+
+    from arena.server.app import check_public_url
+
+    check_public_url("https://arena.example.com")
+    check_public_url("http://10.0.0.5:8080/arena")
+    for bad in ("arena.example.com", "https://", "ftp://x", "https://x/?a=1", "https://x/#f"):
+        with pytest.raises(ValueError):
+            check_public_url(bad)
+
+
+def test_a_non_full_view_cannot_carry_an_abort_cause_message() -> None:
+    import pytest
+
+    from arena.runtime.payloads import RuntimeTranscriptPayload
+
+    payload = {
+        "match_id": "m",
+        "game_id": "liarsdice",
+        "schema_version": 4,
+        "lifecycle": "aborted",
+        "players": [],
+        "events": [],
+        "abort": {
+            "reason": "core_error",
+            "message": "x",
+            "cause_type": "ValueError",
+            "cause_message": "seat 0 holds three sixes",
+        },
+        "match_transcript": None,
+        "view": "public",
+        "viewer_seat": None,
+    }
+    with pytest.raises(ValueError):
+        RuntimeTranscriptPayload.model_validate(payload)
+    RuntimeTranscriptPayload.model_validate({**payload, "view": "full"})

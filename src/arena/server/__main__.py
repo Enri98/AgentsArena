@@ -141,6 +141,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             value = getattr(args, name)
             if isinstance(value, str):
                 setattr(args, name, convert(value))
+        if args.public_url:
+            from arena.server.app import check_public_url
+
+            check_public_url(args.public_url)
         store = build_transcript_store(args)
     except (ValueError, argparse.ArgumentTypeError) as exc:
         parser.error(str(exc))

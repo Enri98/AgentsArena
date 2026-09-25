@@ -44,9 +44,12 @@ can, §4.1).
   connection with `1003`; on a play channel that is a disconnect like any other, and the seat may
   resume (§11).
 - **TLS.** The server speaks plain HTTP and WebSocket; a reverse proxy terminates TLS. Use
-  `wss://` for anything but localhost. The seat URLs that `POST /matches` returns are `wss://`
-  when the request came over https, or when the operator configured the server's public URL
-  (`--public-url`, `docs/DEPLOYMENT.md`); otherwise `ws://` on the request's `Host`.
+  `wss://` for anything but localhost. The seat URLs that `POST /matches` returns are built on
+  the server's public URL when the operator configured one (`--public-url`,
+  `docs/DEPLOYMENT.md`): `wss://` for an https URL. Otherwise they are built on the request's
+  `Host`, and are `wss://` only if the server saw the request as https (it terminates TLS itself,
+  or a proxy on the same host sets `X-Forwarded-Proto`). Behind any other TLS proxy, configure
+  the public URL.
 - **One connection per seat.** A client opens one play connection per seat it holds, and one
   spectate connection per match it watches.
 - **Frame sizes.** The server accepts inbound frames of at most 1 MiB; every client message is
@@ -259,13 +262,15 @@ Every WebSocket message is one JSON object:
 | Field | Rules |
 |-------|-------|
 | `type` | Always. One of the message types in §8. |
-| `schema_version` | Always. The server stamps 4. A client should stamp the version it negotiated (4); the server accepts 1-4 here. |
+| `schema_version` | Always. The server stamps 4, and accepts 1-4 from a client. A client stamps its `hello` with a version every server it supports can decode (the lowest it lists: a server refuses an envelope version it cannot decode before reading the list), and later frames with `welcome.negotiated_schema_version`. |
 | `match_id` | Set on every server frame. Optional and ignored on client frames. |
-| `seat` | Set on `welcome`, `observation_request` and `action_rejected`; null on other server frames. Ignored on client frames. |
+| `seat` | Set on `welcome`, `observation_request` and `action_rejected`; null on other server frames. Ignored on client frames (but must be an integer or null). |
 | `turn_id` | Set by the client on `action_response` (§12); echoed on `action_rejected`; null elsewhere. |
 | `payload` | Always. A message-specific object; every message type has required fields. |
 
-Server frames always carry all six keys, with null where a field does not apply.
+Server frames always carry all six keys, with null where a field does not apply. Envelope
+fields are strictly typed: a `seat`, `match_id` or `turn_id` of the wrong type (`"0"` for `0`)
+makes the frame malformed (§8.11).
 
 **Unknown fields.** Unknown envelope keys, and unknown keys in a §8 message body, are ignored.
 The payloads nested inside bodies, which are reused from the simulation (the `observation_request`
@@ -322,8 +327,10 @@ Every message uses the envelope of §6. The sections below give `payload` shapes
 
 - A client has 10 s from opening the socket to send it (`4422 hello_timeout`).
 - `auth` is reserved; send `null`. Non-null values are ignored.
+- `client_name`, `client_version`, a non-empty `supported_schema_versions` and `requested_seat`
+  are required.
 - `requested_seat` must equal the URL's `?seat=` on a fresh join (`4422 seat_mismatch`). A resume
-  ignores it: the URL's seat decides.
+  still sends it but its value is ignored: the URL's seat decides.
 - `resume_token`: `null` for a fresh join, or the token from this seat's latest `welcome` to
   resume (§11).
 
@@ -432,8 +439,9 @@ whether it has acted.
 - The envelope's `turn_id` should be set, unique per attempt (a retry after `action_rejected`
   needs a new one). Without one the server assigns its own, and a duplicate cannot be detected.
 - `action_response` is the `ActionResponsePayload` (§17). Its `schema_version` must be 1 and its
-  `game_id` the match's game; otherwise the action is rejected with `adapter_error` and costs a
-  retry. Its `seat` is informational: an action is always attributed to the connection's seat.
+  `game_id` the match's game; another positive integer, or another game, is rejected with
+  `adapter_error` and costs a retry. A `schema_version` below 1 or not an integer, or an extra key,
+  makes the whole frame malformed (§8.11), which costs no retry. Its `seat` is informational: an action is always attributed to the connection's seat.
   `action` is a game-specific object.
 - A legal action is committed. An illegal one is answered with `action_rejected`.
 
@@ -529,12 +537,14 @@ The last frame; the server then closes with `1000 normal_closure`.
 
 - `abort` is the `AbortMetadataPayload` (§17). `reason` is one of `turn_deadline_expired`,
   `peer_disconnected`, `heartbeat_timeout`, `adapter_error`, `turn_limit_exceeded`, `core_error`
-  (the rules refused a simultaneous round) or `runtime_error` (the server's match driver failed).
-  For a hidden-information game `cause_message` is always null.
+  (the rules refused a simultaneous round, or the match failed to start) or `runtime_error` (the
+  match failed to start, or the server's match driver failed). For a hidden-information game
+  `cause_message` is always null.
 - `transcript` is the recipient's runtime transcript, as for `match_finished`.
 
-The last frame; the server then closes with `1000` and a reason naming the abort (§9.1), or
-`4500 server_error` for `runtime_error`.
+The last frame; the server then closes with `1000` and a reason naming the abort (§9.1):
+`match_aborted` for a match that failed to start, and `4500 server_error` when the match driver
+crashed.
 
 ### 8.10 `ping` / `pong` (server → acting seat; client → server)
 
@@ -550,13 +560,16 @@ ignored. A ping not answered within 20 s is a miss, and the second consecutive m
 connection `4408 heartbeat_timeout`, about 80 s after the request. With the default 30 s turn
 deadline, the deadline always fires first.
 
-The server never answers a client's `ping`. A `4408` close is a disconnect: the grace period of
-§11 applies, and if the seat does not resume the match aborts with `heartbeat_timeout`.
+The heartbeat restarts on every request and on a resume, so after a resume the first ping comes
+20 s later. The server never answers a client's `ping`. A `4408` close is a disconnect: the grace
+period of §11 applies, and if the seat does not resume the match aborts with `heartbeat_timeout`.
 
 **After the end.** Once the server has sent `match_state` with a lifecycle other than `running`,
 it reads nothing more from the seats: it sends the terminal frame and closes both play channels.
-An `action_response` still in flight is never read. The code `match_already_finished` is reserved
-and not emitted. The transition itself is atomic: a frame lands either before it (and is processed
+An `action_response` still in flight is never read. (A client that keeps sending frames the
+server never reads may see its connection reset by TCP when the server closes, losing the
+terminal frame; the public transcript remains available over HTTP.) The code
+`match_already_finished` is reserved and not emitted. The transition itself is atomic: a frame lands either before it (and is processed
 normally) or after it (and is not read).
 
 ### 8.11 `error` (server → client)
@@ -568,8 +581,9 @@ normally) or after it (and is not read).
 On a play channel, sent to the acting seat for a frame the server could not use: one that is not
 JSON or not a valid envelope, one with an envelope `schema_version` outside 1-4, or a message
 type other than `action_response`, `pong` or `ping` during its turn. The connection stays open
-and the error costs no retry, but a seat that sends 16 such frames in one turn is closed
-`4422 too_many_malformed_frames` (§13).
+and the error costs no retry, but at the 16th such frame in one turn the server stops reading the
+connection, closes it `4422 too_many_malformed_frames` after that error, and treats the seat as
+dropped (§11: it may resume, with a fresh count).
 
 On a spectate channel, a well-formed envelope of any type other than `ping`/`pong` is answered
 with `error` code `protocol_violation`, and the connection is closed `1000 match_over`. A frame
@@ -627,9 +641,9 @@ No seat and no resume token: a reconnecting spectator says hello again and gets 
 | `1000` | `match_over` | Spectator: the match has ended, or the spectator sent a message it may not. |
 | `1000` | `spectator_too_slow` | Spectator: its outbound queue overflowed (§13). |
 | `1003` | | A binary frame. |
-| `1008` | | A non-integer `?seat=` (rejected before the handler, reason is a validation message). |
-| `1013` | `outbox_overflow` | A seat stopped reading and its outbound queue overflowed; it may resume (§11). |
-| `4400` | `schema_version_mismatch` | The server's version is not in `supported_schema_versions`. |
+| `1007`, `1009`, `1011` | | From the WebSocket layer: invalid UTF-8, a frame over 1 MiB, a keepalive ping not answered. |
+| `1013` | `outbox_overflow` | A seat stopped reading: more than 16 MiB sent to it is still unsent (§13). It may resume (§11). |
+| `4400` | `schema_version_mismatch` | The server's version is not in `supported_schema_versions`, or the first frame's envelope `schema_version` is outside 1-4. |
 | `4401` | `unauthorized` | The resume token is the *other* seat's current token. |
 | `4404` | `unsupported_endpoint` | No such WebSocket endpoint. |
 | `4408` | `heartbeat_timeout` | Two consecutive missed pongs (§8.10). |
@@ -639,7 +653,7 @@ No seat and no resume token: a reconnecting spectator says hello again and gets 
 | `4410` | `match_expired` | The match was evicted (§13) while the client waited or said hello. |
 | `4410` | `match_over` | The match has ended: no seat can be claimed or resumed. |
 | `4410` | `invalid_resume_token` | A token that is not this seat's current one (rotated, from another match, or from before a restart). |
-| `4422` | `invalid_seat` | `?seat=` missing or not 0 or 1. |
+| `4422` | `invalid_seat` | `?seat=` missing, or anything but `0` or `1`. |
 | `4422` | `hello_timeout`, `no_hello_received` | No `hello` / `spectator_hello` within 10 s, or the socket closed first. (A binary first frame closes `1003`.) |
 | `4422` | `malformed_envelope`, `expected_hello_got_<type>`, `expected_spectator_hello_got_<type>` | The first frame is not a valid `hello` / `spectator_hello`. |
 | `4422` | `seat_mismatch` | A fresh `hello`'s `requested_seat` differs from `?seat=`. |
@@ -648,19 +662,22 @@ No seat and no resume token: a reconnecting spectator says hello again and gets 
 | `4500` | `server_error` | Internal failure: the match driver crashed (the match aborts `runtime_error` first), or a `welcome` could not be sent. |
 
 After the handshake, a malformed frame is answered in-band (§8.11) and does not close the
-connection until the cap.
+connection until the cap. Every close of a play channel, the transport-level ones included, is a
+disconnect: the grace period of §11 applies.
 
 **Refusals before `hello`.** A connection refused before its `hello` is read (unknown endpoint,
 unknown match, bad `?seat=`, a per-IP cap) is accepted, the server waits up to 1 s for the client's
 first frame, and then closes with the code. A client should send its `hello` as soon as the socket
-opens and expect the close code, not a refused handshake.
+opens and expect the close code, not a refused handshake. At most 64 refused connections wait
+like this at once, server-wide; past that they close at once.
 
 ### 9.2 The order of checks on a play channel
 
 1. Per-IP caps: `4429`.
 2. The match exists: `4410 match_not_found`.
 3. `?seat=` is 0 or 1: `4422 invalid_seat`.
-4. Accept; the first frame arrives within 10 s and is a valid `hello`: `4422`.
+4. Accept; the first frame arrives within 10 s (`4422 hello_timeout`); it is text (`1003`); its
+   envelope `schema_version` is 1-4 (`4400`); it is a valid `hello` (`4422`).
 5. The match still exists: `4410 match_expired`.
 6. With a `resume_token`, the resume path: the match has not ended (`4410 match_over`); the token
    is the seat's current one (`4401` if it is the other seat's, else `4410
@@ -750,8 +767,8 @@ IP" is the TCP peer, or the right-most entry of the operator's trusted client-ad
 
 | Cap | Limit | On excess |
 |-----|-------|-----------|
-| Concurrent WebSocket connections per source IP | 8 | close `4429 connections_per_ip` |
-| WebSocket opens per source IP per minute (seats and spectators; refused ones count) | 60 | close `4429 connection_opens_per_ip` |
+| Concurrent WebSocket connections per source IP (any path) | 8 | close `4429 connections_per_ip` |
+| WebSocket opens per source IP per minute (any path; refused ones count) | 60 | close `4429 connection_opens_per_ip` |
 | Match creations per source IP per minute (every attempt counts) | 5 | HTTP `429 rate_limited` |
 | Concurrent seat connections per match | 4 | close `4429 connections_per_match` |
 | Concurrent spectators per match | 16 | close `4429 spectators_per_match` |
@@ -768,28 +785,36 @@ IP" is the TCP peer, or the right-most entry of the operator's trusted client-ad
   round share it. It counts only frames the server reads, which are the acting seats'.
 - **Size bounds.** A create body is at most 64 KiB; `players` has at most 2 entries and a label at
   most 64 characters; an inbound frame at most 1 MiB.
-- **Malformed frames.** At most 16 unusable frames per seat per turn, each answered with `error`;
-  then `4422 too_many_malformed_frames`.
-- **Slow readers.** A connection that falls 64 frames behind is closed: a spectator
-  `1000 spectator_too_slow`, a seat `1013 outbox_overflow` (it may resume). A slow reader never
-  slows the match.
+- **Malformed frames.** At most 16 unusable frames per seat per turn, each answered with `error`
+  and logged; at the 16th the server stops reading that connection and closes it
+  `4422 too_many_malformed_frames`.
+- **Slow readers.** Every connection has its own outbound queue, so a slow reader never slows
+  the match. A connection with more than 16 MiB sent to it and still unsent, or 64 frames queued,
+  is closed: a spectator `1000 spectator_too_slow`, a seat `1013 outbox_overflow` (it may
+  resume). The keepalive (§3) closes a reader that stops answering pings within about 40 s in any
+  case.
 - **Match length.** At most 5000 turns, chance turns included; then the match aborts
   `turn_limit_exceeded` (two Pig bots that only ever roll).
-- **Registry.** At most 1000 matches. When full, a new match sheds finished matches first, then
-  never-started ones, oldest first, and never a running match; if nothing can be shed, `POST
-  /matches` returns `503 server_busy`. Ages count from a match's last change: a finished match is
-  kept an hour after it ended, a never-started one an hour after creation, a running one 24 hours
-  after its last turn. Eviction runs when a match is created, so these are minimums. Clients
-  waiting on an evicted match are closed `4410 match_expired`.
+- **Registry.** At most 1000 matches. When full, a new match sheds ended (finished or aborted)
+  matches first, then never-started ones, oldest first, and never a running match; if nothing can
+  be shed, `POST /matches` returns `503 server_busy`. An ended match is kept an hour after it
+  ended, a never-started one an hour after creation; a running match is never evicted (the turn
+  deadline and the turn cap end it). Eviction runs when a match is created, so these are minimums.
+  Clients waiting on an evicted match are closed `4410 match_expired`.
+- **Refusals.** At most 64 refused connections wait for their first frame at once (§9.1).
+- **Action throttle and duplicates.** The throttle counts every `action_response` read, a
+  duplicate `turn_id` included.
 - Other endpoints (`GET /matches/{id}`, `GET /games`, `GET /schemas/payloads`) are not
   rate-limited.
 
-Rate limits bound abuse; they do not prevent it. The per-IP connection cap bounds how many sockets
-one client can hold, and the malformed-frame cap how much logging one socket can cause.
+Rate limits bound abuse; they do not prevent it. The per-IP caps bound how many sockets one client
+holds, the refusal bound how many refused ones wait, and the malformed-frame cap how much logging
+one socket causes.
 
 ## 14. Logging
 
-The server writes one structured JSON log line per significant event, with at least:
+The server writes one structured JSON log line per significant event, with `timestamp`,
+`level`, `event` and `schema_version`, and `match_id` and `seat` where they apply:
 
 ```json
 {"timestamp": "...", "level": "info", "event": "<event_name>", "match_id": "...", "seat": 0, "schema_version": 1}
@@ -968,3 +993,7 @@ older server):
   - Seat URLs were always `ws://`.
   - Refusals before `hello` closed at once, and some clients (Node) saw `1006` instead of the
     code.
+  - A non-integer `?seat=` was refused with HTTP 403 at the handshake, and unknown WebSocket
+    paths were outside the per-IP caps.
+  - The Python SDK stamped `1` on every envelope; it now stamps its `hello` with `1` and later
+    frames with the negotiated version.

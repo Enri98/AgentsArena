@@ -9,7 +9,7 @@ from websockets.asyncio.client import ClientConnection
 from websockets.asyncio.client import connect as _ws_connect
 from websockets.exceptions import ConnectionClosed
 
-from arena.adapters.websocket.codec import WIRE_SCHEMA_VERSION, dumps, loads
+from arena.adapters.websocket.codec import dumps, loads
 from arena.adapters.websocket.envelope import (
     ActionResponseEnvelope,
     HelloEnvelope,
@@ -76,9 +76,11 @@ class Session:
             reason = exc.rcvd.reason if exc.rcvd else "connection failed"
             raise close_code_to_error(code, reason) from exc
 
-        # Send hello
+        # Send hello. Nothing is negotiated yet, so its envelope carries the
+        # lowest version listed: every server this client can talk to decodes
+        # it (a v3 server refuses an envelope stamped 4 before reading the list).
         hello = HelloEnvelope(
-            schema_version=WIRE_SCHEMA_VERSION,
+            schema_version=min(SUPPORTED_SCHEMA_VERSIONS),
             seat=seat,
             payload=HelloBody(
                 client_name=CLIENT_NAME,
@@ -133,7 +135,7 @@ class Session:
 
             if env.type == "ping":
                 pong = PongEnvelope(
-                    schema_version=WIRE_SCHEMA_VERSION,
+                    schema_version=self._welcome.negotiated_schema_version,
                     match_id=env.match_id,
                     payload=PongBody(nonce=env.payload.nonce),  # type: ignore[union-attr]
                 )
@@ -164,7 +166,7 @@ class Session:
             }
         })
         env = ActionResponseEnvelope(
-            schema_version=WIRE_SCHEMA_VERSION,
+            schema_version=self._welcome.negotiated_schema_version,
             match_id=self._welcome.match_id,
             seat=self._welcome.seat,
             turn_id=tid,

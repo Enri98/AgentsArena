@@ -139,7 +139,7 @@ async def create_match_handler(request: Request) -> JSONResponse:
         except RateLimitExceeded as exc:
             logger.warning(
                 "rate_limited",
-                schema_version=WIRE_SCHEMA_VERSION,
+                schema_version=1,
                 scope=exc.scope,
                 detail=exc.message,
             )

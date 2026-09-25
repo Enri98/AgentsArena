@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 import httpx
+from structlog.testing import capture_logs
 from websockets.exceptions import ConnectionClosed
 
 from arena.server.app import create_app
@@ -60,8 +61,11 @@ def test_a_finished_match_reports_its_result_everywhere() -> None:
 
 
 def test_a_seat_flooding_malformed_frames_is_closed() -> None:
+    """And the log stays bounded: the server stops reading at the cap, though
+    thousands of frames may already be buffered."""
+
     app = create_app(rate_limiter=RateLimiter.unlimited())
-    with serve(app) as server:
+    with capture_logs() as logs, serve(app) as server:
         match = httpx.post(
             f"{server.http_base_url}/matches",
             json={"game_id": "tictactoe", "disconnect_grace_ms": 200},
@@ -95,7 +99,7 @@ def test_a_seat_flooding_malformed_frames_is_closed() -> None:
                 pass
             errors = 0
             try:
-                for _ in range(MAX_PROTOCOL_ERRORS_PER_TURN + 5):
+                for _ in range(2000):
                     await ws0.send("{not json")
                 while True:
                     if json.loads(await ws0.recv())["type"] == "error":
@@ -112,3 +116,66 @@ def test_a_seat_flooding_malformed_frames_is_closed() -> None:
 
     assert errors == MAX_PROTOCOL_ERRORS_PER_TURN
     assert (code, reason) == (4422, "too_many_malformed_frames")
+    events = [entry["event"] for entry in logs]
+    assert events.count("protocol_violation") == MAX_PROTOCOL_ERRORS_PER_TURN
+    assert events.count("outbox_overflow") == 0
+
+
+def test_a_spectator_that_stops_reading_is_dropped_on_a_real_server(
+    monkeypatch: Any,
+) -> None:
+    """uvicorn's sansio WebSocket never blocks a send, so the outbox of a reader
+    that stopped never fills; the transport's unsent bytes are the signal. The
+    bound is lowered so a short match is enough to cross it."""
+
+    from websockets.asyncio.client import connect as ws_connect
+
+    import arena.server.runtime_bridge as bridge
+
+    monkeypatch.setattr(bridge, "MAX_SEND_BACKLOG_BYTES", 64 * 1024)
+    app = create_app(rate_limiter=RateLimiter.unlimited(), max_turns_per_match=3000)
+    with serve(app) as server:
+        match = httpx.post(f"{server.http_base_url}/matches", json={"game_id": "pig"}).json()
+        spectate_url = f"{server.ws_base_url}/matches/{match['match_id']}/spectate"
+
+        def always_roll(payload: Any) -> dict[str, Any]:
+            return {"choice": "roll"}
+
+        async def run() -> tuple[int | None, str | None]:
+            # max_queue=1: the client stops reading the socket once one frame waits.
+            spectator = await ws_connect(spectate_url, ping_interval=None, max_queue=1)
+            await spectator.send(
+                json.dumps(
+                    {
+                        "type": "spectator_hello",
+                        "schema_version": 4,
+                        "payload": {
+                            "client_name": "slow",
+                            "client_version": "0",
+                            "supported_schema_versions": [4],
+                        },
+                    }
+                )
+            )
+            await spectator.recv()  # the welcome; then read nothing while it plays
+            ws0 = await connect(match["seat_0_url"])
+            ws1 = await connect(match["seat_1_url"])
+            try:
+                await asyncio.gather(
+                    play_scripted(ws0, 0, always_roll),
+                    play_scripted(ws1, 1, always_roll),
+                    return_exceptions=True,  # the match aborts at the turn cap
+                )
+            finally:
+                await ws0.close()
+                await ws1.close()
+            try:
+                while True:
+                    await spectator.recv()
+            except ConnectionClosed as closed:
+                received = closed.rcvd
+                return (received.code, received.reason) if received else (None, None)
+
+        code, reason = asyncio.run(run())
+
+    assert (code, reason) == (1000, "spectator_too_slow")
