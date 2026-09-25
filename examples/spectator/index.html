@@ -216,6 +216,13 @@
     if (t.kind === "chance") {
       return "turn " + index + " · chance · " + JSON.stringify(t.outcome);
     }
+    if (t.kind === "joint") {
+      // A simultaneous round (wire v4): both seats' actions, revealed together.
+      var parts = Object.keys(t.actions || {}).sort().map(function (seat) {
+        return "seat " + seat + " " + JSON.stringify(t.actions[seat]);
+      });
+      return "turn " + index + " · round · " + parts.join(" vs ");
+    }
     return "turn " + index + " · seat " + t.seat + " · " + JSON.stringify(t.action);
   }
 

@@ -12,6 +12,7 @@ from typing import Any
 from arena.cli.policies import HumanQuit
 from arena.cli.rendering import render_match_screen
 from arena.core.public_view import FULL_VIEW
+from arena.core.simultaneous import is_joint_node
 from arena.runtime import (
     AbortReason,
     Arena,
@@ -71,16 +72,30 @@ def play_match(
 
     while session.lifecycle is RuntimeLifecycle.RUNNING:
         _render(session, stdout, _viewer(session, human_seats))
-        try:
-            requested_session, seat = arena.request_turn(session)
-        except RuntimeStateError:
-            break
-        try:
-            session = arena.complete_turn(requested_session, seat)
-        except (HumanQuit, KeyboardInterrupt) as exc:
-            abort_reason, msg = _abort_info(exc)
-            session = arena.abort_session(requested_session, reason=abort_reason, message=msg)
-            break
+        local_match = session.local_match
+        if local_match is not None and is_joint_node(local_match.rules_engine, local_match.state):
+            # A simultaneous round (Phase 41): every acting seat chooses, then
+            # the round is applied at once. The screen is not redrawn between
+            # the seats, so an agent's choice is not shown before the other's.
+            try:
+                session = arena.step_session(session)
+            except (HumanQuit, KeyboardInterrupt) as exc:
+                abort_reason, msg = _abort_info(exc)
+                session = arena.abort_session(session, reason=abort_reason, message=msg)
+                break
+        else:
+            try:
+                requested_session, seat = arena.request_turn(session)
+            except RuntimeStateError:
+                break
+            try:
+                session = arena.complete_turn(requested_session, seat)
+            except (HumanQuit, KeyboardInterrupt) as exc:
+                abort_reason, msg = _abort_info(exc)
+                session = arena.abort_session(
+                    requested_session, reason=abort_reason, message=msg
+                )
+                break
 
         if retry_sink is not None:
             session = _drain_retry_sink(session, retry_sink)

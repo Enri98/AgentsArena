@@ -398,9 +398,45 @@ the public view, and the events and views one step later. A game that opens at a
 chance node also supplies `opening_outcomes`. See
 `build_secrets_contract_bundle()`.
 
+## Games with simultaneous moves
+
+In a simultaneous round several seats act at once, each without seeing the
+others' choice. Rock-Paper-Scissors (`src/arena/games/rps/`, with
+`tests/contract/test_rps_contract.py`) is the reference.
+
+1. Set `has_simultaneous_moves=True` on the `GameDefinition`. Registration
+   rejects the game unless both hooks below exist (and rejects the hooks
+   without the flag).
+2. On the rules engine:
+   - `acting_seats(state) -> tuple[Seat, ...]`: the seats that act now, in seat
+     order. One seat is an ordinary sequential turn; two or more make a joint
+     node. Return `()` at a terminal state.
+   - `apply_joint_action(state, actions: Mapping[Seat, Action]) -> TransitionResult`:
+     resolve the round from every acting seat's action. **Revalidate** each one,
+     as `apply_action` does.
+   - `validate_action(state, seat, action)` must accept or refuse **one** seat's
+     action on its own: the server calls it as each action arrives, so a seat is
+     told at once that its move is illegal, long before the round resolves.
+   - `apply_action` should refuse at a joint node (use `apply_joint_action`).
+   - `current_seat` keeps its signature; at a joint node return the lowest
+     acting seat. Callers that need the truth ask `acting_seats`.
+3. **Never put a seat's pending choice in state.** The round is committed as one
+   joint turn carrying every action, so nothing is ever recorded or broadcast
+   before every acting seat has chosen. That is what makes joint turns need no
+   redaction: once revealed, the actions are public. (A game whose actions must
+   stay secret even after the round would also need hidden information.)
+4. Emit an event describing the round (Rock-Paper-Scissors emits `RoundPlayed`
+   with both throws and its winner). Events are public unless you override
+   `visible_to`.
+
+The server sends each acting seat its own `observation_request` at once; each
+has its own deadline, retry budget and disconnect grace (wire v4, §8.4). The
+shared contract suite handles joint nodes: at one, it applies the bundle's
+action as every acting seat's action, so choose a `legal_action` any seat may
+play.
+
 ## Still out of scope
 
-- Simultaneous moves — Phase 41
 - More than two seats
 
 See the "v2 roadmap" section of `IMPLEMENTATION_PLAN.md`.

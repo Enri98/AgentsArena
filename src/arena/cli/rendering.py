@@ -144,6 +144,15 @@ def _render_turn_history(transcript: Mapping[str, Any]) -> str:
             outcome_str = json.dumps(turn.get("outcome"), sort_keys=True)
             lines.append(f"  #{turn['turn_index']} chance outcome={outcome_str}")
             continue
+        if turn.get("kind") == "joint":
+            # A simultaneous round (Phase 41): every acting seat's action.
+            actions = turn.get("actions") or {}
+            parts = [
+                f"seat {seat}: {json.dumps(action, sort_keys=True)}"
+                for seat, action in sorted(actions.items(), key=lambda kv: int(kv[0]))
+            ]
+            lines.append(f"  #{turn['turn_index']} joint " + "; ".join(parts))
+            continue
         action_str = json.dumps(turn["action"], sort_keys=True)
         lines.append(f"  #{turn['turn_index']} seat={turn['seat']} action={action_str}")
     return "\n".join(lines)
