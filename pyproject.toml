@@ -64,7 +64,7 @@ dev = [
     "build>=1",
     # Pinned: a new release can turn CI red with no code change (mypy warns on
     # unused ignores). Bump them deliberately, with .pre-commit-config.yaml.
-    "mypy==2.3.1",
+    "mypy==2.4.0",
     "pytest>=8",
     "pytest-timeout>=2.3",
     "ruff==0.15.7",
